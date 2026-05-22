@@ -140,14 +140,14 @@ async function monitorar() {
 
       // ── ALERTAS AO VIVO ─────────────────────────────────
 
-      // 🔵 Lay Azul — visitante marca no 1T
-      for (const p of pendFid.filter(p => p.strat === 'lay_azul' && ['1H','HT'].includes(status))) {
-        const goalsAway = f.score?.halftime?.away ?? ftA;
-        const nKey = `${fid}_lay_azul_gols_${goalsAway}`;
-        if (goalsAway > 0 && !notificados[nKey]) {
+      // 🔵 Lay Azul — visitante na frente no placar no 1T
+      for (const p of pendFid.filter(p => p.strat === 'lay_azul' && status === '1H')) {
+        const visitanteNaFrente = ftA > ftH;
+        const placar = `${ftH}x${ftA}`;
+        const nKey = `${fid}_lay_azul_${placar}`;
+        if (visitanteNaFrente && !notificados[nKey]) {
           notificados[nKey] = true;
-          const minStr = status === 'HT' ? 'HT' : `${elapsed}'`;
-          const msg = `🔵 <b>OPORTUNIDADE — Lay Azul</b>\n⚽ ${p.jogo}\n📊 Visitante marcou! ${ftH}×${ftA} · ${minStr}\n⏰ ${hora}`;
+          const msg = `🔵 <b>OPORTUNIDADE — Lay Azul</b>\n⚽ ${p.jogo}\n📊 Visitante na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`;
           await sendTelegram(msg);
         }
       }
@@ -163,6 +163,21 @@ async function monitorar() {
           notificados[nKey] = true;
           const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
           const msg = `🟣 <b>OPORTUNIDADE — Lay xG</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`;
+          await sendTelegram(msg);
+        }
+      }
+
+      // 🟣 XG Lay — time de menor xG na frente em qualquer momento do jogo
+      for (const p of pendFid.filter(p => p.strat === 'xgp_lay' && ['1H','2H','ET'].includes(status))) {
+        const layHome  = p.lay_team === 'home';
+        const layAway  = p.lay_team === 'away' || (!p.lay_team);
+        const naFrente = (layHome && ftH > ftA) || (layAway && ftA > ftH);
+        const placar   = `${ftH}x${ftA}`;
+        const nKey     = `${fid}_xgp_lay_${placar}`;
+        if (naFrente && !notificados[nKey]) {
+          notificados[nKey] = true;
+          const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
+          const msg = `🟣 <b>OPORTUNIDADE — XG Lay</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`;
           await sendTelegram(msg);
         }
       }
