@@ -1,10 +1,12 @@
 const express = require('express');
 const fetch   = require('node-fetch');
 const cors    = require('cors');
+const fs      = require('fs');
+const path    = require('path');
 
 const app  = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // ── CONFIG ────────────────────────────────────────────────
 const API_KEY    = process.env.API_FOOTBALL_KEY || '3b12a6e36710448864d5c63322ec29a4';
@@ -12,9 +14,24 @@ const TG_TOKEN   = process.env.TG_TOKEN         || '8826929533:AAH5CdY8yBf9p-2CM
 const TG_CHAT_ID = process.env.TG_CHAT_ID       || '7324646421';
 const PORT       = process.env.PORT             || 3000;
 
+// ── PERSISTÊNCIA EM ARQUIVO ───────────────────────────────
+const DATA_FILE    = path.join(__dirname, 'dados.json');
+const CUSTOM_FILE  = path.join(__dirname, 'custom.json');
+const PEND_FILE    = path.join(__dirname, 'pendentes.json');
+
+function lerArquivo(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch { return fallback; }
+}
+function salvarArquivo(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data), 'utf8');
+}
+
 // ── ESTADO ────────────────────────────────────────────────
-let pendentes   = [];   // jogos monitorados
-let notificados = {};   // controle de alertas já enviados
+let dadosHist   = lerArquivo(DATA_FILE, []);
+let customStrats= lerArquivo(CUSTOM_FILE, {});
+let pendentes   = lerArquivo(PEND_FILE, []);
+let notificados = {};
 
 // ── ESTRATÉGIAS ───────────────────────────────────────────
 const STRAT_NAMES = {
@@ -62,7 +79,6 @@ async function monitorar() {
   const pendAtivos = pendentes.filter(p => p.result === 'pendente');
   if (!pendAtivos.length) return;
 
-  // Jogos únicos
   const ids = [...new Set(pendAtivos.map(p => p.fixture_id).filter(Boolean))];
 
   for (const fid of ids) {
@@ -70,12 +86,11 @@ async function monitorar() {
       const pendFid = pendAtivos.filter(p => p.fixture_id === fid);
       const p0 = pendFid[0];
 
-      // Verificar se já deve ter começado
       const [hh, mm] = (p0.hora || '00:00').split(':').map(Number);
       const inicio = new Date(agora);
       inicio.setHours(hh, mm, 0, 0);
       const minDesdeInicio = (agora - inicio) / 60000;
-      if (minDesdeInicio < -2) continue; // ainda não começou
+      if (minDesdeInicio < -2) continue;
 
       const r = await apiFetch(`fixtures?id=${fid}`);
       const f = r?.response?.[0];
@@ -91,7 +106,6 @@ async function monitorar() {
       const htStr   = `${htH}x${htA}`;
       const hora    = agora.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
 
-      // Jogos encerrados — calcular resultado e remover
       if (['FT','AET','PEN'].includes(status)) {
         for (const p of pendFid) {
           if (p.result !== 'pendente') continue;
@@ -99,6 +113,7 @@ async function monitorar() {
           p.final  = `${ftH}x${ftA}`;
           p.ht     = htStr;
         }
+        salvarArquivo(PEND_FILE, pendentes);
         continue;
       }
 
@@ -140,7 +155,7 @@ async function monitorar() {
 
       // ── ALERTAS AO VIVO ─────────────────────────────────
 
-      // 🔵 Lay Azul — visitante na frente no placar no 1T
+      // 🔵 Lay Azul — visitante na frente no 1T
       for (const p of pendFid.filter(p => p.strat === 'lay_azul' && status === '1H')) {
         const visitanteNaFrente = ftA > ftH;
         const placar = `${ftH}x${ftA}`;
@@ -167,7 +182,7 @@ async function monitorar() {
         }
       }
 
-      // 🟣 XG Lay — time de menor xG na frente em qualquer momento do jogo
+      // 🟣 XG Lay — time de menor xG na frente em qualquer momento
       for (const p of pendFid.filter(p => p.strat === 'xgp_lay' && ['1H','2H','ET'].includes(status))) {
         const layHome  = p.lay_team === 'home';
         const layAway  = p.lay_team === 'away' || (!p.lay_team);
@@ -194,39 +209,56 @@ async function monitorar() {
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
+    registros: dadosHist.length,
     pendentes: pendentes.filter(p=>p.result==='pendente').length,
     uptime: Math.floor(process.uptime()) + 's'
   });
 });
 
-// Salvar pendentes do site
-app.post('/pendentes', (req, res) => {
-  const novos = req.body;
-  if (!Array.isArray(novos)) return res.status(400).json({error:'Array esperado'});
-
-  // Merge — atualiza existentes, adiciona novos
-  const ids = new Set(pendentes.map(p=>p.id));
-  novos.forEach(p => {
-    if (ids.has(p.id)) {
-      const idx = pendentes.findIndex(x=>x.id===p.id);
-      pendentes[idx] = {...pendentes[idx], ...p};
-    } else {
-      pendentes.push(p);
-    }
-  });
-
-  console.log(`Pendentes atualizados: ${pendentes.filter(p=>p.result==='pendente').length} ativos`);
-  res.json({ ok: true, total: pendentes.length });
+// ── DADOS HISTÓRICOS ──────────────────────────────────────
+app.get('/dados', (req, res) => {
+  res.json(dadosHist);
 });
 
-// Buscar pendentes (para sincronizar devices)
+app.post('/dados', (req, res) => {
+  const novos = req.body;
+  if (!Array.isArray(novos)) return res.status(400).json({error:'Array esperado'});
+  dadosHist = novos;
+  salvarArquivo(DATA_FILE, dadosHist);
+  console.log(`Dados salvos: ${dadosHist.length} registros`);
+  res.json({ ok: true, total: dadosHist.length });
+});
+
+// ── CUSTOM STRATS ─────────────────────────────────────────
+app.get('/custom', (req, res) => {
+  res.json(customStrats);
+});
+
+app.post('/custom', (req, res) => {
+  const novo = req.body;
+  if (typeof novo !== 'object') return res.status(400).json({error:'Objeto esperado'});
+  customStrats = novo;
+  salvarArquivo(CUSTOM_FILE, customStrats);
+  res.json({ ok: true });
+});
+
+// ── PENDENTES ─────────────────────────────────────────────
 app.get('/pendentes', (req, res) => {
   res.json(pendentes);
 });
 
-// Limpar pendentes antigos
+app.post('/pendentes', (req, res) => {
+  const novos = req.body;
+  if (!Array.isArray(novos)) return res.status(400).json({error:'Array esperado'});
+  pendentes = novos;
+  salvarArquivo(PEND_FILE, pendentes);
+  console.log(`Pendentes: ${pendentes.filter(p=>p.result==='pendente').length} ativos`);
+  res.json({ ok: true, total: pendentes.length });
+});
+
 app.delete('/pendentes/:id', (req, res) => {
   pendentes = pendentes.filter(p => p.id !== parseInt(req.params.id));
+  salvarArquivo(PEND_FILE, pendentes);
   res.json({ ok: true });
 });
 
@@ -239,11 +271,8 @@ app.post('/testar-telegram', async (req, res) => {
 // ── START ─────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`FUTATS Server rodando na porta ${PORT}`);
-  console.log('Iniciando monitoramento a cada 2 minutos...');
-
-  // Monitorar a cada 2 minutos
+  console.log(`Dados carregados: ${dadosHist.length} registros, ${pendentes.filter(p=>p.result==='pendente').length} pendentes ativos`);
+  console.log('Monitorando a cada 2 minutos...');
   setInterval(monitorar, 2 * 60 * 1000);
-
-  // Enviar mensagem de início
   sendTelegram('🚀 FUTATS Server iniciado! Monitorando jogos 24h.');
 });
