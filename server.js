@@ -14,10 +14,10 @@ const TG_TOKEN   = process.env.TG_TOKEN         || '8826929533:AAH5CdY8yBf9p-2CM
 const TG_CHAT_ID = process.env.TG_CHAT_ID       || '7324646421';
 const PORT       = process.env.PORT             || 3000;
 
-// ── PERSISTÊNCIA EM ARQUIVO ───────────────────────────────
-const DATA_FILE    = path.join(__dirname, 'dados.json');
-const CUSTOM_FILE  = path.join(__dirname, 'custom.json');
-const PEND_FILE    = path.join(__dirname, 'pendentes.json');
+// ── PERSISTÊNCIA ──────────────────────────────────────────
+const DATA_FILE   = path.join(__dirname, 'dados.json');
+const CUSTOM_FILE = path.join(__dirname, 'custom.json');
+const PEND_FILE   = path.join(__dirname, 'pendentes.json');
 
 function lerArquivo(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -28,10 +28,10 @@ function salvarArquivo(file, data) {
 }
 
 // ── ESTADO ────────────────────────────────────────────────
-let dadosHist   = lerArquivo(DATA_FILE, []);
-let customStrats= lerArquivo(CUSTOM_FILE, {});
-let pendentes   = lerArquivo(PEND_FILE, []);
-let notificados = {};
+let dadosHist    = lerArquivo(DATA_FILE, []);
+let customStrats = lerArquivo(CUSTOM_FILE, {});
+let pendentes    = lerArquivo(PEND_FILE, []);
+let notificados  = {};
 
 // ── ESTRATÉGIAS ───────────────────────────────────────────
 const STRAT_NAMES = {
@@ -51,12 +51,20 @@ const EMOJIS = {
   xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣'
 };
 
-// ── API FOOTBALL ──────────────────────────────────────────
-async function apiFetch(endpoint) {
-  const r = await fetch(`https://v3.football.api-sports.io/${endpoint}`, {
-    headers: { 'x-apisports-key': API_KEY }
-  });
-  return r.json();
+// ── HELPERS ───────────────────────────────────────────────
+function dataHoje() {
+  return new Date().toISOString().split('T')[0];
+}
+
+// Verifica se o jogo está em andamento agora (começou há menos de 2h30)
+function jogoEmAndamento(horaJogo) {
+  const agora = new Date();
+  const [hh, mm] = (horaJogo || '00:00').split(':').map(Number);
+  const inicio = new Date(agora);
+  inicio.setHours(hh, mm, 0, 0);
+  const minDesdeInicio = (agora - inicio) / 60000;
+  // Só busca se: já começou (≥ -2min de tolerância) e menos de 150min (2h30) desde o início
+  return minDesdeInicio >= -2 && minDesdeInicio <= 150;
 }
 
 // ── TELEGRAM ──────────────────────────────────────────────
@@ -67,30 +75,51 @@ async function sendTelegram(msg) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: 'HTML' })
     });
-    console.log('Telegram sent:', msg.slice(0, 60));
+    console.log('Telegram:', msg.slice(0, 60));
   } catch(e) {
     console.error('Telegram error:', e.message);
   }
 }
 
+// ── LIMPAR PENDENTES ANTIGOS ──────────────────────────────
+function limparPendentesAntigos() {
+  const hoje = dataHoje();
+  const antigos = pendentes.filter(p => p.data < hoje && p.result === 'pendente');
+  if (antigos.length > 0) {
+    pendentes = pendentes.filter(p => !(p.data < hoje && p.result === 'pendente'));
+    salvarArquivo(PEND_FILE, pendentes);
+    console.log(`🧹 Removidos ${antigos.length} pendentes de dias anteriores`);
+    sendTelegram(`🧹 ${antigos.length} jogo(s) de dias anteriores removidos automaticamente.`);
+  }
+}
+
 // ── MONITOR ───────────────────────────────────────────────
 async function monitorar() {
-  const agora = new Date();
-  const pendAtivos = pendentes.filter(p => p.result === 'pendente');
-  if (!pendAtivos.length) return;
+  // 1. Limpar pendentes de dias anteriores
+  limparPendentesAntigos();
 
+  const hoje = dataHoje();
+
+  // 2. Só pega pendentes de hoje que estão EM ANDAMENTO agora
+  const pendAtivos = pendentes.filter(p =>
+    p.result === 'pendente' &&
+    p.data === hoje &&
+    jogoEmAndamento(p.hora)
+  );
+
+  if (!pendAtivos.length) {
+    console.log('Nenhum jogo em andamento agora.');
+    return;
+  }
+
+  // 3. Jogos únicos (1 req por fixture, não por estratégia)
   const ids = [...new Set(pendAtivos.map(p => p.fixture_id).filter(Boolean))];
+  console.log(`Monitorando ${ids.length} jogo(s) em andamento (${pendAtivos.length} estratégias)...`);
 
   for (const fid of ids) {
     try {
       const pendFid = pendAtivos.filter(p => p.fixture_id === fid);
       const p0 = pendFid[0];
-
-      const [hh, mm] = (p0.hora || '00:00').split(':').map(Number);
-      const inicio = new Date(agora);
-      inicio.setHours(hh, mm, 0, 0);
-      const minDesdeInicio = (agora - inicio) / 60000;
-      if (minDesdeInicio < -2) continue;
 
       const r = await apiFetch(`fixtures?id=${fid}`);
       const f = r?.response?.[0];
@@ -104,8 +133,10 @@ async function monitorar() {
       const ftA     = f.goals.away ?? 0;
       const totHT   = htH + htA;
       const htStr   = `${htH}x${htA}`;
+      const agora   = new Date();
       const hora    = agora.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
 
+      // Jogo encerrado → marcar como resolvido
       if (['FT','AET','PEN'].includes(status)) {
         for (const p of pendFid) {
           if (p.result !== 'pendente') continue;
@@ -120,13 +151,10 @@ async function monitorar() {
       // ── ALERTAS NO HT ──────────────────────────────────
       if (status === 'HT') {
         const alertasJogo = [];
-
         for (const p of pendFid) {
           const nKey = `${fid}_${p.strat}_ht`;
           if (notificados[nKey]) continue;
-
           let deveNotificar = false;
-
           if (p.strat === 'over05' && totHT === 0) deveNotificar = true;
           else if (p.strat === 'over15' && totHT === 0) deveNotificar = true;
           else if (p.strat === 'over15l' && totHT <= 1) deveNotificar = true;
@@ -134,10 +162,8 @@ async function monitorar() {
           else if (p.strat === 'am_xg' && totHT <= 1) deveNotificar = true;
           else if (['xgp_ambas','xgp_o15','xgp_o25'].includes(p.strat) && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'xgp_u35') deveNotificar = true;
-
           if (!deveNotificar) continue;
           notificados[nKey] = true;
-
           const emoji  = EMOJIS[p.strat] || '⚪';
           const nome   = STRAT_NAMES[p.strat] || p.strat;
           const isU35  = p.strat === 'xgp_u35';
@@ -145,10 +171,8 @@ async function monitorar() {
           const oddStr = p.odd ? ` · Odd: ${parseFloat(p.odd).toFixed(2)}` : '';
           alertasJogo.push(`${emoji} <b>${acao} — ${nome}</b>${oddStr}`);
         }
-
         if (alertasJogo.length > 0) {
-          const jogo = pendFid[0].jogo;
-          const msg  = `${alertasJogo.join('\n')}\n⚽ ${jogo}\n📊 HT: ${htStr}\n⏰ ${hora}`;
+          const msg = `${alertasJogo.join('\n')}\n⚽ ${p0.jogo}\n📊 HT: ${htStr}\n⏰ ${hora}`;
           await sendTelegram(msg);
         }
       }
@@ -158,42 +182,34 @@ async function monitorar() {
       // 🔵 Lay Azul — visitante na frente no 1T
       for (const p of pendFid.filter(p => p.strat === 'lay_azul' && status === '1H')) {
         const visitanteNaFrente = ftA > ftH;
-        const placar = `${ftH}x${ftA}`;
-        const nKey = `${fid}_lay_azul_${placar}`;
+        const nKey = `${fid}_lay_azul_${ftH}x${ftA}`;
         if (visitanteNaFrente && !notificados[nKey]) {
           notificados[nKey] = true;
-          const msg = `🔵 <b>OPORTUNIDADE — Lay Azul</b>\n⚽ ${p.jogo}\n📊 Visitante na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`;
-          await sendTelegram(msg);
+          await sendTelegram(`🔵 <b>OPORTUNIDADE — Lay Azul</b>\n⚽ ${p.jogo}\n📊 Visitante na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`);
         }
       }
 
-      // 🟣 Lay xG — time de menor xG na frente até 70min
+      // 🟣 Lay xG — time menor xG na frente até 70min
       for (const p of pendFid.filter(p => p.strat === 'lay_xg' && elapsed <= 70 && ['1H','2H'].includes(status))) {
         const layHome  = p.lay_team === 'home';
-        const layAway  = p.lay_team === 'away' || (!p.lay_team);
-        const naFrente = (layHome && ftH > ftA) || (layAway && ftA > ftH);
-        const placar   = `${ftH}x${ftA}`;
-        const nKey     = `${fid}_lay_xg_${placar}`;
+        const naFrente = (layHome && ftH > ftA) || (!layHome && ftA > ftH);
+        const nKey     = `${fid}_lay_xg_${ftH}x${ftA}`;
         if (naFrente && !notificados[nKey]) {
           notificados[nKey] = true;
           const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
-          const msg = `🟣 <b>OPORTUNIDADE — Lay xG</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`;
-          await sendTelegram(msg);
+          await sendTelegram(`🟣 <b>OPORTUNIDADE — Lay xG</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`);
         }
       }
 
-      // 🟣 XG Lay — time de menor xG na frente em qualquer momento
+      // 🟣 XG Lay — time menor xG na frente qualquer momento
       for (const p of pendFid.filter(p => p.strat === 'xgp_lay' && ['1H','2H','ET'].includes(status))) {
         const layHome  = p.lay_team === 'home';
-        const layAway  = p.lay_team === 'away' || (!p.lay_team);
-        const naFrente = (layHome && ftH > ftA) || (layAway && ftA > ftH);
-        const placar   = `${ftH}x${ftA}`;
-        const nKey     = `${fid}_xgp_lay_${placar}`;
+        const naFrente = (layHome && ftH > ftA) || (!layHome && ftA > ftH);
+        const nKey     = `${fid}_xgp_lay_${ftH}x${ftA}`;
         if (naFrente && !notificados[nKey]) {
           notificados[nKey] = true;
           const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
-          const msg = `🟣 <b>OPORTUNIDADE — XG Lay</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`;
-          await sendTelegram(msg);
+          await sendTelegram(`🟣 <b>OPORTUNIDADE — XG Lay</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`);
         }
       }
 
@@ -204,55 +220,39 @@ async function monitorar() {
 }
 
 // ── ROTAS API ─────────────────────────────────────────────
-
-// Health check
 app.get('/', (req, res) => {
+  const hoje = dataHoje();
   res.json({
     status: 'ok',
     registros: dadosHist.length,
-    pendentes: pendentes.filter(p=>p.result==='pendente').length,
+    pendentes_hoje: pendentes.filter(p=>p.result==='pendente'&&p.data===hoje).length,
+    pendentes_em_andamento: pendentes.filter(p=>p.result==='pendente'&&p.data===hoje&&jogoEmAndamento(p.hora)).length,
     uptime: Math.floor(process.uptime()) + 's'
   });
 });
 
-// ── DADOS HISTÓRICOS ──────────────────────────────────────
-app.get('/dados', (req, res) => {
-  res.json(dadosHist);
-});
-
+app.get('/dados', (req, res) => { res.json(dadosHist); });
 app.post('/dados', (req, res) => {
   const novos = req.body;
   if (!Array.isArray(novos)) return res.status(400).json({error:'Array esperado'});
   dadosHist = novos;
   salvarArquivo(DATA_FILE, dadosHist);
-  console.log(`Dados salvos: ${dadosHist.length} registros`);
   res.json({ ok: true, total: dadosHist.length });
 });
 
-// ── CUSTOM STRATS ─────────────────────────────────────────
-app.get('/custom', (req, res) => {
-  res.json(customStrats);
-});
-
+app.get('/custom', (req, res) => { res.json(customStrats); });
 app.post('/custom', (req, res) => {
-  const novo = req.body;
-  if (typeof novo !== 'object') return res.status(400).json({error:'Objeto esperado'});
-  customStrats = novo;
+  customStrats = req.body;
   salvarArquivo(CUSTOM_FILE, customStrats);
   res.json({ ok: true });
 });
 
-// ── PENDENTES ─────────────────────────────────────────────
-app.get('/pendentes', (req, res) => {
-  res.json(pendentes);
-});
-
+app.get('/pendentes', (req, res) => { res.json(pendentes); });
 app.post('/pendentes', (req, res) => {
   const novos = req.body;
   if (!Array.isArray(novos)) return res.status(400).json({error:'Array esperado'});
   pendentes = novos;
   salvarArquivo(PEND_FILE, pendentes);
-  console.log(`Pendentes: ${pendentes.filter(p=>p.result==='pendente').length} ativos`);
   res.json({ ok: true, total: pendentes.length });
 });
 
@@ -262,17 +262,27 @@ app.delete('/pendentes/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// Testar Telegram
 app.post('/testar-telegram', async (req, res) => {
   await sendTelegram('✅ FUTATS Server funcionando! Alertas 24h ativos. 🎯');
   res.json({ ok: true });
 });
 
+// ── API FOOTBALL ──────────────────────────────────────────
+async function apiFetch(endpoint) {
+  const r = await fetch(`https://v3.football.api-sports.io/${endpoint}`, {
+    headers: { 'x-apisports-key': API_KEY }
+  });
+  return r.json();
+}
+
 // ── START ─────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`FUTATS Server rodando na porta ${PORT}`);
-  console.log(`Dados carregados: ${dadosHist.length} registros, ${pendentes.filter(p=>p.result==='pendente').length} pendentes ativos`);
-  console.log('Monitorando a cada 2 minutos...');
-  setInterval(monitorar, 2 * 60 * 1000);
-  sendTelegram('🚀 FUTATS Server iniciado! Monitorando jogos 24h.');
+  console.log(`FUTATS Server v2 rodando na porta ${PORT}`);
+  console.log('✅ Só monitora jogos EM ANDAMENTO (começou há menos de 2h30)');
+  console.log('✅ Limpa pendentes de dias anteriores automaticamente');
+  console.log('✅ Intervalo: 5 minutos');
+
+  limparPendentesAntigos();
+  setInterval(monitorar, 5 * 60 * 1000);
+  sendTelegram('🚀 FUTATS v2 iniciado!\n✅ Só monitora jogos em andamento\n✅ 5 min entre ciclos\n✅ Limpeza automática de pendentes antigos');
 });
