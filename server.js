@@ -219,13 +219,31 @@ async function monitorar() {
 
       // ── ALERTAS AO VIVO ─────────────────────────────────
 
+      // Buscar odds ao vivo para alertas em campo
+      let oddsLive = {};
+      try {
+        const oddsR = await apiFetch(`odds/live?fixture=${fid}`);
+        const bookmaker = oddsR?.response?.[0]?.bookmakers?.[0];
+        if (bookmaker) {
+          for (const bet of bookmaker.bets || []) {
+            if (bet.name === 'Match Winner') {
+              for (const v of bet.values || []) {
+                if (v.value === 'Home') oddsLive['home'] = v.odd;
+                if (v.value === 'Away') oddsLive['away'] = v.odd;
+              }
+            }
+          }
+        }
+      } catch(e) { console.log('Odds live indisponível'); }
+
       // 🔵 Lay Azul — visitante na frente no 1T
       for (const p of pendFid.filter(p => p.strat === 'lay_azul' && status === '1H')) {
         const visitanteNaFrente = ftA > ftH;
         const nKey = `${fid}_lay_azul_${ftH}x${ftA}`;
         if (visitanteNaFrente && !notificados[nKey]) {
           notificados[nKey] = true;
-          await sendTelegram(`🔵 <b>OPORTUNIDADE — Lay Azul</b>\n⚽ ${p.jogo}\n📊 Visitante na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`);
+          const oddVisit = oddsLive['away'] ? ` · Odd Visitante: ${parseFloat(oddsLive['away']).toFixed(2)}` : '';
+          await sendTelegram(`🔵 <b>OPORTUNIDADE — Lay Azul</b>\n⚽ ${p.jogo}\n📊 Visitante na frente! ${ftH}×${ftA} · ${elapsed}'${oddVisit}\n⏰ ${hora}`);
         }
       }
 
@@ -237,7 +255,9 @@ async function monitorar() {
         if (naFrente && !notificados[nKey]) {
           notificados[nKey] = true;
           const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
-          await sendTelegram(`🟣 <b>OPORTUNIDADE — Lay xG</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`);
+          const oddKey   = layHome ? 'home' : 'away';
+          const oddStr   = oddsLive[oddKey] ? ` · Odd: ${parseFloat(oddsLive[oddKey]).toFixed(2)}` : '';
+          await sendTelegram(`🟣 <b>OPORTUNIDADE — Lay xG</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'${oddStr}\n⏰ ${hora}`);
         }
       }
 
@@ -249,7 +269,9 @@ async function monitorar() {
         if (naFrente && !notificados[nKey]) {
           notificados[nKey] = true;
           const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
-          await sendTelegram(`🟣 <b>OPORTUNIDADE — XG Lay</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}`);
+          const oddKey   = layHome ? 'home' : 'away';
+          const oddStr   = oddsLive[oddKey] ? ` · Odd: ${parseFloat(oddsLive[oddKey]).toFixed(2)}` : '';
+          await sendTelegram(`🟣 <b>OPORTUNIDADE — XG Lay</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'${oddStr}\n⏰ ${hora}`);
         }
       }
 
@@ -320,9 +342,9 @@ app.listen(PORT, () => {
   console.log(`FUTATS Server v2 rodando na porta ${PORT}`);
   console.log('✅ Só monitora jogos EM ANDAMENTO (começou há menos de 2h30)');
   console.log('✅ Limpa pendentes de dias anteriores automaticamente');
-  console.log('✅ Intervalo: 5 minutos');
+  console.log('✅ Intervalo: 2 minutos');
 
   limparPendentesAntigos();
-  setInterval(monitorar, 5 * 60 * 1000);
-  sendTelegram('🚀 FUTATS v2 iniciado!\n✅ Só monitora jogos em andamento\n✅ 5 min entre ciclos\n✅ Limpeza automática de pendentes antigos');
+  setInterval(monitorar, 2 * 60 * 1000);
+  sendTelegram('🚀 FUTATS v2 iniciado!\n✅ Só monitora jogos em andamento\n✅ 2 min entre ciclos\n✅ Limpeza automática de pendentes antigos');
 });
