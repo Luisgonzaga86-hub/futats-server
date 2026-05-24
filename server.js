@@ -89,7 +89,6 @@ function limparPendentesAntigos() {
     pendentes = pendentes.filter(p => !(p.data < hoje && p.result === 'pendente'));
     salvarArquivo(PEND_FILE, pendentes);
     console.log(`🧹 Removidos ${antigos.length} pendentes de dias anteriores`);
-    sendTelegram(`🧹 ${antigos.length} jogo(s) de dias anteriores removidos automaticamente.`);
   }
 }
 
