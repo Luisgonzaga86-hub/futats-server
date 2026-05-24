@@ -84,11 +84,10 @@ async function sendTelegram(msg) {
 // ── LIMPAR PENDENTES ANTIGOS ──────────────────────────────
 function limparPendentesAntigos() {
   const hoje = dataHoje();
-  const antigos = pendentes.filter(p => p.data < hoje && p.result === 'pendente');
-  if (antigos.length > 0) {
-    pendentes = pendentes.filter(p => !(p.data < hoje && p.result === 'pendente'));
+  const antes = pendentes.length;
+  pendentes = pendentes.filter(p => !(p.data < hoje && p.result === 'pendente'));
+  if (pendentes.length < antes) {
     salvarArquivo(PEND_FILE, pendentes);
-    console.log(`🧹 Removidos ${antigos.length} pendentes de dias anteriores`);
   }
 }
 
