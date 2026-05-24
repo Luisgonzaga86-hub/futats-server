@@ -147,7 +147,7 @@ async function monitorar() {
       }
 
       // ── ALERTAS NO HT ──────────────────────────────────
-      if (status === 'HT' || (status === '2H' && elapsed <= 5)) {
+      if (status === 'HT' || (status === '2H' && elapsed <= 15)) {
         // Buscar odds ao vivo no HT (1 req extra por jogo com alertas)
         let oddsAoVivo = {};
         try {
@@ -240,8 +240,8 @@ async function monitorar() {
         }
       } catch(e) { console.log('Odds live indisponível'); }
 
-      // 🔵 Lay Azul — visitante na frente no 1T (só durante o 1T, nunca no HT)
-      for (const p of pendFid.filter(p => p.strat === 'lay_azul' && status === '1H' && ftA > ftH)) {
+      // 🔵 Lay Azul — visitante na frente no 1T ou início do 2T (até 15min)
+      for (const p of pendFid.filter(p => p.strat === 'lay_azul' && (status === '1H' || (status === '2H' && elapsed <= 15)) && ftA > ftH)) {
         const visitanteNaFrente = ftA > ftH;
         const nKey = `${fid}_lay_azul_${ftH}x${ftA}`;
         if (visitanteNaFrente && !notificados[nKey]) {
