@@ -148,7 +148,7 @@ async function monitorar() {
       }
 
       // ── ALERTAS NO HT ──────────────────────────────────
-      if (status === 'HT') {
+      if (status === 'HT' || (status === '2H' && elapsed <= 5)) {
         // Buscar odds ao vivo no HT (1 req extra por jogo com alertas)
         let oddsAoVivo = {};
         try {
