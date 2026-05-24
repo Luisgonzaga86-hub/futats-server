@@ -149,6 +149,45 @@ async function monitorar() {
 
       // ── ALERTAS NO HT ──────────────────────────────────
       if (status === 'HT') {
+        // Buscar odds ao vivo no HT (1 req extra por jogo com alertas)
+        let oddsAoVivo = {};
+        try {
+          const oddsR = await apiFetch(`odds/live?fixture=${fid}`);
+          const bookmaker = oddsR?.response?.[0]?.bookmakers?.[0];
+          if (bookmaker) {
+            for (const bet of bookmaker.bets || []) {
+              // Goals Over/Under
+              if (bet.name === 'Goals Over/Under') {
+                for (const v of bet.values || []) {
+                  if (v.value === 'Over 0.5') oddsAoVivo['over05'] = v.odd;
+                  if (v.value === 'Over 1.5') oddsAoVivo['over15'] = v.odd;
+                  if (v.value === 'Over 1.5') oddsAoVivo['over15l'] = v.odd;
+                  if (v.value === 'Over 2.5') oddsAoVivo['xgp_o25'] = v.odd;
+                  if (v.value === 'Over 1.5') oddsAoVivo['xgp_o15'] = v.odd;
+                }
+              }
+              // Both Teams Score
+              if (bet.name === 'Both Teams Score') {
+                for (const v of bet.values || []) {
+                  if (v.value === 'Yes') {
+                    oddsAoVivo['am']       = v.odd;
+                    oddsAoVivo['am_xg']    = v.odd;
+                    oddsAoVivo['xgp_ambas']= v.odd;
+                  }
+                }
+              }
+              // Under 3.5
+              if (bet.name === 'Goals Over/Under') {
+                for (const v of bet.values || []) {
+                  if (v.value === 'Under 3.5') oddsAoVivo['xgp_u35'] = v.odd;
+                }
+              }
+            }
+          }
+        } catch(e) {
+          console.log('Odds ao vivo indisponível:', e.message);
+        }
+
         const alertasJogo = [];
         for (const p of pendFid) {
           const nKey = `${fid}_${p.strat}_ht`;
@@ -167,7 +206,9 @@ async function monitorar() {
           const nome   = STRAT_NAMES[p.strat] || p.strat;
           const isU35  = p.strat === 'xgp_u35';
           const acao   = isU35 ? 'SAIR SE LUCRO' : 'ENTRAR';
-          const oddStr = p.odd ? ` · Odd: ${parseFloat(p.odd).toFixed(2)}` : '';
+          // Usa odd ao vivo se disponível, senão a odd cadastrada
+          const oddVal = oddsAoVivo[p.strat] || p.odd;
+          const oddStr = oddVal ? ` · Odd: ${parseFloat(oddVal).toFixed(2)}` : '';
           alertasJogo.push(`${emoji} <b>${acao} — ${nome}</b>${oddStr}`);
         }
         if (alertasJogo.length > 0) {
