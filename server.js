@@ -236,8 +236,8 @@ async function monitorar() {
         }
       } catch(e) { console.log('Odds live indisponível'); }
 
-      // 🔵 Lay Azul — visitante na frente no 1T
-      for (const p of pendFid.filter(p => p.strat === 'lay_azul' && status === '1H')) {
+      // 🔵 Lay Azul — visitante na frente no 1T (só durante o 1T, nunca no HT)
+      for (const p of pendFid.filter(p => p.strat === 'lay_azul' && status === '1H' && ftA > ftH)) {
         const visitanteNaFrente = ftA > ftH;
         const nKey = `${fid}_lay_azul_${ftH}x${ftA}`;
         if (visitanteNaFrente && !notificados[nKey]) {
