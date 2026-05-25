@@ -185,11 +185,6 @@ async function monitorar() {
               }
             }
           }
-        // Log dos mercados disponíveis para debug
-        if (bookmaker) {
-          const nomes = (bookmaker.bets || []).map(b => b.name);
-          console.log(`Odds live fixture ${fid}:`, nomes.join(', '));
-        }
         } catch(e) {
           console.log('Odds ao vivo indisponível:', e.message);
         }
