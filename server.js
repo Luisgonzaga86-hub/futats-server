@@ -46,7 +46,7 @@ const STRAT_NAMES = {
 
 const EMOJIS = {
   lay_azul:'🔵', lay_xg:'🟣', over05:'🟢', over15:'🟠', over15l:'🟠',
-  am:'🔴', am_xg:'🟤', am_limite:'🔴', gol_final:'🟡', under35:'🟡', lay_zebra:'⚪',
+  am:'🔴', am_xg:'🟤', am_limite:'🔴', gol_final:'🟡', under35:'🟡', lay_zebra:'⚪', atolada:'🟡',
   xgp_casa:'🟣', xgp_visit:'🟣', xgp_lay:'🟣', xgp_ambas:'🟣',
   xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣'
 };
@@ -227,6 +227,8 @@ async function monitorar() {
         const temLayAzul = pendFid.some(p => p.strat === 'lay_azul');
         const temOver05  = pendFid.some(p => p.strat === 'over05');
         const temLayXg   = pendFid.some(p => p.strat === 'lay_xg' || p.strat === 'xgp_lay');
+        const atoladaStrats = ['lay_azul','am','over15','am_xg','lay_xg'];
+        const temAtolada = pendFid.some(p => atoladaStrats.includes(p.strat));
 
         // Over 0.5 2T — quando Lay Azul + HT ≤ 1 gol
         if (temLayAzul && totHT <= 1) {
@@ -243,6 +245,15 @@ async function monitorar() {
           if (!notificados[nKey]) {
             notificados[nKey] = true;
             await sendTelegram(`🟠 <b>OVER 1.5 2T — considere entrar!</b>\n⚽ ${p0.jogo}\n📊 HT: ${htStr} · Lay xG + Over 0.5 cadastrados\n💡 Odd justa Betfair: abaixo de 1.87\n⏰ ${hora}`);
+          }
+        }
+
+        // 🟡 ATOLADA MASTER DO GONZA — HT 0x0 com lay_azul, am, over15, am_xg ou lay_xg
+        if (temAtolada && totHT === 0) {
+          const nKey = `${fid}_atolada_master`;
+          if (!notificados[nKey]) {
+            notificados[nKey] = true;
+            await sendTelegram(`🟡 <b>ATOLADA MASTER DO GONZA!</b>\n⚽ ${p0.jogo}\n📊 HT: 0×0\n💡 Over 0.5 2T — odd mín Betfair: 1.25\n📈 Taxa histórica: 84.3%\n⏰ ${hora}`);
           }
         }
       }
