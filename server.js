@@ -38,7 +38,7 @@ const STRAT_NAMES = {
   lay_azul:'Lay Azul', lay_xg:'Lay xG',
   over05:'Over 0.5', over15:'Over 1.5', over15l:'O1.5 LIMITE',
   am:'AM', am_xg:'AM xG',
-  under35:'Under 3.5', lay_zebra:'Lay ao CS',
+  under35:'Under 3.5', lay_zebra:'Lay ao CS', am_limite:'AM Limite', gol_final:'Gol no Final',
   xgp_casa:'XG Casa', xgp_visit:'XG Visitante', xgp_lay:'XG Lay',
   xgp_ambas:'XG Ambas', xgp_u35:'XG U3.5',
   xgp_o15:'XG O1.5', xgp_o25:'XG O2.5', xgp_o35:'XG O3.5', xgp_05ht:'XG 0.5HT'
@@ -46,7 +46,7 @@ const STRAT_NAMES = {
 
 const EMOJIS = {
   lay_azul:'🔵', lay_xg:'🟣', over05:'🟢', over15:'🟠', over15l:'🟠',
-  am:'🔴', am_xg:'🟤', under35:'🟡', lay_zebra:'⚪',
+  am:'🔴', am_xg:'🟤', am_limite:'🔴', gol_final:'🟡', under35:'🟡', lay_zebra:'⚪',
   xgp_casa:'🟣', xgp_visit:'🟣', xgp_lay:'🟣', xgp_ambas:'🟣',
   xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣'
 };
@@ -204,6 +204,7 @@ async function monitorar() {
           else if (p.strat === 'over15l' && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'am' && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'am_xg' && totHT <= 1) deveNotificar = true;
+          else if (p.strat === 'am_limite' && totHT <= 1) deveNotificar = true;
           else if (['xgp_ambas','xgp_o15','xgp_o25'].includes(p.strat) && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'xgp_u35') deveNotificar = true;
           if (!deveNotificar) continue;
@@ -220,6 +221,15 @@ async function monitorar() {
         if (alertasJogo.length > 0) {
           const msg = `${alertasJogo.join('\n')}\n⚽ ${p0.jogo}\n📊 HT: ${htStr}\n⏰ ${hora}`;
           await sendTelegram(msg);
+        }
+      }
+
+      // ── GOL NO FINAL — alerta aos 60 minutos ──────────────
+      for (const p of pendFid.filter(p => p.strat === 'under35' && ['1H','2H'].includes(status) && elapsed >= 60)) {
+        const nKey = `${fid}_gol_final_60`;
+        if (!notificados[nKey]) {
+          notificados[nKey] = true;
+          await sendTelegram(`🟡 <b>GOL NO FINAL — 60 minutos!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}\nVerifique ao vivo se entra!`);
         }
       }
 
