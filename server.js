@@ -57,12 +57,15 @@ function dataHoje() {
 }
 
 // Verifica se o jogo está em andamento agora (começou há menos de 2h30)
+// Usa horário de Brasília (UTC-3)
 function jogoEmAndamento(horaJogo) {
   const agora = new Date();
+  // Converter para horário de Brasília (UTC-3)
+  const agoraBRT = new Date(agora.getTime() - (3 * 60 * 60 * 1000));
   const [hh, mm] = (horaJogo || '00:00').split(':').map(Number);
-  const inicio = new Date(agora);
-  inicio.setHours(hh, mm, 0, 0);
-  const minDesdeInicio = (agora - inicio) / 60000;
+  const inicioBRT = new Date(agoraBRT);
+  inicioBRT.setUTCHours(hh, mm, 0, 0);
+  const minDesdeInicio = (agoraBRT - inicioBRT) / 60000;
   // Só busca se: já começou (≥ -2min de tolerância) e menos de 150min (2h30) desde o início
   return minDesdeInicio >= -2 && minDesdeInicio <= 150;
 }
