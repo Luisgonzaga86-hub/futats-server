@@ -222,6 +222,29 @@ async function monitorar() {
           const msg = `${alertasJogo.join('\n')}\n⚽ ${p0.jogo}\n📊 HT: ${htStr}\n⏰ ${hora}`;
           await sendTelegram(msg);
         }
+
+        // ── ALERTAS ESPECIAIS DE COMBINAÇÃO ──────────────
+        const temLayAzul = pendFid.some(p => p.strat === 'lay_azul');
+        const temOver05  = pendFid.some(p => p.strat === 'over05');
+        const temLayXg   = pendFid.some(p => p.strat === 'lay_xg' || p.strat === 'xgp_lay');
+
+        // Over 0.5 2T — quando Lay Azul + HT ≤ 1 gol
+        if (temLayAzul && totHT <= 1) {
+          const nKey = `${fid}_over05_2t`;
+          if (!notificados[nKey]) {
+            notificados[nKey] = true;
+            await sendTelegram(`🟢 <b>OVER 0.5 2T — considere entrar!</b>\n⚽ ${p0.jogo}\n📊 HT: ${htStr} · Lay Azul cadastrado\n💡 Odd justa Betfair: abaixo de 1.26\n⏰ ${hora}`);
+          }
+        }
+
+        // Over 1.5 2T — quando Lay xG + Over 0.5 no mesmo jogo
+        if (temLayXg && temOver05) {
+          const nKey = `${fid}_over15_2t`;
+          if (!notificados[nKey]) {
+            notificados[nKey] = true;
+            await sendTelegram(`🟠 <b>OVER 1.5 2T — considere entrar!</b>\n⚽ ${p0.jogo}\n📊 HT: ${htStr} · Lay xG + Over 0.5 cadastrados\n💡 Odd justa Betfair: abaixo de 1.87\n⏰ ${hora}`);
+          }
+        }
       }
 
       // ── GOL NO FINAL — alerta aos 60 minutos ──────────────
