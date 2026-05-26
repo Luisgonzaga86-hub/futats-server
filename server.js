@@ -237,8 +237,8 @@ async function monitorar() {
           }
         }
 
-        // Over 1.5 2T — quando Lay xG + Over 0.5 no mesmo jogo
-        if (temLayXg && temOver05) {
+        // Over 1.5 2T — quando Lay xG + Over 0.5 no mesmo jogo E HT ≤ 1 gol
+        if (temLayXg && temOver05 && totHT <= 1) {
           const nKey = `${fid}_over15_2t`;
           if (!notificados[nKey]) {
             notificados[nKey] = true;
@@ -371,6 +371,122 @@ app.delete('/pendentes/:id', (req, res) => {
   salvarArquivo(PEND_FILE, pendentes);
   res.json({ ok: true });
 });
+
+// ── SUGESTÕES — Lay Visitante Gonza ──────────────────────
+app.get('/sugestoes/lay-visitante', async (req, res) => {
+  try {
+    const hoje = dataHoje();
+    const jogos = await buscarJogosLayVisitante(hoje);
+    res.json(jogos);
+  } catch(e) {
+    console.error('Erro sugestões:', e.message);
+    res.json([]);
+  }
+});
+
+// Buscar jogos que passam nos filtros do Lay Visitante Gonza
+async function buscarJogosLayVisitante(data) {
+  const resultado = [];
+  
+  // Buscar fixtures do dia
+  const r = await apiFetch(`fixtures?date=${data}&timezone=America/Sao_Paulo`);
+  const fixtures = r?.response || [];
+  console.log(`Buscando filtros em ${fixtures.length} jogos do dia...`);
+
+  for (const f of fixtures) {
+    try {
+      const fid = f.fixture.id;
+      const homeId = f.teams.home.id;
+      const awayId = f.teams.away.id;
+      const liga = f.league.name;
+      const hora = f.fixture.date?.slice(11,16) || '';
+
+      // Buscar odds pré-jogo
+      const oddsR = await apiFetch(`odds?fixture=${fid}&bookmaker=2`);
+      const bets = oddsR?.response?.[0]?.bookmakers?.[0]?.bets || [];
+      const h2h = bets.find(b => b.name === 'Match Winner');
+      if (!h2h) continue;
+      const oddCasa = parseFloat(h2h.values?.find(v=>v.value==='Home')?.odd || 0);
+      if (!oddCasa || oddCasa < 1.01 || oddCasa > 1.60) continue;
+
+      // Buscar stats do time da casa (na temporada atual)
+      const statsR = await apiFetch(`teams/statistics?team=${homeId}&season=2025&league=${f.league.id}`);
+      const stats = statsR?.response;
+      if (!stats) continue;
+
+      // Verificar xG disponível (só ligas com cobertura)
+      const xgCasa = stats.goals?.for?.average?.home;
+      if (!xgCasa) continue; // sem xG = liga sem cobertura
+
+      // Partidas em casa
+      const partidasCasa = stats.fixtures?.played?.home || 0;
+      if (partidasCasa < 3 || partidasCasa > 38) continue;
+
+      // xG Casa ≥ 1.8
+      const xgCasaNum = parseFloat(xgCasa);
+      if (xgCasaNum < 1.8) continue;
+
+      // xGA Casa ≤ 0.90
+      const xgaCasa = parseFloat(stats.goals?.against?.average?.home || 0);
+      if (xgaCasa > 0.90) continue;
+
+      // Média gols marcados HT Casa ≤ 1.5
+      const golsHTCasa = parseFloat(stats.goals?.for?.minute?.['0-45']?.percentage || '0%') / 100 * 
+                         (stats.goals?.for?.total?.home || 0) / partidasCasa;
+      // Usar média de gols total / 2 como aproximação do HT
+      const mediaGolsCasa = parseFloat(stats.goals?.for?.average?.home || 0);
+      const mediaGolsHT = mediaGolsCasa / 2;
+      if (mediaGolsHT > 1.5) continue;
+
+      // Buscar stats do visitante
+      const statsAwayR = await apiFetch(`teams/statistics?team=${awayId}&season=2025&league=${f.league.id}`);
+      const statsAway = statsAwayR?.response;
+      if (!statsAway) continue;
+
+      // Partidas fora
+      const partidasFora = statsAway.fixtures?.played?.away || 0;
+      if (partidasFora < 3 || partidasFora > 38) continue;
+
+      // xG Fora entre 0.01 e 0.80
+      const xgFora = parseFloat(statsAway.goals?.for?.average?.away || 0);
+      if (xgFora < 0.01 || xgFora > 0.80) continue;
+
+      // xGA Fora ≥ 1.8
+      const xgaFora = parseFloat(statsAway.goals?.against?.average?.away || 0);
+      if (xgaFora < 1.8) continue;
+
+      // % Derrotas HT Casa ≤ 42.86%
+      const totalCasa = stats.fixtures?.played?.home || 1;
+      const derrotasCasa = stats.fixtures?.loses?.home || 0;
+      const pctDerrotaHT = (derrotasCasa / totalCasa) * 100;
+      if (pctDerrotaHT > 42.86) continue;
+
+      // Passou em todos os filtros!
+      resultado.push({
+        fixture_id: fid,
+        hora: hora,
+        liga: liga,
+        home: f.teams.home.name,
+        away: f.teams.away.name,
+        odd_casa: oddCasa.toFixed(2),
+        xg_casa: xgCasaNum.toFixed(2),
+        xg_fora: xgFora.toFixed(2),
+        xga_casa: xgaCasa.toFixed(2),
+        xga_fora: xgaFora.toFixed(2),
+        pct_derrota_ht: pctDerrotaHT.toFixed(1),
+        media_gols_ht: mediaGolsHT.toFixed(2),
+        partidas_casa: partidasCasa,
+        partidas_fora: partidasFora
+      });
+
+      console.log(`✅ Sugestão: ${f.teams.home.name} x ${f.teams.away.name}`);
+    } catch(e) {
+      continue;
+    }
+  }
+
+  return resultado;
+}
 
 app.post('/testar-telegram', async (req, res) => {
   await sendTelegram('✅ FUTATS Server funcionando! Alertas 24h ativos. 🎯');
