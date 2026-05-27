@@ -38,32 +38,29 @@ const STRAT_NAMES = {
   xgp_casa:'XG Casa', xgp_visit:'XG Visitante', xgp_lay:'XG Lay',
   xgp_ambas:'XG Ambas', xgp_u35:'XG U3.5',
   xgp_o15:'XG O1.5', xgp_o25:'XG O2.5', xgp_o35:'XG O3.5', xgp_05ht:'XG 0.5HT',
-  atolada:'Atolada Master'
+  atolada:'Atolada Master',
+  lay_gonza:'Lay Visit Gonza', felipe15:'Felipe Over 1.5'
 };
 
 const EMOJIS = {
   lay_azul:'🔵', lay_xg:'🟣', over05:'🟢', over15:'🟠', over15l:'🟠',
   am:'🔴', am_xg:'🟤', am_limite:'🔴', gol_final:'🟡', under35:'🟡', lay_zebra:'⚪', atolada:'🟡',
   xgp_casa:'🟣', xgp_visit:'🟣', xgp_lay:'🟣', xgp_ambas:'🟣',
-  xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣'
+  xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣',
+  lay_gonza:'🩵', felipe15:'🩷'
 };
 
 function dataHoje() {
-  // Data em BRT (UTC-3)
   const agora = new Date();
   const brt = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
   return brt.toISOString().split('T')[0];
 }
 
-// Verifica se o jogo está em andamento agora (BRT)
 function jogoEmAndamento(horaJogo, dataJogo) {
   const agora = new Date();
   const agoraBRT = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
   const hoje = agoraBRT.toISOString().split('T')[0];
-  
-  // Se o jogo é de hoje (BRT)
   if (dataJogo && dataJogo !== hoje) return false;
-
   const [hh, mm] = (horaJogo || '00:00').split(':').map(Number);
   const inicioBRT = new Date(agoraBRT);
   inicioBRT.setUTCHours(hh, mm, 0, 0);
@@ -146,6 +143,29 @@ async function monitorar() {
         continue;
       }
 
+      // ── BUSCAR ESTATÍSTICAS AO VIVO (para Felipe Over 1.5 e Lay Gonza) ──────
+      const temFelipe = pendFid.some(p => p.strat === 'felipe15');
+      const temGonza  = pendFid.some(p => p.strat === 'lay_gonza');
+      let statsAoVivo = null;
+
+      if ((temFelipe || temGonza) && ['1H','2H'].includes(status)) {
+        try {
+          const sR = await apiFetch(`fixtures/statistics?fixture=${fid}`);
+          statsAoVivo = sR?.response || [];
+        } catch(e) {}
+      }
+
+      // Extrair chutes no gol por time
+      let chutesGolCasa = 0, chutesGolVisit = 0;
+      if (statsAoVivo) {
+        for (const ts of statsAoVivo) {
+          const isHome = ts.team.id === f.teams.home.id;
+          const shots = ts.statistics?.find(s => s.type === 'Shots on Goal');
+          if (isHome) chutesGolCasa = parseInt(shots?.value || 0);
+          else chutesGolVisit = parseInt(shots?.value || 0);
+        }
+      }
+
       // ── ALERTAS NO HT ──────────────────────────────────
       const emSegundoTempo = ['2H','ET'].includes(status);
       if (status === 'HT' || emSegundoTempo) {
@@ -158,7 +178,7 @@ async function monitorar() {
               if (bet.name === 'Goals Over/Under') {
                 for (const v of bet.values || []) {
                   if (v.value === 'Over 0.5') oddsAoVivo['over05'] = v.odd;
-                  if (v.value === 'Over 1.5') { oddsAoVivo['over15'] = v.odd; oddsAoVivo['over15l'] = v.odd; oddsAoVivo['xgp_o15'] = v.odd; }
+                  if (v.value === 'Over 1.5') { oddsAoVivo['over15'] = v.odd; oddsAoVivo['over15l'] = v.odd; oddsAoVivo['xgp_o15'] = v.odd; oddsAoVivo['felipe15'] = v.odd; }
                   if (v.value === 'Over 2.5') oddsAoVivo['xgp_o25'] = v.odd;
                   if (v.value === 'Under 3.5') oddsAoVivo['xgp_u35'] = v.odd;
                 }
@@ -168,9 +188,14 @@ async function monitorar() {
                   if (v.value === 'Yes') { oddsAoVivo['am'] = v.odd; oddsAoVivo['am_xg'] = v.odd; oddsAoVivo['xgp_ambas'] = v.odd; }
                 }
               }
+              if (bet.name === 'Match Winner') {
+                for (const v of bet.values || []) {
+                  if (v.value === 'Away') oddsAoVivo['lay_gonza'] = v.odd;
+                }
+              }
             }
           }
-        } catch(e) { console.log('Odds ao vivo indisponível'); }
+        } catch(e) {}
 
         const alertasJogo = [];
         for (const p of pendFid) {
@@ -185,6 +210,8 @@ async function monitorar() {
           else if (p.strat === 'am_limite' && totHT <= 1) deveNotificar = true;
           else if (['xgp_ambas','xgp_o15','xgp_o25'].includes(p.strat) && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'xgp_u35') deveNotificar = true;
+          // Felipe Over 1.5 — HT 0x0 com ≥4 chutes no gol total
+          else if (p.strat === 'felipe15' && totHT === 0 && (chutesGolCasa + chutesGolVisit) >= 4) deveNotificar = true;
           if (!deveNotificar) continue;
           notificados[nKey] = true;
           const emoji  = EMOJIS[p.strat] || '⚪';
@@ -193,7 +220,8 @@ async function monitorar() {
           const acao   = isU35 ? 'SAIR SE LUCRO' : 'ENTRAR';
           const oddVal = oddsAoVivo[p.strat] || p.odd;
           const oddStr = oddVal ? ` · Odd: ${parseFloat(oddVal).toFixed(2)}` : '';
-          alertasJogo.push(`${emoji} <b>${acao} — ${nome}</b>${oddStr}`);
+          const extraInfo = p.strat === 'felipe15' ? ` · 🎯 Chutes: ${chutesGolCasa}C+${chutesGolVisit}V=${chutesGolCasa+chutesGolVisit}` : '';
+          alertasJogo.push(`${emoji} <b>${acao} — ${nome}</b>${oddStr}${extraInfo}`);
         }
         if (alertasJogo.length > 0) {
           await sendTelegram(`${alertasJogo.join('\n')}\n⚽ ${p0.jogo}\n📊 HT: ${htStr}\n⏰ ${hora}`);
@@ -228,6 +256,16 @@ async function monitorar() {
             await sendTelegram(`🟡 <b>ATOLADA MASTER DO GONZA!</b>\n⚽ ${p0.jogo}\n📊 HT: 0×0\n💡 Over 0.5 2T — odd mín Betfair: 1.25\n📈 Taxa histórica: 84.3%\n⏰ ${hora}`);
           }
         }
+
+        // ── LAY VISITANTE GONZA — HT: visitante na frente ──
+        for (const p of pendFid.filter(p => p.strat === 'lay_gonza' && status === 'HT' && ftA > ftH)) {
+          const nKey = `${fid}_lay_gonza_ht`;
+          if (!notificados[nKey]) {
+            notificados[nKey] = true;
+            const oddVisit = oddsAoVivo['lay_gonza'] ? ` · Odd Visit: ${parseFloat(oddsAoVivo['lay_gonza']).toFixed(2)}` : '';
+            await sendTelegram(`🩵 <b>LAY VISIT GONZA — Considere Gol Limite 2T!</b>\n⚽ ${p.jogo}\n📊 HT: ${htStr} · Visitante na frente${oddVisit}\n⏰ ${hora}`);
+          }
+        }
       }
 
       // ── GOL NO FINAL — alerta aos 60 minutos ──────────────
@@ -235,13 +273,6 @@ async function monitorar() {
         const nKey = `${fid}_gol_final_60`;
         if (!notificados[nKey]) {
           notificados[nKey] = true;
-          const golsAtual = ftH + ftA;
-          const golsNoHT = htH + htA;
-          const golsApos = golsAtual - golsNoHT;
-          // Se já houve gol após o HT, marcar green automaticamente
-          if (golsApos > 0 && status === '2H') {
-            p.gol_apos_alerta = true;
-          }
           await sendTelegram(`🟡 <b>GOL NO FINAL — 60 minutos!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}\nVerifique ao vivo se entra!`);
         }
       }
@@ -301,6 +332,26 @@ async function monitorar() {
         }
       }
 
+      // 🩵 LAY VISITANTE GONZA — visitante marcou primeiro (1T)
+      for (const p of pendFid.filter(p => p.strat === 'lay_gonza' && status === '1H' && ftA > ftH)) {
+        const nKey = `${fid}_lay_gonza_${ftH}x${ftA}`;
+        if (!notificados[nKey]) {
+          notificados[nKey] = true;
+          const oddVisit = oddsLive['away'] ? ` · Odd Visit: ${parseFloat(oddsLive['away']).toFixed(2)}` : '';
+          await sendTelegram(`🩵 <b>LAY VISIT GONZA — Visitante marcou primeiro!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'${oddVisit}\n💡 Aguarde HT para Gol Limite 2T\n⏰ ${hora}`);
+        }
+      }
+
+      // 🩷 FELIPE OVER 1.5 — aos 20 min com 1+ chute no gol de cada time
+      for (const p of pendFid.filter(p => p.strat === 'felipe15' && status === '1H' && elapsed >= 18 && elapsed <= 22 && ftH === 0 && ftA === 0)) {
+        const nKey = `${fid}_felipe15_20min`;
+        if (!notificados[nKey] && chutesGolCasa >= 1 && chutesGolVisit >= 1) {
+          notificados[nKey] = true;
+          const oddOver = oddsLive['home'] ? ` · Odd Over 1.5: verifique` : '';
+          await sendTelegram(`🩷 <b>FELIPE OVER 1.5 — Condição atingida aos ${elapsed}'!</b>\n⚽ ${p.jogo}\n📊 0×0 · 🎯 Chutes gol: ${chutesGolCasa}C + ${chutesGolVisit}V\n💡 Considere entrar no Over 1.5\n⏰ ${hora}`);
+        }
+      }
+
     } catch(e) { console.error(`Erro fixture ${fid}:`, e.message); }
   }
 }
@@ -341,20 +392,22 @@ app.delete('/pendentes/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// ── SUGESTÕES — Lay Visitante Gonza ──────────────────────
+// ── SUGESTÕES ─────────────────────────────────────────────
 app.get('/sugestoes/lay-visitante', async (req, res) => {
-  try {
-    const hoje = dataHoje();
-    const jogos = await buscarJogosLayVisitante(hoje);
-    res.json(jogos);
-  } catch(e) { console.error('Erro sugestões:', e.message); res.json([]); }
+  try { res.json(await buscarJogosLayVisitante(dataHoje())); }
+  catch(e) { res.json([]); }
+});
+
+app.get('/sugestoes/felipe15', async (req, res) => {
+  try { res.json(await buscarJogosFelipe15(dataHoje())); }
+  catch(e) { res.json([]); }
 });
 
 async function buscarJogosLayVisitante(data) {
   const resultado = [];
   const r = await apiFetch(`fixtures?date=${data}&timezone=America/Sao_Paulo`);
   const fixtures = r?.response || [];
-  console.log(`Buscando filtros em ${fixtures.length} jogos do dia...`);
+  console.log(`Lay Gonza: buscando em ${fixtures.length} jogos...`);
 
   for (const f of fixtures) {
     try {
@@ -372,55 +425,88 @@ async function buscarJogosLayVisitante(data) {
       const statsR = await apiFetch(`teams/statistics?team=${homeId}&season=2025&league=${f.league.id}`);
       const stats = statsR?.response;
       if (!stats) continue;
-
       const xgCasa = stats.goals?.for?.average?.home;
       if (!xgCasa) continue;
-
       const partidasCasa = stats.fixtures?.played?.home || 0;
       if (partidasCasa < 3 || partidasCasa > 38) continue;
-
       const xgCasaNum = parseFloat(xgCasa);
       if (xgCasaNum < 1.8) continue;
-
       const xgaCasa = parseFloat(stats.goals?.against?.average?.home || 0);
       if (xgaCasa > 0.90) continue;
-
       const mediaGolsHT = parseFloat(stats.goals?.for?.average?.home || 0) / 2;
       if (mediaGolsHT > 1.5) continue;
+      const pctDerrotaHT = ((stats.fixtures?.loses?.home || 0) / (stats.fixtures?.played?.home || 1)) * 100;
+      if (pctDerrotaHT > 42.86) continue;
+
+      const statsAwayR = await apiFetch(`teams/statistics?team=${awayId}&season=2025&league=${f.league.id}`);
+      const statsAway = statsAwayR?.response;
+      if (!statsAway) continue;
+      const partidasFora = statsAway.fixtures?.played?.away || 0;
+      if (partidasFora < 3 || partidasFora > 38) continue;
+      const xgFora = parseFloat(statsAway.goals?.for?.average?.away || 0);
+      if (xgFora < 0.01 || xgFora > 0.80) continue;
+      const xgaFora = parseFloat(statsAway.goals?.against?.average?.away || 0);
+      if (xgaFora < 1.8) continue;
+
+      resultado.push({
+        fixture_id: fid, hora: f.fixture.date?.slice(11,16) || '',
+        liga: f.league.name, home: f.teams.home.name, away: f.teams.away.name,
+        odd_casa: oddCasa.toFixed(2), xg_casa: xgCasaNum.toFixed(2), xg_fora: xgFora.toFixed(2),
+        xga_casa: xgaCasa.toFixed(2), xga_fora: xgaFora.toFixed(2),
+        pct_derrota_ht: pctDerrotaHT.toFixed(1), media_gols_ht: mediaGolsHT.toFixed(2),
+        partidas_casa: partidasCasa, partidas_fora: partidasFora
+      });
+    } catch(e) { continue; }
+  }
+  return resultado;
+}
+
+async function buscarJogosFelipe15(data) {
+  const resultado = [];
+  const r = await apiFetch(`fixtures?date=${data}&timezone=America/Sao_Paulo`);
+  const fixtures = r?.response || [];
+  console.log(`Felipe15: buscando em ${fixtures.length} jogos...`);
+
+  for (const f of fixtures) {
+    try {
+      const fid = f.fixture.id;
+      const homeId = f.teams.home.id;
+      const awayId = f.teams.away.id;
+
+      const statsR = await apiFetch(`teams/statistics?team=${homeId}&season=2025&league=${f.league.id}`);
+      const stats = statsR?.response;
+      if (!stats) continue;
+      // Verificar se tem xG (liga com cobertura)
+      if (!stats.goals?.for?.average?.home) continue;
+
+      const mediaGolsCasa = parseFloat(stats.goals?.for?.average?.home || 0);
+      const mediaGolsSofCasa = parseFloat(stats.goals?.against?.average?.home || 0);
+      if (mediaGolsCasa < 1.2 || mediaGolsCasa > 6) continue;
+      if (mediaGolsSofCasa < 1 || mediaGolsSofCasa > 5) continue;
 
       const statsAwayR = await apiFetch(`teams/statistics?team=${awayId}&season=2025&league=${f.league.id}`);
       const statsAway = statsAwayR?.response;
       if (!statsAway) continue;
 
-      const partidasFora = statsAway.fixtures?.played?.away || 0;
-      if (partidasFora < 3 || partidasFora > 38) continue;
+      const mediaGolsFora = parseFloat(statsAway.goals?.for?.average?.away || 0);
+      const mediaGolsSofFora = parseFloat(statsAway.goals?.against?.average?.away || 0);
+      if (mediaGolsFora < 1.1 || mediaGolsFora > 5) continue;
+      if (mediaGolsSofFora < 1 || mediaGolsSofFora > 6) continue;
 
+      // xG Casa e xG Fora
+      const xgCasa = parseFloat(stats.goals?.for?.average?.home || 0);
       const xgFora = parseFloat(statsAway.goals?.for?.average?.away || 0);
-      if (xgFora < 0.01 || xgFora > 0.80) continue;
-
-      const xgaFora = parseFloat(statsAway.goals?.against?.average?.away || 0);
-      if (xgaFora < 1.8) continue;
-
-      const pctDerrotaHT = ((stats.fixtures?.loses?.home || 0) / (stats.fixtures?.played?.home || 1)) * 100;
-      if (pctDerrotaHT > 42.86) continue;
+      const xgTotal = xgCasa + xgFora;
+      if (xgCasa < 1.2 || xgFora < 1.0) continue;
+      if (xgTotal < 2.26) continue;
 
       resultado.push({
-        fixture_id: fid,
-        hora: f.fixture.date?.slice(11,16) || '',
-        liga: f.league.name,
-        home: f.teams.home.name,
-        away: f.teams.away.name,
-        odd_casa: oddCasa.toFixed(2),
-        xg_casa: xgCasaNum.toFixed(2),
-        xg_fora: xgFora.toFixed(2),
-        xga_casa: xgaCasa.toFixed(2),
-        xga_fora: xgaFora.toFixed(2),
-        pct_derrota_ht: pctDerrotaHT.toFixed(1),
-        media_gols_ht: mediaGolsHT.toFixed(2),
-        partidas_casa: partidasCasa,
-        partidas_fora: partidasFora
+        fixture_id: fid, hora: f.fixture.date?.slice(11,16) || '',
+        liga: f.league.name, home: f.teams.home.name, away: f.teams.away.name,
+        xg_casa: xgCasa.toFixed(2), xg_fora: xgFora.toFixed(2), xg_total: xgTotal.toFixed(2),
+        media_gols_casa: mediaGolsCasa.toFixed(2), media_gols_fora: mediaGolsFora.toFixed(2),
+        media_sof_casa: mediaGolsSofCasa.toFixed(2), media_sof_fora: mediaGolsSofFora.toFixed(2)
       });
-      console.log(`✅ Sugestão: ${f.teams.home.name} x ${f.teams.away.name}`);
     } catch(e) { continue; }
   }
   return resultado;
@@ -433,10 +519,9 @@ app.post('/testar-telegram', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`FUTATS Server v2 rodando na porta ${PORT}`);
-  console.log('✅ Fuso BRT corrigido — jogos 21h+ notificam corretamente');
-  console.log('✅ Gol no Final separado do Under 3.5');
+  console.log('✅ Lay Visitante Gonza + Felipe Over 1.5 ativos');
   console.log('✅ Intervalo: 2 minutos');
   limparPendentesAntigos();
   setInterval(monitorar, 2 * 60 * 1000);
-  sendTelegram('🚀 FUTATS v2 iniciado!\n✅ Fuso BRT corrigido\n✅ 2 min entre ciclos');
+  sendTelegram('🚀 FUTATS v2 iniciado!\n✅ Lay Gonza + Felipe15 ativos\n✅ 2 min entre ciclos');
 });
