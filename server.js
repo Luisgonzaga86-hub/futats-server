@@ -8,13 +8,11 @@ const app  = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// ── CONFIG ────────────────────────────────────────────────
 const API_KEY    = process.env.API_FOOTBALL_KEY || '3b12a6e36710448864d5c63322ec29a4';
 const TG_TOKEN   = process.env.TG_TOKEN         || '8826929533:AAH5CdY8yBf9p-2CM-JDYLz_ppu7bkxN5wQ';
 const TG_CHAT_ID = process.env.TG_CHAT_ID       || '7324646421';
 const PORT       = process.env.PORT             || 3000;
 
-// ── PERSISTÊNCIA ──────────────────────────────────────────
 const DATA_FILE   = path.join(__dirname, 'dados.json');
 const CUSTOM_FILE = path.join(__dirname, 'custom.json');
 const PEND_FILE   = path.join(__dirname, 'pendentes.json');
@@ -27,21 +25,20 @@ function salvarArquivo(file, data) {
   fs.writeFileSync(file, JSON.stringify(data), 'utf8');
 }
 
-// ── ESTADO ────────────────────────────────────────────────
 let dadosHist    = lerArquivo(DATA_FILE, []);
 let customStrats = lerArquivo(CUSTOM_FILE, {});
 let pendentes    = lerArquivo(PEND_FILE, []);
 let notificados  = {};
 
-// ── ESTRATÉGIAS ───────────────────────────────────────────
 const STRAT_NAMES = {
   lay_azul:'Lay Azul', lay_xg:'Lay xG',
   over05:'Over 0.5', over15:'Over 1.5', over15l:'O1.5 LIMITE',
   am:'AM', am_xg:'AM xG',
-  under35:'Under 3.5', lay_zebra:'Lay ao CS', am_limite:'AM Limite', gol_final:'Gol no Final',
+  under35:'Gol no Final', lay_zebra:'Lay ao CS', am_limite:'AM Limite', gol_final:'Gol no Final',
   xgp_casa:'XG Casa', xgp_visit:'XG Visitante', xgp_lay:'XG Lay',
   xgp_ambas:'XG Ambas', xgp_u35:'XG U3.5',
-  xgp_o15:'XG O1.5', xgp_o25:'XG O2.5', xgp_o35:'XG O3.5', xgp_05ht:'XG 0.5HT'
+  xgp_o15:'XG O1.5', xgp_o25:'XG O2.5', xgp_o35:'XG O3.5', xgp_05ht:'XG 0.5HT',
+  atolada:'Atolada Master'
 };
 
 const EMOJIS = {
@@ -51,26 +48,29 @@ const EMOJIS = {
   xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣'
 };
 
-// ── HELPERS ───────────────────────────────────────────────
 function dataHoje() {
-  return new Date().toISOString().split('T')[0];
+  // Data em BRT (UTC-3)
+  const agora = new Date();
+  const brt = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
+  return brt.toISOString().split('T')[0];
 }
 
-// Verifica se o jogo está em andamento agora (começou há menos de 2h30)
-// Usa horário de Brasília (UTC-3)
-function jogoEmAndamento(horaJogo) {
+// Verifica se o jogo está em andamento agora (BRT)
+function jogoEmAndamento(horaJogo, dataJogo) {
   const agora = new Date();
-  // Converter para horário de Brasília (UTC-3)
-  const agoraBRT = new Date(agora.getTime() - (3 * 60 * 60 * 1000));
+  const agoraBRT = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
+  const hoje = agoraBRT.toISOString().split('T')[0];
+  
+  // Se o jogo é de hoje (BRT)
+  if (dataJogo && dataJogo !== hoje) return false;
+
   const [hh, mm] = (horaJogo || '00:00').split(':').map(Number);
   const inicioBRT = new Date(agoraBRT);
   inicioBRT.setUTCHours(hh, mm, 0, 0);
   const minDesdeInicio = (agoraBRT - inicioBRT) / 60000;
-  // Só busca se: já começou (≥ -2min de tolerância) e menos de 150min (2h30) desde o início
   return minDesdeInicio >= -2 && minDesdeInicio <= 150;
 }
 
-// ── TELEGRAM ──────────────────────────────────────────────
 async function sendTelegram(msg) {
   try {
     await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
@@ -79,33 +79,31 @@ async function sendTelegram(msg) {
       body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: 'HTML' })
     });
     console.log('Telegram:', msg.slice(0, 60));
-  } catch(e) {
-    console.error('Telegram error:', e.message);
-  }
+  } catch(e) { console.error('Telegram error:', e.message); }
 }
 
-// ── LIMPAR PENDENTES ANTIGOS ──────────────────────────────
 function limparPendentesAntigos() {
   const hoje = dataHoje();
   const antes = pendentes.length;
   pendentes = pendentes.filter(p => !(p.data < hoje && p.result === 'pendente'));
-  if (pendentes.length < antes) {
-    salvarArquivo(PEND_FILE, pendentes);
-  }
+  if (pendentes.length < antes) salvarArquivo(PEND_FILE, pendentes);
 }
 
-// ── MONITOR ───────────────────────────────────────────────
-async function monitorar() {
-  // 1. Limpar pendentes de dias anteriores
-  limparPendentesAntigos();
+async function apiFetch(endpoint) {
+  const r = await fetch(`https://v3.football.api-sports.io/${endpoint}`, {
+    headers: { 'x-apisports-key': API_KEY }
+  });
+  return r.json();
+}
 
+async function monitorar() {
+  limparPendentesAntigos();
   const hoje = dataHoje();
 
-  // 2. Só pega pendentes de hoje que estão EM ANDAMENTO agora
   const pendAtivos = pendentes.filter(p =>
     p.result === 'pendente' &&
     p.data === hoje &&
-    jogoEmAndamento(p.hora)
+    jogoEmAndamento(p.hora, p.data)
   );
 
   if (!pendAtivos.length) {
@@ -113,7 +111,6 @@ async function monitorar() {
     return;
   }
 
-  // 3. Jogos únicos (1 req por fixture, não por estratégia)
   const ids = [...new Set(pendAtivos.map(p => p.fixture_id).filter(Boolean))];
   console.log(`Monitorando ${ids.length} jogo(s) em andamento (${pendAtivos.length} estratégias)...`);
 
@@ -134,10 +131,10 @@ async function monitorar() {
       const ftA     = f.goals.away ?? 0;
       const totHT   = htH + htA;
       const htStr   = `${htH}x${htA}`;
-      const agora   = new Date();
-      const hora    = agora.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
+      const agoraBRT = new Date(new Date().getTime() - 3*60*60*1000);
+      const hora    = agoraBRT.toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
 
-      // Jogo encerrado → marcar como resolvido
+      // Jogo encerrado
       if (['FT','AET','PEN'].includes(status)) {
         for (const p of pendFid) {
           if (p.result !== 'pendente') continue;
@@ -150,47 +147,30 @@ async function monitorar() {
       }
 
       // ── ALERTAS NO HT ──────────────────────────────────
-      // Notifica no HT ou em qualquer momento do 2T (usando placar do HT salvo)
       const emSegundoTempo = ['2H','ET'].includes(status);
       if (status === 'HT' || emSegundoTempo) {
-        // Buscar odds ao vivo no HT (1 req extra por jogo com alertas)
         let oddsAoVivo = {};
         try {
           const oddsR = await apiFetch(`odds/live?fixture=${fid}`);
           const bookmaker = oddsR?.response?.[0]?.bookmakers?.[0];
           if (bookmaker) {
             for (const bet of bookmaker.bets || []) {
-              // Goals Over/Under
               if (bet.name === 'Goals Over/Under') {
                 for (const v of bet.values || []) {
                   if (v.value === 'Over 0.5') oddsAoVivo['over05'] = v.odd;
-                  if (v.value === 'Over 1.5') oddsAoVivo['over15'] = v.odd;
-                  if (v.value === 'Over 1.5') oddsAoVivo['over15l'] = v.odd;
+                  if (v.value === 'Over 1.5') { oddsAoVivo['over15'] = v.odd; oddsAoVivo['over15l'] = v.odd; oddsAoVivo['xgp_o15'] = v.odd; }
                   if (v.value === 'Over 2.5') oddsAoVivo['xgp_o25'] = v.odd;
-                  if (v.value === 'Over 1.5') oddsAoVivo['xgp_o15'] = v.odd;
+                  if (v.value === 'Under 3.5') oddsAoVivo['xgp_u35'] = v.odd;
                 }
               }
-              // Both Teams Score
               if (bet.name === 'Both Teams Score') {
                 for (const v of bet.values || []) {
-                  if (v.value === 'Yes') {
-                    oddsAoVivo['am']       = v.odd;
-                    oddsAoVivo['am_xg']    = v.odd;
-                    oddsAoVivo['xgp_ambas']= v.odd;
-                  }
-                }
-              }
-              // Under 3.5
-              if (bet.name === 'Goals Over/Under') {
-                for (const v of bet.values || []) {
-                  if (v.value === 'Under 3.5') oddsAoVivo['xgp_u35'] = v.odd;
+                  if (v.value === 'Yes') { oddsAoVivo['am'] = v.odd; oddsAoVivo['am_xg'] = v.odd; oddsAoVivo['xgp_ambas'] = v.odd; }
                 }
               }
             }
           }
-        } catch(e) {
-          console.log('Odds ao vivo indisponível:', e.message);
-        }
+        } catch(e) { console.log('Odds ao vivo indisponível'); }
 
         const alertasJogo = [];
         for (const p of pendFid) {
@@ -211,24 +191,20 @@ async function monitorar() {
           const nome   = STRAT_NAMES[p.strat] || p.strat;
           const isU35  = p.strat === 'xgp_u35';
           const acao   = isU35 ? 'SAIR SE LUCRO' : 'ENTRAR';
-          // Usa odd ao vivo se disponível, senão a odd cadastrada
           const oddVal = oddsAoVivo[p.strat] || p.odd;
           const oddStr = oddVal ? ` · Odd: ${parseFloat(oddVal).toFixed(2)}` : '';
           alertasJogo.push(`${emoji} <b>${acao} — ${nome}</b>${oddStr}`);
         }
         if (alertasJogo.length > 0) {
-          const msg = `${alertasJogo.join('\n')}\n⚽ ${p0.jogo}\n📊 HT: ${htStr}\n⏰ ${hora}`;
-          await sendTelegram(msg);
+          await sendTelegram(`${alertasJogo.join('\n')}\n⚽ ${p0.jogo}\n📊 HT: ${htStr}\n⏰ ${hora}`);
         }
 
-        // ── ALERTAS ESPECIAIS DE COMBINAÇÃO ──────────────
+        // ── ALERTAS ESPECIAIS ──────────────────────────────
         const temLayAzul = pendFid.some(p => p.strat === 'lay_azul');
         const temOver05  = pendFid.some(p => p.strat === 'over05');
         const temLayXg   = pendFid.some(p => p.strat === 'lay_xg' || p.strat === 'xgp_lay');
-        const atoladaStrats = ['lay_azul','am','over15','am_xg','lay_xg'];
-        const temAtolada = pendFid.some(p => atoladaStrats.includes(p.strat));
+        const temAtolada = pendFid.some(p => ['lay_azul','am','over15','am_xg','lay_xg'].includes(p.strat));
 
-        // Over 0.5 2T — quando Lay Azul + HT ≤ 1 gol
         if (temLayAzul && totHT <= 1) {
           const nKey = `${fid}_over05_2t`;
           if (!notificados[nKey]) {
@@ -237,16 +213,14 @@ async function monitorar() {
           }
         }
 
-        // Over 1.5 2T — quando Lay xG + Over 0.5 no mesmo jogo E HT ≤ 1 gol
         if (temLayXg && temOver05 && totHT <= 1) {
           const nKey = `${fid}_over15_2t`;
           if (!notificados[nKey]) {
             notificados[nKey] = true;
-            await sendTelegram(`🟠 <b>OVER 1.5 2T — considere entrar!</b>\n⚽ ${p0.jogo}\n📊 HT: ${htStr} · Lay xG + Over 0.5 cadastrados\n💡 Odd justa Betfair: abaixo de 1.87\n⏰ ${hora}`);
+            await sendTelegram(`🟠 <b>OVER 1.5 2T — considere entrar!</b>\n⚽ ${p0.jogo}\n📊 HT: ${htStr} · Lay xG + Over 0.5\n💡 Odd justa Betfair: abaixo de 1.87\n⏰ ${hora}`);
           }
         }
 
-        // 🟡 ATOLADA MASTER DO GONZA — HT 0x0 com lay_azul, am, over15, am_xg ou lay_xg
         if (temAtolada && totHT === 0) {
           const nKey = `${fid}_atolada_master`;
           if (!notificados[nKey]) {
@@ -257,17 +231,22 @@ async function monitorar() {
       }
 
       // ── GOL NO FINAL — alerta aos 60 minutos ──────────────
-      for (const p of pendFid.filter(p => p.strat === 'under35' && ['1H','2H'].includes(status) && elapsed >= 60)) {
+      for (const p of pendFid.filter(p => (p.strat === 'under35' || p.strat === 'gol_final') && ['1H','2H'].includes(status) && elapsed >= 60)) {
         const nKey = `${fid}_gol_final_60`;
         if (!notificados[nKey]) {
           notificados[nKey] = true;
+          const golsAtual = ftH + ftA;
+          const golsNoHT = htH + htA;
+          const golsApos = golsAtual - golsNoHT;
+          // Se já houve gol após o HT, marcar green automaticamente
+          if (golsApos > 0 && status === '2H') {
+            p.gol_apos_alerta = true;
+          }
           await sendTelegram(`🟡 <b>GOL NO FINAL — 60 minutos!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}\nVerifique ao vivo se entra!`);
         }
       }
 
       // ── ALERTAS AO VIVO ─────────────────────────────────
-
-      // Buscar odds ao vivo para alertas em campo
       let oddsLive = {};
       try {
         const oddsR = await apiFetch(`odds/live?fixture=${fid}`);
@@ -282,20 +261,19 @@ async function monitorar() {
             }
           }
         }
-      } catch(e) { console.log('Odds live indisponível'); }
+      } catch(e) {}
 
-      // 🔵 Lay Azul — visitante na frente no 1T ou início do 2T (até 15min)
+      // 🔵 Lay Azul
       for (const p of pendFid.filter(p => p.strat === 'lay_azul' && (status === '1H' || status === '2H') && ftA > ftH)) {
-        const visitanteNaFrente = ftA > ftH;
         const nKey = `${fid}_lay_azul_${ftH}x${ftA}`;
-        if (visitanteNaFrente && !notificados[nKey]) {
+        if (!notificados[nKey]) {
           notificados[nKey] = true;
           const oddVisit = oddsLive['away'] ? ` · Odd Visitante: ${parseFloat(oddsLive['away']).toFixed(2)}` : '';
           await sendTelegram(`🔵 <b>OPORTUNIDADE — Lay Azul</b>\n⚽ ${p.jogo}\n📊 Visitante na frente! ${ftH}×${ftA} · ${elapsed}'${oddVisit}\n⏰ ${hora}`);
         }
       }
 
-      // 🟣 Lay xG — time menor xG na frente até 70min
+      // 🟣 Lay xG
       for (const p of pendFid.filter(p => p.strat === 'lay_xg' && elapsed <= 70 && ['1H','2H'].includes(status))) {
         const layHome  = p.lay_team === 'home';
         const naFrente = (layHome && ftH > ftA) || (!layHome && ftA > ftH);
@@ -303,13 +281,13 @@ async function monitorar() {
         if (naFrente && !notificados[nKey]) {
           notificados[nKey] = true;
           const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
-          const oddKey   = layHome ? 'home' : 'away';
-          const oddStr   = oddsLive[oddKey] ? ` · Odd: ${parseFloat(oddsLive[oddKey]).toFixed(2)}` : '';
+          const oddKey = layHome ? 'home' : 'away';
+          const oddStr = oddsLive[oddKey] ? ` · Odd: ${parseFloat(oddsLive[oddKey]).toFixed(2)}` : '';
           await sendTelegram(`🟣 <b>OPORTUNIDADE — Lay xG</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'${oddStr}\n⏰ ${hora}`);
         }
       }
 
-      // 🟣 XG Lay — time menor xG na frente qualquer momento
+      // 🟣 XG Lay
       for (const p of pendFid.filter(p => p.strat === 'xgp_lay' && ['1H','2H','ET'].includes(status))) {
         const layHome  = p.lay_team === 'home';
         const naFrente = (layHome && ftH > ftA) || (!layHome && ftA > ftH);
@@ -317,26 +295,23 @@ async function monitorar() {
         if (naFrente && !notificados[nKey]) {
           notificados[nKey] = true;
           const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
-          const oddKey   = layHome ? 'home' : 'away';
-          const oddStr   = oddsLive[oddKey] ? ` · Odd: ${parseFloat(oddsLive[oddKey]).toFixed(2)}` : '';
+          const oddKey = layHome ? 'home' : 'away';
+          const oddStr = oddsLive[oddKey] ? ` · Odd: ${parseFloat(oddsLive[oddKey]).toFixed(2)}` : '';
           await sendTelegram(`🟣 <b>OPORTUNIDADE — XG Lay</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'${oddStr}\n⏰ ${hora}`);
         }
       }
 
-    } catch(e) {
-      console.error(`Erro fixture ${fid}:`, e.message);
-    }
+    } catch(e) { console.error(`Erro fixture ${fid}:`, e.message); }
   }
 }
 
-// ── ROTAS API ─────────────────────────────────────────────
+// ── ROTAS ─────────────────────────────────────────────────
 app.get('/', (req, res) => {
   const hoje = dataHoje();
   res.json({
-    status: 'ok',
-    registros: dadosHist.length,
+    status: 'ok', registros: dadosHist.length,
     pendentes_hoje: pendentes.filter(p=>p.result==='pendente'&&p.data===hoje).length,
-    pendentes_em_andamento: pendentes.filter(p=>p.result==='pendente'&&p.data===hoje&&jogoEmAndamento(p.hora)).length,
+    pendentes_em_andamento: pendentes.filter(p=>p.result==='pendente'&&p.data===hoje&&jogoEmAndamento(p.hora,p.data)).length,
     uptime: Math.floor(process.uptime()) + 's'
   });
 });
@@ -345,24 +320,18 @@ app.get('/dados', (req, res) => { res.json(dadosHist); });
 app.post('/dados', (req, res) => {
   const novos = req.body;
   if (!Array.isArray(novos)) return res.status(400).json({error:'Array esperado'});
-  dadosHist = novos;
-  salvarArquivo(DATA_FILE, dadosHist);
+  dadosHist = novos; salvarArquivo(DATA_FILE, dadosHist);
   res.json({ ok: true, total: dadosHist.length });
 });
 
 app.get('/custom', (req, res) => { res.json(customStrats); });
-app.post('/custom', (req, res) => {
-  customStrats = req.body;
-  salvarArquivo(CUSTOM_FILE, customStrats);
-  res.json({ ok: true });
-});
+app.post('/custom', (req, res) => { customStrats = req.body; salvarArquivo(CUSTOM_FILE, customStrats); res.json({ ok: true }); });
 
 app.get('/pendentes', (req, res) => { res.json(pendentes); });
 app.post('/pendentes', (req, res) => {
   const novos = req.body;
   if (!Array.isArray(novos)) return res.status(400).json({error:'Array esperado'});
-  pendentes = novos;
-  salvarArquivo(PEND_FILE, pendentes);
+  pendentes = novos; salvarArquivo(PEND_FILE, pendentes);
   res.json({ ok: true, total: pendentes.length });
 });
 
@@ -378,17 +347,11 @@ app.get('/sugestoes/lay-visitante', async (req, res) => {
     const hoje = dataHoje();
     const jogos = await buscarJogosLayVisitante(hoje);
     res.json(jogos);
-  } catch(e) {
-    console.error('Erro sugestões:', e.message);
-    res.json([]);
-  }
+  } catch(e) { console.error('Erro sugestões:', e.message); res.json([]); }
 });
 
-// Buscar jogos que passam nos filtros do Lay Visitante Gonza
 async function buscarJogosLayVisitante(data) {
   const resultado = [];
-  
-  // Buscar fixtures do dia
   const r = await apiFetch(`fixtures?date=${data}&timezone=America/Sao_Paulo`);
   const fixtures = r?.response || [];
   console.log(`Buscando filtros em ${fixtures.length} jogos do dia...`);
@@ -398,10 +361,7 @@ async function buscarJogosLayVisitante(data) {
       const fid = f.fixture.id;
       const homeId = f.teams.home.id;
       const awayId = f.teams.away.id;
-      const liga = f.league.name;
-      const hora = f.fixture.date?.slice(11,16) || '';
 
-      // Buscar odds pré-jogo
       const oddsR = await apiFetch(`odds?fixture=${fid}&bookmaker=2`);
       const bets = oddsR?.response?.[0]?.bookmakers?.[0]?.bets || [];
       const h2h = bets.find(b => b.name === 'Match Winner');
@@ -409,63 +369,45 @@ async function buscarJogosLayVisitante(data) {
       const oddCasa = parseFloat(h2h.values?.find(v=>v.value==='Home')?.odd || 0);
       if (!oddCasa || oddCasa < 1.01 || oddCasa > 1.60) continue;
 
-      // Buscar stats do time da casa (na temporada atual)
       const statsR = await apiFetch(`teams/statistics?team=${homeId}&season=2025&league=${f.league.id}`);
       const stats = statsR?.response;
       if (!stats) continue;
 
-      // Verificar xG disponível (só ligas com cobertura)
       const xgCasa = stats.goals?.for?.average?.home;
-      if (!xgCasa) continue; // sem xG = liga sem cobertura
+      if (!xgCasa) continue;
 
-      // Partidas em casa
       const partidasCasa = stats.fixtures?.played?.home || 0;
       if (partidasCasa < 3 || partidasCasa > 38) continue;
 
-      // xG Casa ≥ 1.8
       const xgCasaNum = parseFloat(xgCasa);
       if (xgCasaNum < 1.8) continue;
 
-      // xGA Casa ≤ 0.90
       const xgaCasa = parseFloat(stats.goals?.against?.average?.home || 0);
       if (xgaCasa > 0.90) continue;
 
-      // Média gols marcados HT Casa ≤ 1.5
-      const golsHTCasa = parseFloat(stats.goals?.for?.minute?.['0-45']?.percentage || '0%') / 100 * 
-                         (stats.goals?.for?.total?.home || 0) / partidasCasa;
-      // Usar média de gols total / 2 como aproximação do HT
-      const mediaGolsCasa = parseFloat(stats.goals?.for?.average?.home || 0);
-      const mediaGolsHT = mediaGolsCasa / 2;
+      const mediaGolsHT = parseFloat(stats.goals?.for?.average?.home || 0) / 2;
       if (mediaGolsHT > 1.5) continue;
 
-      // Buscar stats do visitante
       const statsAwayR = await apiFetch(`teams/statistics?team=${awayId}&season=2025&league=${f.league.id}`);
       const statsAway = statsAwayR?.response;
       if (!statsAway) continue;
 
-      // Partidas fora
       const partidasFora = statsAway.fixtures?.played?.away || 0;
       if (partidasFora < 3 || partidasFora > 38) continue;
 
-      // xG Fora entre 0.01 e 0.80
       const xgFora = parseFloat(statsAway.goals?.for?.average?.away || 0);
       if (xgFora < 0.01 || xgFora > 0.80) continue;
 
-      // xGA Fora ≥ 1.8
       const xgaFora = parseFloat(statsAway.goals?.against?.average?.away || 0);
       if (xgaFora < 1.8) continue;
 
-      // % Derrotas HT Casa ≤ 42.86%
-      const totalCasa = stats.fixtures?.played?.home || 1;
-      const derrotasCasa = stats.fixtures?.loses?.home || 0;
-      const pctDerrotaHT = (derrotasCasa / totalCasa) * 100;
+      const pctDerrotaHT = ((stats.fixtures?.loses?.home || 0) / (stats.fixtures?.played?.home || 1)) * 100;
       if (pctDerrotaHT > 42.86) continue;
 
-      // Passou em todos os filtros!
       resultado.push({
         fixture_id: fid,
-        hora: hora,
-        liga: liga,
+        hora: f.fixture.date?.slice(11,16) || '',
+        liga: f.league.name,
         home: f.teams.home.name,
         away: f.teams.away.name,
         odd_casa: oddCasa.toFixed(2),
@@ -478,37 +420,23 @@ async function buscarJogosLayVisitante(data) {
         partidas_casa: partidasCasa,
         partidas_fora: partidasFora
       });
-
       console.log(`✅ Sugestão: ${f.teams.home.name} x ${f.teams.away.name}`);
-    } catch(e) {
-      continue;
-    }
+    } catch(e) { continue; }
   }
-
   return resultado;
 }
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server funcionando! Alertas 24h ativos. 🎯');
+  await sendTelegram('✅ FUTATS Server funcionando! 🎯');
   res.json({ ok: true });
 });
 
-// ── API FOOTBALL ──────────────────────────────────────────
-async function apiFetch(endpoint) {
-  const r = await fetch(`https://v3.football.api-sports.io/${endpoint}`, {
-    headers: { 'x-apisports-key': API_KEY }
-  });
-  return r.json();
-}
-
-// ── START ─────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`FUTATS Server v2 rodando na porta ${PORT}`);
-  console.log('✅ Só monitora jogos EM ANDAMENTO (começou há menos de 2h30)');
-  console.log('✅ Limpa pendentes de dias anteriores automaticamente');
+  console.log('✅ Fuso BRT corrigido — jogos 21h+ notificam corretamente');
+  console.log('✅ Gol no Final separado do Under 3.5');
   console.log('✅ Intervalo: 2 minutos');
-
   limparPendentesAntigos();
   setInterval(monitorar, 2 * 60 * 1000);
-  sendTelegram('🚀 FUTATS v2 iniciado!\n✅ Só monitora jogos em andamento\n✅ 2 min entre ciclos\n✅ Limpeza automática de pendentes antigos');
+  sendTelegram('🚀 FUTATS v2 iniciado!\n✅ Fuso BRT corrigido\n✅ 2 min entre ciclos');
 });
