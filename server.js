@@ -135,9 +135,16 @@ async function monitorar() {
       if (['FT','AET','PEN'].includes(status)) {
         for (const p of pendFid) {
           if (p.result !== 'pendente') continue;
-          p.result = 'resolvido';
-          p.final  = `${ftH}x${ftA}`;
-          p.ht     = htStr;
+          p.final = `${ftH}x${ftA}`;
+          p.ht    = htStr;
+          // Gol no Final: green se houve gol após os 60min, red se não houve
+          if (p.strat === 'under35' || p.strat === 'gol_final') {
+            const golsFinais = ftH + ftA;
+            const golsNoAlerta = p.gols_no_alerta ?? golsFinais; // fallback
+            p.result = golsFinais > golsNoAlerta ? 'green' : 'red';
+          } else {
+            p.result = 'resolvido';
+          }
         }
         salvarArquivo(PEND_FILE, pendentes);
         continue;
@@ -273,6 +280,8 @@ async function monitorar() {
         const nKey = `${fid}_gol_final_60`;
         if (!notificados[nKey]) {
           notificados[nKey] = true;
+          p.gols_no_alerta = ftH + ftA; // salvar placar no momento do alerta
+          salvarArquivo(PEND_FILE, pendentes);
           await sendTelegram(`🟡 <b>GOL NO FINAL — 60 minutos!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}\nVerifique ao vivo se entra!`);
         }
       }
@@ -356,6 +365,83 @@ async function monitorar() {
   }
 }
 
+const LIGAS_PERMITIDAS = new Set([
+  // UEFA
+  2, 3, 848,
+  // Inglaterra
+  39, 40, 41, 45, 48,
+  // Espanha
+  140, 141,
+  // Itália
+  135, 136,
+  // Alemanha
+  78, 79,
+  // França
+  61, 62,
+  // Portugal
+  94, 95,
+  // Holanda
+  88, 89,
+  // Bélgica
+  144,
+  // Turquia
+  203,
+  // Escócia
+  179,
+  // Suécia
+  113,
+  // Noruega
+  103,
+  // Dinamarca
+  119,
+  // Finlândia
+  244,
+  // Polônia
+  106,
+  // Rússia
+  235,
+  // Grécia
+  197,
+  // Croácia
+  210,
+  // Sérvia
+  283,
+  // Suíça
+  207,
+  // Áustria
+  218,
+  // Brasil
+  71, 72,
+  // Argentina
+  128,
+  // Chile
+  265,
+  // Colômbia
+  239,
+  // México
+  262,
+  // EUA
+  253,
+  // Equador
+  242,
+  // Peru
+  281,
+  // Uruguai
+  268,
+  // Venezuela
+  269,
+  // Japão
+  98, 99,
+  // Coreia
+  292,
+  // China
+  169,
+  // Arábia Saudita
+  307,
+  // Austrália
+  188,
+]);
+
 // ── ROTAS ─────────────────────────────────────────────────
 app.get('/', (req, res) => {
   const hoje = dataHoje();
@@ -407,9 +493,10 @@ async function buscarJogosLayVisitante(data) {
   const resultado = [];
   const r = await apiFetch(`fixtures?date=${data}&timezone=America/Sao_Paulo`);
   const fixtures = r?.response || [];
-  console.log(`Lay Gonza: buscando em ${fixtures.length} jogos...`);
+  const ligasFiltradas = fixtures.filter(f => LIGAS_PERMITIDAS.has(f.league.id));
+  console.log(`Lay Gonza: buscando em ${ligasFiltradas.length} jogos (${fixtures.length} total)...`);
 
-  for (const f of fixtures) {
+  for (const f of ligasFiltradas) {
     try {
       const fid = f.fixture.id;
       const homeId = f.teams.home.id;
@@ -465,9 +552,10 @@ async function buscarJogosFelipe15(data) {
   const resultado = [];
   const r = await apiFetch(`fixtures?date=${data}&timezone=America/Sao_Paulo`);
   const fixtures = r?.response || [];
-  console.log(`Felipe15: buscando em ${fixtures.length} jogos...`);
+  const ligasFiltradas = fixtures.filter(f => LIGAS_PERMITIDAS.has(f.league.id));
+  console.log(`Felipe15: buscando em ${ligasFiltradas.length} jogos (${fixtures.length} total)...`);
 
-  for (const f of fixtures) {
+  for (const f of ligasFiltradas) {
     try {
       const fid = f.fixture.id;
       const homeId = f.teams.home.id;
