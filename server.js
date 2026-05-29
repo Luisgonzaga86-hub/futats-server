@@ -11,7 +11,7 @@ app.use(express.json({ limit: '50mb' }));
 const API_KEY    = process.env.API_FOOTBALL_KEY || '3b12a6e36710448864d5c63322ec29a4';
 const TG_TOKEN   = process.env.TG_TOKEN         || '8826929533:AAH5CdY8yBf9p-2CM-JDYLz_ppu7bkxN5wQ';
 const TG_CHAT_ID = process.env.TG_CHAT_ID       || '7324646421';
-const TG_CHAT_IDS = [TG_CHAT_ID, '-3914910677']; // pessoal + canal Gonza bot
+const TG_CHAT_IDS = [TG_CHAT_ID, '-1003914910677']; // pessoal + canal Gonza bot
 const PORT       = process.env.PORT             || 3000;
 
 const DATA_FILE   = path.join(__dirname, 'dados.json');
