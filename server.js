@@ -663,12 +663,24 @@ async function buscarJogosFelipe15(data) {
       if (xgCasa < 1.2 || xgFora < 1.0) continue;
       if (xgTotal < 2.26) continue;
 
+      // Buscar odd casa para o Felipe15
+      const oddsRF = await apiFetch(`odds?fixture=${fid}&bookmaker=2`);
+      const betsF = oddsRF?.response?.[0]?.bookmakers?.[0]?.bets || [];
+      const h2hF = betsF.find(b => b.name === 'Match Winner');
+      const oddCasaF = parseFloat(h2hF?.values?.find(v=>v.value==='Home')?.odd || 0);
+      const xgaCasa = parseFloat(stats.goals?.against?.average?.home || 0);
+      const xgaFora = parseFloat(statsAway.goals?.against?.average?.away || 0);
+
       resultado.push({
         fixture_id: fid, hora: f.fixture.date?.slice(11,16) || '',
         liga: f.league.name, home: f.teams.home.name, away: f.teams.away.name,
+        home_id: homeId, away_id: awayId, league_id: f.league.id,
+        odd_casa: oddCasaF ? oddCasaF.toFixed(2) : null,
         xg_casa: xgCasa.toFixed(2), xg_fora: xgFora.toFixed(2), xg_total: xgTotal.toFixed(2),
+        xga_casa: xgaCasa.toFixed(2), xga_fora: xgaFora.toFixed(2),
         media_gols_casa: mediaGolsCasa.toFixed(2), media_gols_fora: mediaGolsFora.toFixed(2),
-        media_sof_casa: mediaGolsSofCasa.toFixed(2), media_sof_fora: mediaGolsSofFora.toFixed(2)
+        media_sof_casa: mediaGolsSofCasa.toFixed(2), media_sof_fora: mediaGolsSofFora.toFixed(2),
+        strat: 'felipe15'
       });
     } catch(e) { continue; }
   }
