@@ -40,7 +40,7 @@ const STRAT_NAMES = {
   xgp_ambas:'XG Ambas', xgp_u35:'XG U3.5',
   xgp_o15:'XG O1.5', xgp_o25:'XG O2.5', xgp_o35:'XG O3.5', xgp_05ht:'XG 0.5HT',
   atolada:'Atolada Master',
-  lay_gonza:'Lay Visit Gonza', felipe15:'Felipe Over 1.5'
+  lay_gonza:'Lay Visit Gonza', felipe15:'Felipe Over 1.5', gol2t_xga:'Gol 2T XGA'
 };
 
 const EMOJIS = {
@@ -48,7 +48,7 @@ const EMOJIS = {
   am:'🔴', am_xg:'🟤', am_limite:'🔴', gol_final:'🟡', under35:'🟡', lay_zebra:'⚪', atolada:'🟡',
   xgp_casa:'🟣', xgp_visit:'🟣', xgp_lay:'🟣', xgp_ambas:'🟣',
   xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣',
-  lay_gonza:'🩵', felipe15:'🩷'
+  lay_gonza:'🩵', felipe15:'🩷', gol2t_xga:'🟣'
 };
 
 function dataHoje() {
@@ -222,6 +222,7 @@ async function monitorar() {
           else if (p.strat === 'xgp_u35') deveNotificar = true;
           // Felipe Over 1.5 — HT 0x0 com ≥4 chutes no gol total
           else if (p.strat === 'felipe15' && totHT === 0 && (chutesGolCasa + chutesGolVisit) >= 4) deveNotificar = true;
+          else if (p.strat === 'gol2t_xga' && totHT === 0) deveNotificar = true;
           if (!deveNotificar) continue;
           notificados[nKey] = true;
           const emoji  = EMOJIS[p.strat] || '⚪';
@@ -487,6 +488,11 @@ app.get('/sugestoes/lay-visitante', async (req, res) => {
   catch(e) { res.json([]); }
 });
 
+app.get('/sugestoes/gol2t-xga', async (req, res) => {
+  try { res.json(await buscarJogosGol2tXga(dataHoje())); }
+  catch(e) { console.error('Erro gol2t-xga:', e.message); res.json([]); }
+});
+
 app.get('/sugestoes/felipe15', async (req, res) => {
   try { res.json(await buscarJogosFelipe15(dataHoje())); }
   catch(e) { res.json([]); }
@@ -546,6 +552,72 @@ async function buscarJogosLayVisitante(data) {
         pct_derrota_ht: pctDerrotaHT.toFixed(1), media_gols_ht: mediaGolsHT.toFixed(2),
         partidas_casa: partidasCasa, partidas_fora: partidasFora
       });
+    } catch(e) { continue; }
+  }
+  return resultado;
+}
+
+async function buscarJogosGol2tXga(data) {
+  const resultado = [];
+  const r = await apiFetch(`fixtures?date=${data}&timezone=America/Sao_Paulo`);
+  const fixtures = r?.response || [];
+  const ligasFiltradas = fixtures.filter(f => LIGAS_PERMITIDAS.has(f.league.id));
+  console.log(`Gol2T XGA: buscando em ${ligasFiltradas.length} jogos...`);
+
+  for (const f of ligasFiltradas) {
+    try {
+      const fid = f.fixture.id;
+      const homeId = f.teams.home.id;
+      const awayId = f.teams.away.id;
+
+      // Buscar odds — odd casa ≤ 1.60
+      const oddsR = await apiFetch(`odds?fixture=${fid}&bookmaker=2`);
+      const bets = oddsR?.response?.[0]?.bookmakers?.[0]?.bets || [];
+      const h2h = bets.find(b => b.name === 'Match Winner');
+      if (!h2h) continue;
+      const oddCasa = parseFloat(h2h.values?.find(v=>v.value==='Home')?.odd || 0);
+      if (!oddCasa || oddCasa > 1.60) continue;
+
+      // Buscar odd Over 0.5 (para registrar no HT)
+      const goalsMarket = bets.find(b => b.name === 'Goals Over/Under');
+      const oddOver05 = parseFloat(goalsMarket?.values?.find(v=>v.value==='Over 0.5')?.odd || 0);
+
+      // Buscar stats do visitante — xGA fora ≥ 1.50
+      const statsAwayR = await apiFetch(`teams/statistics?team=${awayId}&season=2025&league=${f.league.id}`);
+      const statsAway = statsAwayR?.response;
+      if (!statsAway) continue;
+
+      // Verificar se tem xG (liga com cobertura)
+      if (!statsAway.goals?.against?.average?.away) continue;
+
+      const xgaFora = parseFloat(statsAway.goals?.against?.average?.away || 0);
+      if (xgaFora < 1.50) continue;
+
+      // Buscar stats da casa para salvar xG
+      const statsHomeR = await apiFetch(`teams/statistics?team=${homeId}&season=2025&league=${f.league.id}`);
+      const statsHome = statsHomeR?.response;
+      const xgCasa = parseFloat(statsHome?.goals?.for?.average?.home || 0);
+      const xgaCasa = parseFloat(statsHome?.goals?.against?.average?.home || 0);
+      const xgFora = parseFloat(statsAway?.goals?.for?.average?.away || 0);
+
+      resultado.push({
+        fixture_id: fid,
+        hora: f.fixture.date?.slice(11,16) || '',
+        liga: f.league.name,
+        home: f.teams.home.name,
+        away: f.teams.away.name,
+        home_id: homeId,
+        away_id: awayId,
+        league_id: f.league.id,
+        odd_casa: oddCasa.toFixed(2),
+        odd_over05: oddOver05 ? oddOver05.toFixed(2) : null,
+        xg_casa: xgCasa.toFixed(2),
+        xga_casa: xgaCasa.toFixed(2),
+        xg_fora: xgFora.toFixed(2),
+        xga_fora: xgaFora.toFixed(2),
+        strat: 'gol2t_xga'
+      });
+      console.log(`✅ Gol2T XGA: ${f.teams.home.name} x ${f.teams.away.name} | odd ${oddCasa} | xGA Fora ${xgaFora}`);
     } catch(e) { continue; }
   }
   return resultado;
