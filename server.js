@@ -623,6 +623,26 @@ async function buscarJogosGol2tXga(data) {
   return resultado;
 }
 
+// Helper para calcular % Over de jogos passados
+async function calcularPctOver(teamId, leagueId, season, local) {
+  try {
+    const r = await apiFetch(`fixtures?team=${teamId}&season=${season}&league=${leagueId}&last=20`);
+    const jogos = r?.response || [];
+    const jogosLocal = jogos.filter(f => {
+      const isHome = f.teams.home.id === teamId;
+      return local === 'home' ? isHome : !isHome;
+    });
+    if (jogosLocal.length < 3) return null;
+    const over15 = jogosLocal.filter(f => (f.goals.home + f.goals.away) > 1).length;
+    const over25 = jogosLocal.filter(f => (f.goals.home + f.goals.away) > 2).length;
+    return {
+      total: jogosLocal.length,
+      pct_over15: ((over15 / jogosLocal.length) * 100).toFixed(1),
+      pct_over25: ((over25 / jogosLocal.length) * 100).toFixed(1)
+    };
+  } catch(e) { return null; }
+}
+
 async function buscarJogosFelipe15(data) {
   const resultado = [];
   const r = await apiFetch(`fixtures?date=${data}&timezone=America/Sao_Paulo`);
@@ -635,11 +655,11 @@ async function buscarJogosFelipe15(data) {
       const fid = f.fixture.id;
       const homeId = f.teams.home.id;
       const awayId = f.teams.away.id;
+      const season = 2025;
 
-      const statsR = await apiFetch(`teams/statistics?team=${homeId}&season=2025&league=${f.league.id}`);
+      const statsR = await apiFetch(`teams/statistics?team=${homeId}&season=${season}&league=${f.league.id}`);
       const stats = statsR?.response;
       if (!stats) continue;
-      // Verificar se tem xG (liga com cobertura)
       if (!stats.goals?.for?.average?.home) continue;
 
       const mediaGolsCasa = parseFloat(stats.goals?.for?.average?.home || 0);
@@ -647,7 +667,7 @@ async function buscarJogosFelipe15(data) {
       if (mediaGolsCasa < 1.2 || mediaGolsCasa > 6) continue;
       if (mediaGolsSofCasa < 1 || mediaGolsSofCasa > 5) continue;
 
-      const statsAwayR = await apiFetch(`teams/statistics?team=${awayId}&season=2025&league=${f.league.id}`);
+      const statsAwayR = await apiFetch(`teams/statistics?team=${awayId}&season=${season}&league=${f.league.id}`);
       const statsAway = statsAwayR?.response;
       if (!statsAway) continue;
 
@@ -656,14 +676,27 @@ async function buscarJogosFelipe15(data) {
       if (mediaGolsFora < 1.1 || mediaGolsFora > 5) continue;
       if (mediaGolsSofFora < 1 || mediaGolsSofFora > 6) continue;
 
-      // xG Casa e xG Fora
       const xgCasa = parseFloat(stats.goals?.for?.average?.home || 0);
       const xgFora = parseFloat(statsAway.goals?.for?.average?.away || 0);
       const xgTotal = xgCasa + xgFora;
       if (xgCasa < 1.2 || xgFora < 1.0) continue;
       if (xgTotal < 2.26) continue;
 
-      // Buscar odd casa para o Felipe15
+      // Calcular % Over 1.5 e Over 2.5 com jogos passados
+      const pctCasa = await calcularPctOver(homeId, f.league.id, season, 'home');
+      const pctFora = await calcularPctOver(awayId, f.league.id, season, 'away');
+
+      // Aplicar filtros de % Over
+      if (pctCasa) {
+        if (parseFloat(pctCasa.pct_over15) < 70) continue;
+        if (parseFloat(pctCasa.pct_over25) < 40) continue;
+      }
+      if (pctFora) {
+        if (parseFloat(pctFora.pct_over15) < 66.67) continue;
+        if (parseFloat(pctFora.pct_over25) < 35.71) continue;
+      }
+
+      // Buscar odd casa
       const oddsRF = await apiFetch(`odds?fixture=${fid}&bookmaker=2`);
       const betsF = oddsRF?.response?.[0]?.bookmakers?.[0]?.bets || [];
       const h2hF = betsF.find(b => b.name === 'Match Winner');
@@ -680,8 +713,15 @@ async function buscarJogosFelipe15(data) {
         xga_casa: xgaCasa.toFixed(2), xga_fora: xgaFora.toFixed(2),
         media_gols_casa: mediaGolsCasa.toFixed(2), media_gols_fora: mediaGolsFora.toFixed(2),
         media_sof_casa: mediaGolsSofCasa.toFixed(2), media_sof_fora: mediaGolsSofFora.toFixed(2),
+        pct_over15_casa: pctCasa?.pct_over15 || null,
+        pct_over25_casa: pctCasa?.pct_over25 || null,
+        pct_over15_fora: pctFora?.pct_over15 || null,
+        pct_over25_fora: pctFora?.pct_over25 || null,
+        partidas_casa: pctCasa?.total || null,
+        partidas_fora: pctFora?.total || null,
         strat: 'felipe15'
       });
+      console.log(`✅ Felipe15: ${f.teams.home.name} x ${f.teams.away.name}`);
     } catch(e) { continue; }
   }
   return resultado;
