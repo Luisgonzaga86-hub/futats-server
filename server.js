@@ -41,7 +41,7 @@ const STRAT_NAMES = {
   xgp_o15:'XG O1.5', xgp_o25:'XG O2.5', xgp_o35:'XG O3.5', xgp_05ht:'XG 0.5HT',
   atolada:'Atolada Master',
   lay_gonza:'Lay Visit Gonza', felipe15:'Felipe Over 1.5', gol2t_xga:'Gol 2T XGA',
-  lay_0x1_ia:'Lay 0x1 IA'
+  lay_0x1_ia:'Lay 0x1 IA', lay_improvavel:'Lay Placar Improvável'
 };
 
 const EMOJIS = {
@@ -50,7 +50,7 @@ const EMOJIS = {
   xgp_casa:'🟣', xgp_visit:'🟣', xgp_lay:'🟣', xgp_ambas:'🟣',
   xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣',
   lay_gonza:'🩵', felipe15:'🩷', gol2t_xga:'🟣',
-  lay_0x1_ia:'🤖'
+  lay_0x1_ia:'🤖', lay_improvavel:'🎯'
 };
 
 function dataHoje() {
@@ -153,6 +153,17 @@ async function monitorar() {
           // Lay ao CS (lay_zebra): red SOMENTE se terminar 0x2
           } else if (p.strat === 'lay_zebra') {
             p.result = (ftH === 0 && ftA === 2) ? 'red' : 'green';
+          // Lay Placar Improvável: red SOMENTE se terminar igual ao 1º placar menos provável
+          } else if (p.strat === 'lay_improvavel') {
+            const cs1 = p.cs_improvavel_1;
+            if (cs1) {
+              const [h1, a1] = cs1.split('x').map(Number);
+              p.result = (ftH === h1 && ftA === a1) ? 'red' : 'green';
+            } else {
+              p.result = 'green';
+            }
+            // Lucro fixo simulado
+            p.pct = p.result === 'red' ? -3500 : 10;
           } else {
             p.result = 'resolvido';
           }
