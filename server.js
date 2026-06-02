@@ -40,7 +40,8 @@ const STRAT_NAMES = {
   xgp_ambas:'XG Ambas', xgp_u35:'XG U3.5',
   xgp_o15:'XG O1.5', xgp_o25:'XG O2.5', xgp_o35:'XG O3.5', xgp_05ht:'XG 0.5HT',
   atolada:'Atolada Master',
-  lay_gonza:'Lay Visit Gonza', felipe15:'Felipe Over 1.5', gol2t_xga:'Gol 2T XGA'
+  lay_gonza:'Lay Visit Gonza', felipe15:'Felipe Over 1.5', gol2t_xga:'Gol 2T XGA',
+  lay_0x1_ia:'Lay 0x1 IA'
 };
 
 const EMOJIS = {
@@ -48,7 +49,8 @@ const EMOJIS = {
   am:'🔴', am_xg:'🟤', am_limite:'🔴', gol_final:'🟡', under35:'🟡', lay_zebra:'⚪', atolada:'🟡',
   xgp_casa:'🟣', xgp_visit:'🟣', xgp_lay:'🟣', xgp_ambas:'🟣',
   xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣',
-  lay_gonza:'🩵', felipe15:'🩷', gol2t_xga:'🟣'
+  lay_gonza:'🩵', felipe15:'🩷', gol2t_xga:'🟣',
+  lay_0x1_ia:'🤖'
 };
 
 function dataHoje() {
@@ -145,6 +147,12 @@ async function monitorar() {
             const golsFinais = ftH + ftA;
             const golsNoAlerta = p.gols_no_alerta ?? golsFinais; // fallback
             p.result = golsFinais > golsNoAlerta ? 'green' : 'red';
+          // Lay 0x1 IA: red SOMENTE se terminar 0x1
+          } else if (p.strat === 'lay_0x1_ia') {
+            p.result = (ftH === 0 && ftA === 1) ? 'red' : 'green';
+          // Lay ao CS (lay_zebra): red SOMENTE se terminar 0x2
+          } else if (p.strat === 'lay_zebra') {
+            p.result = (ftH === 0 && ftA === 2) ? 'red' : 'green';
           } else {
             p.result = 'resolvido';
           }
@@ -352,6 +360,29 @@ async function monitorar() {
           notificados[nKey] = true;
           const oddVisit = oddsLive['away'] ? ` · Odd Visit: ${parseFloat(oddsLive['away']).toFixed(2)}` : '';
           await sendTelegram(`🩵 <b>LAY VISIT GONZA — Visitante marcou primeiro!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'${oddVisit}\n💡 Aguarde HT para Gol Limite 2T\n⏰ ${hora}`);
+        }
+      }
+
+      // 🤖 LAY 0x1 IA — visitante fez o primeiro gol (placar 0x1)
+      for (const p of pendFid.filter(p => p.strat === 'lay_0x1_ia' && ['1H','2H'].includes(status) && ftH === 0 && ftA === 1)) {
+        const nKey = `${fid}_lay_0x1_ia_alerta`;
+        if (!notificados[nKey]) {
+          notificados[nKey] = true;
+          const oddVisit = oddsLive['away'] ? ` · Odd Visit: ${parseFloat(oddsLive['away']).toFixed(2)}` : '';
+          await sendTelegram(`🤖 <b>OPORTUNIDADE — Lay 0x1 IA</b>\n⚽ ${p.jogo}\n📊 Visitante fez 0×1 · ${elapsed}'${oddVisit}\n💡 Lay no Placar Correto 0x1\n🔴 Red SOMENTE se terminar 0x1\n⏰ ${hora}`);
+        }
+      }
+
+      // ⚪ LAY AO CS — visitante fez o primeiro gol (caminho para 0x2)
+      for (const p of pendFid.filter(p => p.strat === 'lay_zebra' && ['1H','2H'].includes(status) && ftH === 0 && ftA >= 1)) {
+        const nKey = `${fid}_lay_zebra_visit_gol_${ftA}`;
+        if (!notificados[nKey]) {
+          notificados[nKey] = true;
+          const oddVisit = oddsLive['away'] ? ` · Odd Visit: ${parseFloat(oddsLive['away']).toFixed(2)}` : '';
+          const msg = ftA === 1
+            ? `⚪ <b>LAY AO CS — Visitante fez 0×1!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'${oddVisit}\n💡 Atenção: caminho para o 0×2\n🔴 Red SOMENTE se terminar 0×2\n⏰ ${hora}`
+            : `⚪ <b>LAY AO CS — Visitante fez ${ftH}×${ftA}!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'${oddVisit}\n⚠️ Risco de 0×2 — monitore!\n⏰ ${hora}`;
+          await sendTelegram(msg);
         }
       }
 
