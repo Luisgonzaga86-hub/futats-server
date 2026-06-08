@@ -33,24 +33,19 @@ let notificados  = {};
 
 const STRAT_NAMES = {
   lay_azul:'Lay Azul', lay_xg:'Lay xG',
-  over05:'Over 0.5', over15:'Over 1.5', over15l:'O1.5 LIMITE',
+  over05:'Over 0.5', over15:'Over 1.5',
   am:'AM', am_xg:'AM xG',
-  under35:'Gol no Final', lay_zebra:'Lay ao CS', am_limite:'AM Limite', gol_final:'Gol no Final',
-  xgp_casa:'XG Casa', xgp_visit:'XG Visitante', xgp_lay:'XG Lay',
-  xgp_ambas:'XG Ambas', xgp_u35:'XG U3.5',
-  xgp_o15:'XG O1.5', xgp_o25:'XG O2.5', xgp_o35:'XG O3.5', xgp_05ht:'XG 0.5HT',
+  under35:'Gol no Final', lay_zebra:'Lay ao CS', gol_final:'Gol no Final',
   atolada:'Atolada Master',
   lay_gonza:'Lay Visit Gonza', felipe15:'Felipe Over 1.5', gol2t_xga:'Gol 2T XGA',
-  lay_0x1_ia:'Lay 0x1 IA', lay_improvavel:'Lay Placar Improvável'
+  lay_0x1_ia:'Lay 0x1 IA'
 };
 
 const EMOJIS = {
-  lay_azul:'🔵', lay_xg:'🟣', over05:'🟢', over15:'🟠', over15l:'🟠',
-  am:'🔴', am_xg:'🟤', am_limite:'🔴', gol_final:'🟡', under35:'🟡', lay_zebra:'⚪', atolada:'🟡',
-  xgp_casa:'🟣', xgp_visit:'🟣', xgp_lay:'🟣', xgp_ambas:'🟣',
-  xgp_u35:'🟣', xgp_o15:'🟣', xgp_o25:'🟣', xgp_o35:'🟣', xgp_05ht:'🟣',
+  lay_azul:'🔵', lay_xg:'🟣', over05:'🟢', over15:'🟠',
+  am:'🔴', am_xg:'🟤', gol_final:'🟡', under35:'🟡', lay_zebra:'⚪', atolada:'🟡',
   lay_gonza:'🩵', felipe15:'🩷', gol2t_xga:'🟣',
-  lay_0x1_ia:'🤖', lay_improvavel:'🎯'
+  lay_0x1_ia:'🤖'
 };
 
 function dataHoje() {
@@ -151,15 +146,6 @@ async function monitorar() {
             p.result = (ftH === 0 && ftA === 1) ? 'red' : 'green';
           } else if (p.strat === 'lay_zebra') {
             p.result = (ftH === 0 && ftA === 2) ? 'red' : 'green';
-          } else if (p.strat === 'lay_improvavel') {
-            const cs1 = p.cs_improvavel_1;
-            if (cs1) {
-              const [h1, a1] = cs1.split('x').map(Number);
-              p.result = (ftH === h1 && ftA === a1) ? 'red' : 'green';
-            } else {
-              p.result = 'green';
-            }
-            p.pct = p.result === 'red' ? -3500 : 10;
           } else {
             p.result = 'resolvido';
           }
@@ -200,14 +186,13 @@ async function monitorar() {
               if (bet.name === 'Goals Over/Under') {
                 for (const v of bet.values || []) {
                   if (v.value === 'Over 0.5') oddsAoVivo['over05'] = v.odd;
-                  if (v.value === 'Over 1.5') { oddsAoVivo['over15'] = v.odd; oddsAoVivo['over15l'] = v.odd; oddsAoVivo['xgp_o15'] = v.odd; oddsAoVivo['felipe15'] = v.odd; }
-                  if (v.value === 'Over 2.5') oddsAoVivo['xgp_o25'] = v.odd;
-                  if (v.value === 'Under 3.5') oddsAoVivo['xgp_u35'] = v.odd;
+                  if (v.value === 'Over 1.5') { oddsAoVivo['over15'] = v.odd; oddsAoVivo['felipe15'] = v.odd; }
+                  if (v.value === 'Over 2.5') oddsAoVivo['over25'] = v.odd;
                 }
               }
               if (bet.name === 'Both Teams Score') {
                 for (const v of bet.values || []) {
-                  if (v.value === 'Yes') { oddsAoVivo['am'] = v.odd; oddsAoVivo['am_xg'] = v.odd; oddsAoVivo['xgp_ambas'] = v.odd; }
+                  if (v.value === 'Yes') { oddsAoVivo['am'] = v.odd; oddsAoVivo['am_xg'] = v.odd; }
                 }
               }
               if (bet.name === 'Match Winner') {
@@ -226,24 +211,36 @@ async function monitorar() {
           let deveNotificar = false;
           if (p.strat === 'over05' && totHT === 0) deveNotificar = true;
           else if (p.strat === 'over15' && totHT === 0) deveNotificar = true;
-          else if (p.strat === 'over15l' && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'am' && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'am_xg' && totHT <= 1) deveNotificar = true;
-          else if (p.strat === 'am_limite' && totHT <= 1) deveNotificar = true;
-          else if (['xgp_ambas','xgp_o15','xgp_o25'].includes(p.strat) && totHT <= 1) deveNotificar = true;
-          else if (p.strat === 'xgp_u35') deveNotificar = true;
           else if (p.strat === 'felipe15' && totHT === 0 && (chutesGolCasa + chutesGolVisit) >= 4) deveNotificar = true;
           else if (p.strat === 'gol2t_xga' && totHT === 0) deveNotificar = true;
           if (!deveNotificar) continue;
           notificados[nKey] = true;
           const emoji  = EMOJIS[p.strat] || '⚪';
           const nome   = STRAT_NAMES[p.strat] || p.strat;
-          const isU35  = p.strat === 'xgp_u35';
-          const acao   = isU35 ? 'SAIR SE LUCRO' : 'ENTRAR';
           const oddVal = oddsAoVivo[p.strat] || p.odd;
           const oddStr = oddVal ? ` · Odd: ${parseFloat(oddVal).toFixed(2)}` : '';
           const extraInfo = p.strat === 'felipe15' ? ` · 🎯 Chutes: ${chutesGolCasa}C+${chutesGolVisit}V=${chutesGolCasa+chutesGolVisit}` : '';
-          alertasJogo.push(`${emoji} <b>${acao} — ${nome}</b>${oddStr}${extraInfo}`);
+          alertasJogo.push(`${emoji} <b>ENTRAR — ${nome}</b>${oddStr}${extraInfo}`);
+        }
+
+        // Gol no Final — alerta no HT com odd live do próximo gol
+        for (const p of pendFid.filter(p => (p.strat === 'under35' || p.strat === 'gol_final') && status === 'HT')) {
+          const nKey = `${fid}_gol_final_ht`;
+          if (!notificados[nKey]) {
+            notificados[nKey] = true;
+            p.gols_no_alerta = htH + htA;
+            salvarArquivo(PEND_FILE, pendentes);
+            // Determinar mercado baseado no placar HT
+            const totalHT = htH + htA;
+            let mercadoGF, oddGF;
+            if (totalHT === 0) { mercadoGF = 'Over 0.5'; oddGF = oddsAoVivo['over05']; }
+            else if (totalHT === 1) { mercadoGF = 'Over 1.5'; oddGF = oddsAoVivo['over15']; }
+            else { mercadoGF = 'Over 2.5'; oddGF = oddsAoVivo['over25']; }
+            const oddStrGF = oddGF ? ` · Odd ${mercadoGF}: ${parseFloat(oddGF).toFixed(2)}` : ` · Mercado: ${mercadoGF}`;
+            await sendTelegram(`🟡 <b>GOL NO FINAL — Intervalo!</b>\n⚽ ${p.jogo}\n📊 HT: ${htStr}${oddStrGF}\n💡 Verifique ao vivo se entra!\n⏰ ${hora}`);
+          }
         }
         if (alertasJogo.length > 0) {
           await sendTelegram(`${alertasJogo.join('\n')}\n⚽ ${p0.jogo}\n📊 HT: ${htStr}\n⏰ ${hora}`);
@@ -251,8 +248,8 @@ async function monitorar() {
 
         const temLayAzul = pendFid.some(p => p.strat === 'lay_azul');
         const temOver05  = pendFid.some(p => p.strat === 'over05');
-        const temLayXg   = pendFid.some(p => p.strat === 'lay_xg' || p.strat === 'xgp_lay');
-        const temAtolada = pendFid.some(p => ['lay_azul','am','over15','am_xg','lay_xg'].includes(p.strat));
+        const temLayXg   = pendFid.some(p => p.strat === 'lay_xg');
+        const temAtolada = pendFid.some(p => ['lay_azul','over05','over15','am_xg','lay_xg'].includes(p.strat));
 
         if (temLayAzul && totHT <= 1) {
           const nKey = `${fid}_over05_2t`;
@@ -274,7 +271,9 @@ async function monitorar() {
           const nKey = `${fid}_atolada_master`;
           if (!notificados[nKey]) {
             notificados[nKey] = true;
-            await sendTelegram(`🟡 <b>ATOLADA MASTER DO GONZA!</b>\n⚽ ${p0.jogo}\n📊 HT: 0×0\n💡 Over 0.5 2T — odd mín Betfair: 1.25\n📈 Taxa histórica: 84.3%\n⏰ ${hora}`);
+            const oddAtolada = oddsAoVivo['over05'];
+            const oddStrAtolada = oddAtolada ? ` · Odd Over 0.5: ${parseFloat(oddAtolada).toFixed(2)}` : '';
+            await sendTelegram(`🟡 <b>ATOLADA MASTER DO GONZA!</b>\n⚽ ${p0.jogo}\n📊 HT: 0×0${oddStrAtolada}\n💡 Over 0.5 2T — taxa histórica: 84.3%\n⏰ ${hora}`);
           }
         }
 
@@ -288,15 +287,7 @@ async function monitorar() {
         }
       }
 
-      for (const p of pendFid.filter(p => (p.strat === 'under35' || p.strat === 'gol_final') && ['1H','2H'].includes(status) && elapsed >= 60)) {
-        const nKey = `${fid}_gol_final_60`;
-        if (!notificados[nKey]) {
-          notificados[nKey] = true;
-          p.gols_no_alerta = ftH + ftA;
-          salvarArquivo(PEND_FILE, pendentes);
-          await sendTelegram(`🟡 <b>GOL NO FINAL — 60 minutos!</b>\n⚽ ${p.jogo}\n📊 ${ftH}×${ftA} · ${elapsed}'\n⏰ ${hora}\nVerifique ao vivo se entra!`);
-        }
-      }
+      // Gol no Final já é alertado no HT — removido alerta dos 60 min
 
       let oddsLive = {};
       try {
@@ -333,19 +324,6 @@ async function monitorar() {
           const oddKey = layHome ? 'home' : 'away';
           const oddStr = oddsLive[oddKey] ? ` · Odd: ${parseFloat(oddsLive[oddKey]).toFixed(2)}` : '';
           await sendTelegram(`🟣 <b>OPORTUNIDADE — Lay xG</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'${oddStr}\n⏰ ${hora}`);
-        }
-      }
-
-      for (const p of pendFid.filter(p => p.strat === 'xgp_lay' && ['1H','2H','ET'].includes(status))) {
-        const layHome  = p.lay_team === 'home';
-        const naFrente = (layHome && ftH > ftA) || (!layHome && ftA > ftH);
-        const nKey     = `${fid}_xgp_lay_${ftH}x${ftA}`;
-        if (naFrente && !notificados[nKey]) {
-          notificados[nKey] = true;
-          const timeNome = layHome ? f.teams.home.name : f.teams.away.name;
-          const oddKey = layHome ? 'home' : 'away';
-          const oddStr = oddsLive[oddKey] ? ` · Odd: ${parseFloat(oddsLive[oddKey]).toFixed(2)}` : '';
-          await sendTelegram(`🟣 <b>OPORTUNIDADE — XG Lay</b>\n⚽ ${p.jogo}\n📊 ${timeNome} (menor xG) na frente! ${ftH}×${ftA} · ${elapsed}'${oddStr}\n⏰ ${hora}`);
         }
       }
 
