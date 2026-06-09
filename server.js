@@ -408,7 +408,13 @@ app.get('/pendentes', (req, res) => { res.json(pendentes); });
 app.post('/pendentes', (req, res) => {
   const novos = req.body;
   if (!Array.isArray(novos)) return res.status(400).json({error:'Array esperado'});
-  pendentes = novos; salvarArquivo(PEND_FILE, pendentes);
+  // Se chegou lista vazia, NÃO sobrescrever — pode ser bug de fuso no cliente
+  if (novos.length === 0) return res.json({ ok: true, total: pendentes.length, aviso: 'lista vazia ignorada' });
+  // Merge: manter pendentes do servidor que não vieram no payload + substituir os que vieram
+  const idsNovos = new Set(novos.map(p => String(p.id)));
+  const mantidos = pendentes.filter(p => !idsNovos.has(String(p.id)) && p.result === 'pendente');
+  pendentes = [...novos, ...mantidos];
+  salvarArquivo(PEND_FILE, pendentes);
   res.json({ ok: true, total: pendentes.length });
 });
 
