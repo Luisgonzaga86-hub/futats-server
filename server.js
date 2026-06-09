@@ -210,7 +210,7 @@ async function monitorar() {
           if (notificados[nKey]) continue;
           let deveNotificar = false;
           if (p.strat === 'over05' && totHT === 0) deveNotificar = true;
-          else if (p.strat === 'over15' && totHT === 0) deveNotificar = true;
+          else if (p.strat === 'over15' && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'am' && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'am_xg' && totHT <= 1) deveNotificar = true;
           else if (p.strat === 'felipe15' && totHT === 0 && (chutesGolCasa + chutesGolVisit) >= 4) deveNotificar = true;
