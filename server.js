@@ -427,6 +427,12 @@ async function monitorarLive() {
       }
       estado.ultimoPlacar = placarAtual;
 
+      // Salvar placar HT quando detectar intervalo
+      if (jogo.tempo === 'Intervalo' && !estado.htPlacar) {
+        estado.htPlacar = placarAtual;
+        console.log(`[HT] ${jogoId} → HT: ${placarAtual}`);
+      }
+
       await processarAlertasLive(jogo, estado, jogoId, hoje);
     }
   } catch(e) {
@@ -754,6 +760,7 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   // Resolver pendentes
   for (const p of pendJogo) {
     p.final  = placarFT;
+    p.ht     = estado.htPlacar || '';
     const res = calcularResultado(p.strat, golsCasa, golsFora);
     p.result  = res || 'resolvido';
   }
