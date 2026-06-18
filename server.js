@@ -318,9 +318,56 @@ async function enviarResumoDia() {
   console.log('[RESUMO] Resumo do dia enviado.');
 }
 
+// ── RESOLVER PENDENTES ANTIGOS ────────────────────────────────
+// Pendentes de dias anteriores que ficaram presos (servidor reiniciou)
+// → busca na api-games-live se o jogo ainda está ativo
+// → se não estiver, tenta resolver via api-games-live pelo placar atual
+// → se não encontrar, marca como 'resolvido' para edição manual
+async function resolverPendentesAntigos() {
+  const hoje = dataHoje();
+  const antigos = pendentes.filter(p => p.result === 'pendente' && p.data < hoje);
+  if (!antigos.length) return;
+  console.log(`[ANTIGOS] ${antigos.length} pendentes de dias anteriores encontrados`);
+
+  // Buscar live atual para ver se algum jogo ainda está rodando
+  let jogosLive = [];
+  try {
+    const rLive = await futatsGet('api-games-live');
+    jogosLive = rLive[0]?.eventos || [];
+  } catch(e) {}
+
+  const jogosLiveIds = new Set(jogosLive.map(j => `${j.mandante}_${j.visitante}`));
+
+  let resolvidos = 0;
+  for (const p of antigos) {
+    const jogoId = `${p.home}_${p.away}`;
+    // Se ainda está no live, deixa
+    if (jogosLiveIds.has(jogoId)) continue;
+    // Não está no live → jogo acabou, mas não temos placar
+    // Marca como 'resolvido' para edição manual no index
+    p.result = 'resolvido';
+    p.final  = p.final || '?x?';
+    resolvidos++;
+  }
+
+  if (resolvidos > 0) {
+    salvarArquivo(PEND_FILE, pendentes);
+    console.log(`[ANTIGOS] ${resolvidos} pendentes marcados como resolvidos (edição manual necessária)`);
+    await sendTelegram(
+      `⚠️ <b>FUTATS — Pendentes antigos</b>\n` +
+      `${resolvidos} jogo(s) de ontem precisam de placar manual no index:\n` +
+      antigos.filter(p => p.result === 'resolvido').map(p => `• ${p.jogo} (${p.strat})`).join('\n')
+    );
+  }
+}
+
 // ── PRÉ-JOGO ─────────────────────────────────────────────────
 async function buscarPreJogo() {
   console.log('[PRÉ] Buscando jogos das APIs do futats...');
+
+  // Resolver pendentes antigos primeiro
+  await resolverPendentesAntigos();
+
   try {
     const [rIA, rFiltros, rEst] = await Promise.all([
       futatsGet('api-games-ia'),
@@ -351,7 +398,6 @@ async function buscarPreJogo() {
       }
     }
     for (const jogo of jogosEst) {
-      // CRÍTICO: split por ", " para não partir "Over 0,5 Gonza"
       const ests = (jogo.estrategias_partida || '').split(', ').map(s => s.trim()).filter(Boolean);
       for (const est of ests) {
         const strat = ESTRAT_PARA_STRAT[est];
@@ -379,8 +425,17 @@ async function monitorarLive() {
     for (const [jogoId, estado] of Object.entries(estadoLive)) {
       if (!idsLive.has(jogoId) && !estado.encerrado) {
         const minSemDados = (agora - estado.ultimaVez) / 60000;
-        if (minSemDados >= 2 && (estado.ultimoMinuto || 0) >= 88) {
+        const ultimoMin = estado.ultimoMinuto || 0;
+        // Se sumiu do live há 3+ min e já estava nos acréscimos/fim de jogo
+        if (minSemDados >= 3 && ultimoMin >= 90) {
           estado.encerrado = true;
+          console.log(`[FIM AUTO] ${jogoId} · último min: ${ultimoMin} · sem dados há ${minSemDados.toFixed(1)}min`);
+          await processarFimDeJogo(jogoId, estado, hoje);
+        }
+        // Se sumiu há mais de 10 min independente do minuto → forçar encerramento
+        else if (minSemDados >= 10) {
+          estado.encerrado = true;
+          console.log(`[FIM FORÇADO] ${jogoId} · sem dados há ${minSemDados.toFixed(1)}min`);
           await processarFimDeJogo(jogoId, estado, hoje);
         }
       }
