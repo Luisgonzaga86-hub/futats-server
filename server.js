@@ -543,11 +543,25 @@ async function monitorarLive() {
       }
       estado.ultimoPlacar = placarAtual;
 
-      // Salvar placar HT quando detectar intervalo
+      // Salvar placar HT — usa os campos diretos da API (gols_casa_ht/gols_fora_ht)
+      // quando disponíveis; fallback para detecção pelo intervalo se a API não mandar.
+      const htCasaApi = jogo.gols_casa_ht;
+      const htForaApi = jogo.gols_fora_ht;
+      if ((htCasaApi !== undefined && htCasaApi !== null) &&
+          (htForaApi !== undefined && htForaApi !== null) && !estado.htPlacar) {
+        // Só fixa o HT quando o jogo já passou do 1T (campo passa a vir preenchido)
+        if (jogo.tempo === 'Intervalo' || jogo.periodo === '2_tempo' || estado.passouHT) {
+          estado.htPlacar = `${parseInt(htCasaApi)||0}x${parseInt(htForaApi)||0}`;
+          console.log(`[HT-API] ${jogoId} → HT (direto da API): ${estado.htPlacar}`);
+        }
+      }
+      // Fallback: detectar pelo intervalo, caso a API não tenha mandado os campos _ht
       if (jogo.tempo === 'Intervalo' && !estado.htPlacar) {
         estado.htPlacar = placarAtual;
+        console.log(`[HT-FALLBACK] ${jogoId} → HT: ${placarAtual}`);
+      }
+      if (jogo.tempo === 'Intervalo' && !estado.passouHT) {
         estado.passouHT = true;
-        console.log(`[HT] ${jogoId} → HT: ${placarAtual}`);
       }
 
       // ── Detectar pênaltis/prorrogação e congelar placar do tempo normal ──
@@ -994,7 +1008,7 @@ function agendarHoraBRT(hora, minuto, callback) {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_39',
+  status: 'ok', version: 'server_40',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -1035,7 +1049,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v39 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v40 funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -1051,13 +1065,20 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v39 na porta ${PORT}`);
+  console.log(`FUTATS Server v40 na porta ${PORT}`);
 
-  // Buscar jogos pré-jogo
+  // Buscar jogos pré-jogo imediatamente ao subir
   await buscarPreJogo();
-  setInterval(buscarPreJogo, 6 * 60 * 60 * 1000);
 
-  // Monitoramento live
+  // Agendar buscarPreJogo nos horários recomendados pela documentação das APIs:
+  // IA: 7:30-8:30, 12:00-13:00, 18:30-19:30
+  // Filtros: 7:45-8:45, 12:15-13:15, 18:45-19:45
+  // Estratégias: sem horário fixo (a critério) — reaproveitamos os mesmos horários
+  agendarHoraBRT(8,  0, buscarPreJogo);
+  agendarHoraBRT(12, 30, buscarPreJogo);
+  agendarHoraBRT(19, 0, buscarPreJogo);
+
+  // Monitoramento live (recomendação: 1-2 minutos)
   setInterval(monitorarLive, 90 * 1000);
 
   // Agendar: 08h card matinal · 18h resumo parcial · 00h resumo do dia anterior + card novo dia
@@ -1067,15 +1088,14 @@ app.listen(PORT, async () => {
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v39 iniciado!</b>\n' +
-    '✅ Fix is2T/is1T — periodo real (sem bug de acréscimos)\n' +
-    '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20\n' +
-    '✅ Placar de pênaltis/prorrogação congelado p/ cálculo\n' +
-    '✅ Nova estratégia: Ambas Marcam xG (🟤)\n' +
-    '✅ Horários: 08h card · 18h resumo · 00h resumo+card'
+    '🚀 <b>FUTATS Server v40 iniciado!</b>\n' +
+    '✅ Horários das APIs ajustados conforme documentação\n' +
+    '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
+    '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
+    '✅ Fix is2T/is1T — periodo + histórico do jogo\n' +
+    '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20'
   );
 
-  // Enviar card e resumo imediatamente ao subir
+  // Enviar card do dia imediatamente ao subir (apenas o card, não o resumo)
   await enviarCardMatinal();
-  await enviarResumoDia();
 });
