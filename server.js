@@ -41,6 +41,12 @@ function agoraBRT() {
 function horaBRT() {
   return agoraBRT().toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
 }
+// Data de N dias atrás (BRT), formato YYYY-MM-DD
+function dataOffsetBRT(diasAtras) {
+  const d = new Date(new Date().getTime() - 3*60*60*1000);
+  d.setDate(d.getDate() - diasAtras);
+  return d.toISOString().split('T')[0];
+}
 
 // ── LINKS EXCHANGES ──────────────────────────────────────────
 function linksExchanges(urls) {
@@ -137,13 +143,13 @@ function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
     case 'lay_0x1':              return (ftH === 0 && ftA === 1) ? 'red' : 'green';
     case 'lay_1x0':              return (ftH === 1 && ftA === 0) ? 'red' : 'green';
     case 'lay_0x2':              return (ftH === 0 && ftA === 2) ? 'red' : 'green';
-    case 'lay_0x3':              return (ftH === 0 && ftA === 3) ? 'red' : 'green';
+    case 'lay_0x3':               return (ftH === 0 && ftA === 3) ? 'red' : 'green';
     case 'lay_goleada_visit':    return (ftA - ftH >= 4 && ftA > ftH) ? 'red' : 'green';
     case 'lay_goleada_mand':     return (ftH - ftA >= 4 && ftH > ftA) ? 'red' : 'green';
     case 'favorito_ht_gonza':
     case 'lay_away_manu':
     case 'lay_manu4':            return ftA > ftH ? 'red' : 'green';
-    case 'lay_xg':               return null;
+    case 'lay_xg':                return null;
     case 'back_favorito':
     case 'back_fav_ht':
     case 'back_gonza_xg':        return ftH > ftA ? 'green' : 'red';
@@ -157,6 +163,7 @@ function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
     case 'ambas_marcam':
     case 'am':
     case 'am_xg':                return (ftH > 0 && ftA > 0) ? 'green' : 'red';
+    case 'ambas_marcam_xg':       return (ftH > 0 && ftA > 0) ? 'green' : 'red';
     case 'gol_no_final':         return (ftH + ftA) > (htH + htA) ? 'green' : 'red';
     case 'correcao_lay_fav':
     case 'correcao_lay_zebra':   return null;
@@ -192,6 +199,7 @@ const STRAT_DISPLAY = {
   over05:               '🟢 Over 0,5 Gonza',
   am:                   '🔴 AM',
   atolada_master:       '⚡ Atolada Master',
+  ambas_marcam_xg:       '🟤 Ambas Marcam xG',
 };
 
 const IA_PARA_STRAT = {
@@ -218,6 +226,7 @@ const FILTRO_PARA_STRAT = {
   'back gonza com xg':  'back_gonza_xg',
   'lay 0x2 Manu':       'lay_0x2',
   'lay 0x3':            'lay_0x3',
+  'ambas marcam xg':    'ambas_marcam_xg',
 };
 
 const ESTRAT_PARA_STRAT = {
@@ -227,11 +236,12 @@ const ESTRAT_PARA_STRAT = {
   'Lay xG':           'lay_xg',
   'AM xG':            'am_xg',
   'AM':               'am',
+  'ambas marcam xg':  'ambas_marcam_xg',
 };
 
 // ── CARD MATINAL ──────────────────────────────────────────────
-async function enviarCardMatinal() {
-  const hoje = dataHoje();
+async function enviarCardMatinal(dataAlvo = null) {
+  const hoje = dataAlvo || dataHoje();
   const [dd, mm, yyyy] = hoje.split('-').reverse();
   const pendHoje = pendentes.filter(p => p.data === hoje && p.tipo === 'pre');
 
@@ -274,8 +284,8 @@ async function enviarCardMatinal() {
 }
 
 // ── RESUMO DO DIA ─────────────────────────────────────────────
-async function enviarResumoDia() {
-  const hoje = dataHoje();
+async function enviarResumoDia(dataAlvo = null) {
+  const hoje = dataAlvo || dataHoje();
   const [dd, mm, yyyy] = hoje.split('-').reverse();
   const pendHoje = pendentes.filter(p => p.data === hoje);
 
@@ -316,6 +326,14 @@ async function enviarResumoDia() {
 
   await sendTelegram(`📊 <b>FUTATS — Resumo ${dd}/${mm}/${yyyy}</b>${linhas}${saldo}`);
   console.log('[RESUMO] Resumo do dia enviado.');
+}
+
+// ── RESUMO DO DIA ANTERIOR + CARD DO NOVO DIA (00h BRT) ───────
+async function enviarResumoECard() {
+  const ontem = dataOffsetBRT(1);
+  console.log(`[00H] Enviando resumo final de ${ontem} + card do novo dia`);
+  await enviarResumoDia(ontem);
+  await enviarCardMatinal();
 }
 
 // ── RESOLVER PENDENTES ANTIGOS ────────────────────────────────
@@ -488,6 +506,23 @@ async function monitorarLive() {
         console.log(`[HT] ${jogoId} → HT: ${placarAtual}`);
       }
 
+      // ── Detectar pênaltis/prorrogação e congelar placar do tempo normal ──
+      const periodoStr = String(jogo.periodo || '').toLowerCase();
+      const tempoStr    = String(jogo.tempo   || '').toLowerCase();
+      const ehPenaltisOuProrrogacao =
+        periodoStr.includes('penalt') || tempoStr.includes('penalt') ||
+        periodoStr.includes('prorrog') || tempoStr.includes('prorrog') ||
+        periodoStr.includes('acrescimo_2t_extra');
+      if (ehPenaltisOuProrrogacao && !estado.placarTempoNormal) {
+        estado.placarTempoNormal = estado.ultimoPlacarTempoNormalCandidato || placarAtual;
+        console.log(`[PRORROGAÇÃO/PÊNALTIS] ${jogoId} → congelando placar do tempo normal: ${estado.placarTempoNormal}`);
+      }
+      // Enquanto ainda não entrou em prorrogação/pênaltis, guarda o último placar visto
+      // (cobre o caso de a API já pular direto pro placar de pênaltis sem avisar)
+      if (!ehPenaltisOuProrrogacao && !estado.placarTempoNormal) {
+        estado.ultimoPlacarTempoNormalCandidato = placarAtual;
+      }
+
       await processarAlertasLive(jogo, estado, jogoId, hoje);
     }
   } catch(e) {
@@ -537,8 +572,10 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const oddFora  = parseFloat(jogo.odd_atual_fora || 0);
 
   const isHT  = jogo.tempo === 'Intervalo';
-  const is1T  = (periodo === '1_tempo' || tempo <= 45) && !isHT;
-  const is2T  = (periodo === '2_tempo' || tempo > 45) && !isHT;
+  // CORREÇÃO: usar exclusivamente o campo periodo (evita acréscimos do 1T
+  // sendo contados como 2T)
+  const is1T  = (periodo === '1_tempo') && !isHT;
+  const is2T  = (periodo === '2_tempo') && !isHT;
 
   const evNovos   = jogo.eventos || [];
   const raiosCasa = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa');
@@ -611,7 +648,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('recuperacao_favorito', 'Favorito perdendo por 1 + Raio!', 'recuperacao_favorito_live');
   }
 
-  // 3. GOL NO FINAL
+  // 3. GOL NO FINAL — agora só dispara em periodo === '2_tempo' real
   if (pendJogo.some(p => p.strat === 'gol_no_final')) {
     if (is2T && !isHT && temRaio)
       await alertar('gol_no_final', 'Raio no 2T!', 'gol_no_final_live');
@@ -660,36 +697,50 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 8. LAY 0x1 — 1 alerta por jogo, edita placar
+  // 7b. AMBAS MARCAM xG (nova) — só vale até o final do 1º tempo
+  if (pendJogo.some(p => p.strat === 'ambas_marcam_xg')) {
+    if (!is2T && !isHT) {
+      if (total === 0 && todosRaiosCasa.length > 0 && todosRaiosFora.length > 0)
+        await alertar('ambas_marcam_xg', '0x0 + Raio dos dois times no 1T!', 'ambas_marcam_xg_live');
+      else if (total === 1 && temRaio) {
+        // Raio do time que ainda não marcou
+        const raioDoSemGol = (golsCasa > golsFora && raioVisit) || (golsFora > golsCasa && raioMand);
+        if (raioDoSemGol)
+          await alertar('ambas_marcam_xg', `${placar} + Raio do time que não marcou!`, 'ambas_marcam_xg_live');
+      }
+    }
+  }
+
+  // 8. LAY 0x1 — 1 alerta por jogo, só até o minuto 20
   if (pendJogo.some(p => p.strat === 'lay_0x1')) {
-    if (raioMand && total === 0)
-      await alertar('lay_0x1', '0x0 + Raio do Mandante!', 'lay_0x1_live');
-    else if (raioMand && golsCasa === 0 && golsFora === 1)
-      await alertar('lay_0x1', '⚠️ Placar 0x1! Raio Mandante — feche e aguarde!', 'lay_0x1_live');
-    else if (raioMand && is2T && !(golsCasa === 0 && golsFora === 1))
-      await alertar('lay_0x1', `Raio Mandante no 2T · ${placar}`, 'lay_0x1_live');
+    if (tempo <= 20) {
+      if (raioMand && total === 0)
+        await alertar('lay_0x1', '0x0 + Raio do Mandante (até min 20)!', 'lay_0x1_live');
+      else if (raioMand && golsCasa === 0 && golsFora === 1)
+        await alertar('lay_0x1', '⚠️ Placar 0x1! Raio Mandante — feche e aguarde!', 'lay_0x1_live');
+    }
   }
 
-  // 9. LAY 1x0 — 1 alerta por jogo, edita placar
+  // 9. LAY 1x0 — 1 alerta por jogo, só até o minuto 20
   if (pendJogo.some(p => p.strat === 'lay_1x0')) {
-    if (raioVisit && total === 0)
-      await alertar('lay_1x0', '0x0 + Raio do Visitante!', 'lay_1x0_live');
-    else if (raioVisit && golsCasa === 1 && golsFora === 0)
-      await alertar('lay_1x0', '⚠️ Placar 1x0! Raio Visitante — feche e aguarde!', 'lay_1x0_live');
-    else if (raioVisit && is2T && !(golsCasa === 1 && golsFora === 0))
-      await alertar('lay_1x0', `Raio Visitante no 2T · ${placar}`, 'lay_1x0_live');
+    if (tempo <= 20) {
+      if (raioVisit && total === 0)
+        await alertar('lay_1x0', '0x0 + Raio do Visitante (até min 20)!', 'lay_1x0_live');
+      else if (raioVisit && golsCasa === 1 && golsFora === 0)
+        await alertar('lay_1x0', '⚠️ Placar 1x0! Raio Visitante — feche e aguarde!', 'lay_1x0_live');
+    }
   }
 
-  // 10. LAY GOLEADA VISITANTE — 1 alerta por jogo
+  // 10. LAY GOLEADA VISITANTE — 1 alerta por jogo, só até o minuto 20
   if (pendJogo.some(p => p.strat === 'lay_goleada_visit')) {
-    if (raioMand)
-      await alertar('lay_goleada_visit', 'Raio do Mandante!', 'lay_goleada_visit_live');
+    if (tempo <= 20 && raioMand)
+      await alertar('lay_goleada_visit', 'Raio do Mandante (até min 20)!', 'lay_goleada_visit_live');
   }
 
-  // 11. LAY GOLEADA MANDANTE — 1 alerta por jogo
+  // 11. LAY GOLEADA MANDANTE — 1 alerta por jogo, só até o minuto 20
   if (pendJogo.some(p => p.strat === 'lay_goleada_mand')) {
-    if (raioVisit)
-      await alertar('lay_goleada_mand', 'Raio do Visitante!', 'lay_goleada_mand_live');
+    if (tempo <= 20 && raioVisit)
+      await alertar('lay_goleada_mand', 'Raio do Visitante (até min 20)!', 'lay_goleada_mand_live');
   }
 
   // 12. CORREÇÃO LAY FAVORITO
@@ -738,16 +789,16 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // LAY 0x2 MANU — 1 alerta por jogo, edita placar
+  // LAY 0x2 MANU — 1 alerta por jogo, só até o minuto 20
   if (pendJogo.some(p => p.strat === 'lay_0x2')) {
-    if (golsCasa === 0 && golsFora <= 2 && raioMand)
-      await alertar('lay_0x2', `Raio Mandante · ${placar}!`, 'lay_0x2_live');
+    if (tempo <= 20 && golsCasa === 0 && golsFora <= 2 && raioMand)
+      await alertar('lay_0x2', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x2_live');
   }
 
-  // LAY 0x3 — 1 alerta por jogo, edita placar
+  // LAY 0x3 — 1 alerta por jogo, só até o minuto 20
   if (pendJogo.some(p => p.strat === 'lay_0x3')) {
-    if (golsCasa === 0 && golsFora <= 3 && raioMand)
-      await alertar('lay_0x3', `Raio Mandante · ${placar}!`, 'lay_0x3_live');
+    if (tempo <= 20 && golsCasa === 0 && golsFora <= 3 && raioMand)
+      await alertar('lay_0x3', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x3_live');
   }
 
   // LAY xG
@@ -774,7 +825,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('atolada_master', 'AM xG + HT 0x0 + Raio no 1T!', 'atolada_master_live');
   }
 
-  // OVER 0,5 GONZA
+  // OVER 0,5 GONZA — 2T corrigido para depender só de periodo === '2_tempo'
   if (pendJogo.some(p => p.strat === 'over05')) {
     if (is1T && total === 0 && raioMand && raioVisit)
       await alertar('over05', '0x0 + Raio dos dois times no 1T! (entrar Over HT)', 'over05_live');
@@ -802,9 +853,25 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   const jogo = estado.jogo;
   if (!jogo) return;
 
-  const golsCasa = parseInt(jogo.gols_casa) || 0;
-  const golsFora = parseInt(jogo.gols_fora) || 0;
-  const placarFT = `${golsCasa}x${golsFora}`;
+  // Se detectamos pênaltis/prorrogação, usar o placar do tempo normal congelado
+  // para o cálculo de resultado. O placar real (com pênaltis) ainda é exibido no FT.
+  const golsCasaApi = parseInt(jogo.gols_casa) || 0;
+  const golsForaApi = parseInt(jogo.gols_fora) || 0;
+  const placarFTApi = `${golsCasaApi}x${golsForaApi}`;
+
+  let golsCasa = golsCasaApi, golsFora = golsForaApi;
+  let placarParaCalculo = placarFTApi;
+  if (estado.placarTempoNormal) {
+    const [pc, pf] = estado.placarTempoNormal.split('x').map(Number);
+    if (!isNaN(pc) && !isNaN(pf)) {
+      golsCasa = pc;
+      golsFora = pf;
+      placarParaCalculo = estado.placarTempoNormal;
+      console.log(`[FIM] ${jogoId} → placar API: ${placarFTApi} (com pênaltis/prorrogação) · usando tempo normal: ${placarParaCalculo} para cálculo`);
+    }
+  }
+  const placarFT = placarFTApi; // exibido nas mensagens (placar real do jogo)
+
   const links    = linksExchanges(jogo.urls_exchanges || {});
 
   const pendJogo = pendentes.filter(p =>
@@ -812,7 +879,7 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
-  // Resolver pendentes
+  // Resolver pendentes — usa placarParaCalculo (tempo normal) para acerto/erro
   for (const p of pendJogo) {
     p.final  = placarFT;
     p.ht     = estado.htPlacar || '';
@@ -862,7 +929,7 @@ function agendarHoraBRT(hora, minuto, callback) {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_37',
+  status: 'ok', version: 'server_38',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -895,6 +962,7 @@ app.get('/estado-live', (req, res) => {
     resumo[k] = {
       minuto: v.ultimoMinuto, encerrado: v.encerrado,
       ultimoPlacar: v.ultimoPlacar,
+      placarTempoNormal: v.placarTempoNormal || null,
       alertas: Object.keys(v.msgIds || {})
     };
   }
@@ -902,7 +970,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v37 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v38 funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -918,7 +986,7 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v37 na porta ${PORT}`);
+  console.log(`FUTATS Server v38 na porta ${PORT}`);
 
   // Buscar jogos pré-jogo
   await buscarPreJogo();
@@ -927,18 +995,19 @@ app.listen(PORT, async () => {
   // Monitoramento live
   setInterval(monitorarLive, 90 * 1000);
 
-  // Agendar card matinal 08:00 BRT e resumo 23:00 BRT
+  // Agendar: 08h card matinal · 18h resumo parcial · 00h resumo do dia anterior + card novo dia
   agendarHoraBRT(8,  0, enviarCardMatinal);
-  agendarHoraBRT(23, 0, enviarResumoDia);
+  agendarHoraBRT(18, 0, enviarResumoDia);
+  agendarHoraBRT(0,  0, enviarResumoECard);
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v37 iniciado!</b>\n' +
-    '✅ 1 alerta por estratégia por jogo\n' +
-    '✅ Edição de placar em tempo real\n' +
-    '✅ GREEN/RED editado ao fim do jogo\n' +
-    '✅ Card matinal 08h · Resumo 23h\n' +
-    '✅ Lay ao placar: 1 alerta + edições'
+    '🚀 <b>FUTATS Server v38 iniciado!</b>\n' +
+    '✅ Fix is2T/is1T — periodo real (sem bug de acréscimos)\n' +
+    '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20\n' +
+    '✅ Placar de pênaltis/prorrogação congelado p/ cálculo\n' +
+    '✅ Nova estratégia: Ambas Marcam xG (🟤)\n' +
+    '✅ Horários: 08h card · 18h resumo · 00h resumo+card'
   );
 
   // Enviar card e resumo imediatamente ao subir
