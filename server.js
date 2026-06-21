@@ -754,9 +754,9 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 8. LAY 0x1 — 1 alerta por jogo, só até o minuto 20
+  // 8. LAY 0x1 — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
   if (pendJogo.some(p => p.strat === 'lay_0x1')) {
-    if (tempo <= 20) {
+    if (tempo <= 20 && !isHT) {
       if (raioMand && total === 0)
         await alertar('lay_0x1', '0x0 + Raio do Mandante (até min 20)!', 'lay_0x1_live');
       else if (raioMand && golsCasa === 0 && golsFora === 1)
@@ -764,9 +764,9 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 9. LAY 1x0 — 1 alerta por jogo, só até o minuto 20
+  // 9. LAY 1x0 — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
   if (pendJogo.some(p => p.strat === 'lay_1x0')) {
-    if (tempo <= 20) {
+    if (tempo <= 20 && !isHT) {
       if (raioVisit && total === 0)
         await alertar('lay_1x0', '0x0 + Raio do Visitante (até min 20)!', 'lay_1x0_live');
       else if (raioVisit && golsCasa === 1 && golsFora === 0)
@@ -774,15 +774,15 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 10. LAY GOLEADA VISITANTE — 1 alerta por jogo, só até o minuto 20
+  // 10. LAY GOLEADA VISITANTE — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
   if (pendJogo.some(p => p.strat === 'lay_goleada_visit')) {
-    if (tempo <= 20 && raioMand)
+    if (tempo <= 20 && !isHT && raioMand)
       await alertar('lay_goleada_visit', 'Raio do Mandante (até min 20)!', 'lay_goleada_visit_live');
   }
 
-  // 11. LAY GOLEADA MANDANTE — 1 alerta por jogo, só até o minuto 20
+  // 11. LAY GOLEADA MANDANTE — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
   if (pendJogo.some(p => p.strat === 'lay_goleada_mand')) {
-    if (tempo <= 20 && raioVisit)
+    if (tempo <= 20 && !isHT && raioVisit)
       await alertar('lay_goleada_mand', 'Raio do Visitante (até min 20)!', 'lay_goleada_mand_live');
   }
 
@@ -832,15 +832,15 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // LAY 0x2 MANU — 1 alerta por jogo, só até o minuto 20
+  // LAY 0x2 MANU — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
   if (pendJogo.some(p => p.strat === 'lay_0x2')) {
-    if (tempo <= 20 && golsCasa === 0 && golsFora <= 2 && raioMand)
+    if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 2 && raioMand)
       await alertar('lay_0x2', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x2_live');
   }
 
-  // LAY 0x3 — 1 alerta por jogo, só até o minuto 20
+  // LAY 0x3 — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
   if (pendJogo.some(p => p.strat === 'lay_0x3')) {
-    if (tempo <= 20 && golsCasa === 0 && golsFora <= 3 && raioMand)
+    if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 3 && raioMand)
       await alertar('lay_0x3', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x3_live');
   }
 
@@ -915,6 +915,13 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   }
   const placarFT = placarFTApi; // exibido nas mensagens (placar real do jogo)
 
+  // Extrair placar do HT (necessário para estratégias como over05 que dependem do HT)
+  let htH = 0, htA = 0;
+  if (estado.htPlacar) {
+    const [ph, pa] = estado.htPlacar.split('x').map(Number);
+    if (!isNaN(ph) && !isNaN(pa)) { htH = ph; htA = pa; }
+  }
+
   const links    = linksExchanges(jogo.urls_exchanges || {});
 
   const pendJogo = pendentes.filter(p =>
@@ -922,11 +929,12 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
-  // Resolver pendentes — usa placarParaCalculo (tempo normal) para acerto/erro
+  // Resolver pendentes — usa placarParaCalculo (tempo normal) para acerto/erro,
+  // e htH/htA reais para estratégias que dependem do placar do intervalo
   for (const p of pendJogo) {
     p.final  = placarFT;
     p.ht     = estado.htPlacar || '';
-    const res = calcularResultado(p.strat, golsCasa, golsFora);
+    const res = calcularResultado(p.strat, golsCasa, golsFora, htH, htA);
     p.result  = res || 'resolvido';
   }
   salvarArquivo(PEND_FILE, pendentes);
@@ -941,7 +949,7 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
       return ps === stratBase || ps === stratKey;
     });
 
-    const res     = pLive?.result || calcularResultado(stratBase, golsCasa, golsFora);
+    const res     = pLive?.result || calcularResultado(stratBase, golsCasa, golsFora, htH, htA);
     const emoji   = res === 'green' ? '✅ GREEN' : '❌ RED';
     const display = STRAT_DISPLAY[stratKey] || stratKey;
 
