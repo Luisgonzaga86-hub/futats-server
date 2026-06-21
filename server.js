@@ -586,7 +586,7 @@ function montarMsgAlerta(display, jogo, tempo, placarAlerta, placarAtual, links,
 
 // ── Atualizar placar nas mensagens ativas ─────────────────────
 async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
-  const tempo = parseInt(jogo.tempo) || 0;
+  const tempo = jogo.tempo === 'Intervalo' ? 'HT' : (parseInt(jogo.tempo) || 0);
   const links = linksExchanges(estado.jogo?.urls_exchanges || {});
 
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
@@ -602,7 +602,12 @@ async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
 
 // ── Alertas live ──────────────────────────────────────────────
 async function processarAlertasLive(jogo, estado, jogoId, hoje) {
-  const tempo    = parseInt(jogo.tempo) || 0;
+  const tempoNum = parseInt(jogo.tempo) || 0;
+  const ehIntervalo = jogo.tempo === 'Intervalo';
+  // tempo: usado nas condições numéricas (<=20, etc) — fica 0 no intervalo, igual antes
+  const tempo    = tempoNum;
+  // tempoDisplay: usado só para exibição na mensagem — mostra "HT" no intervalo
+  const tempoDisplay = ehIntervalo ? 'HT' : tempoNum;
   const periodo  = jogo.periodo || '';
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
@@ -651,7 +656,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     const display = STRAT_DISPLAY[stratKey] || stratKey;
     const linhaInfo = dica ? `\n💡 ${dica}` : '';
     const textoCompleto = montarMsgAlerta(
-      display + linhaInfo, jogo, tempo, placar, placar, links
+      display + linhaInfo, jogo, tempoDisplay, placar, placar, links
     );
 
     const ids = await sendTelegram(textoCompleto);
@@ -659,7 +664,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     estado.msgIds[stratKey] = {
       ids,
       placarAlerta: placar,
-      tempoAlerta:  tempo,
+      tempoAlerta:  tempoDisplay,
       stratKey,
     };
 
@@ -871,9 +876,9 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   // OVER 0,5 GONZA — 2T corrigido para depender só de periodo === '2_tempo'
   if (pendJogo.some(p => p.strat === 'over05')) {
     if (is1T && total === 0 && raioMand && raioVisit)
-      await alertar('over05', '0x0 + Raio dos dois times no 1T! (entrar Over HT)', 'over05_live');
+      await alertar('over05', '0x0 + Raio dos dois times no 1T! (entrar Over 0,5 Limite)', 'over05_live');
     else if (isHT && total === 0 && tevRaioMand)
-      await alertar('over05', 'Intervalo 0x0! Entrar agora no Over HT!', 'over05_live');
+      await alertar('over05', 'Intervalo 0x0! Entrar agora no Over 0,5 Limite!', 'over05_live');
     else if (is2T && total === 0 && temRaio)
       await alertar('over05', '0x0 + Raio no 2T!', 'over05_live');
   }
@@ -1021,7 +1026,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v38 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v39 funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -1037,7 +1042,7 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v38 na porta ${PORT}`);
+  console.log(`FUTATS Server v39 na porta ${PORT}`);
 
   // Buscar jogos pré-jogo
   await buscarPreJogo();
@@ -1053,7 +1058,7 @@ app.listen(PORT, async () => {
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v38 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v39 iniciado!</b>\n' +
     '✅ Fix is2T/is1T — periodo real (sem bug de acréscimos)\n' +
     '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20\n' +
     '✅ Placar de pênaltis/prorrogação congelado p/ cálculo\n' +
