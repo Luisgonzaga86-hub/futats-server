@@ -546,6 +546,7 @@ async function monitorarLive() {
       // Salvar placar HT quando detectar intervalo
       if (jogo.tempo === 'Intervalo' && !estado.htPlacar) {
         estado.htPlacar = placarAtual;
+        estado.passouHT = true;
         console.log(`[HT] ${jogoId} → HT: ${placarAtual}`);
       }
 
@@ -620,10 +621,18 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const oddFora  = parseFloat(jogo.odd_atual_fora || 0);
 
   const isHT  = jogo.tempo === 'Intervalo';
-  // CORREÇÃO: usar exclusivamente o campo periodo (evita acréscimos do 1T
-  // sendo contados como 2T)
-  const is1T  = (periodo === '1_tempo') && !isHT;
-  const is2T  = (periodo === '2_tempo') && !isHT;
+  // CORREÇÃO: usar o histórico do jogo (passou pelo intervalo) como sinal confiável
+  // de 2T, combinado com o campo periodo quando disponível. Isso evita tanto o bug
+  // de acréscimos do 1T contados como 2T quanto o problema de "periodo" não vir
+  // exatamente como esperado da API.
+  const periodoIndica1T = periodo === '1_tempo';
+  const periodoIndica2T = periodo === '2_tempo';
+  const jaPassouHT      = !!estado.passouHT;
+
+  // 2T = não está no intervalo E (periodo confirma 2T OU já passamos pelo HT)
+  const is2T = !isHT && (periodoIndica2T || (jaPassouHT && !periodoIndica1T));
+  // 1T = não está no intervalo, não é 2T, e (periodo confirma 1T OU ainda não passamos pelo HT)
+  const is1T = !isHT && !is2T && (periodoIndica1T || !jaPassouHT);
 
   const evNovos   = jogo.eventos || [];
   const raiosCasa = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa');
