@@ -924,6 +924,20 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   const jogo = estado.jogo;
   if (!jogo) return;
 
+  // Evitar reprocessar/reenviar "FIM DE JOGO" para jogos que já foram resolvidos
+  // antes (ex: servidor reiniciou e a API ainda retorna o jogo por um tempo).
+  // Se já existe pelo menos um pendente desse jogo com resultado != 'pendente',
+  // significa que esse jogo já foi processado anteriormente.
+  const jaResolvidoAntes = pendentes.some(p =>
+    p.data === hoje &&
+    (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`) &&
+    p.result !== 'pendente'
+  );
+  if (jaResolvidoAntes) {
+    console.log(`[FIM] ${jogoId} já tinha sido resolvido anteriormente — pulando reenvio.`);
+    return;
+  }
+
   // Se detectamos pênaltis/prorrogação, usar o placar do tempo normal congelado
   // para o cálculo de resultado. O placar real (com pênaltis) ainda é exibido no FT.
   const golsCasaApi = parseInt(jogo.gols_casa) || 0;
