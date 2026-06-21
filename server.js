@@ -96,6 +96,41 @@ async function futatsGet(endpoint) {
   return r.json();
 }
 
+// ── Envio paginado para mensagens longas ──────────────────────
+// Recebe um cabeçalho (sempre na 1ª parte) e uma lista de "blocos" de texto
+// (cada bloco = ex. um jogo inteiro, ou um horário inteiro) que NUNCA são
+// cortados no meio. Agrupa blocos em mensagens até o limite de caracteres,
+// numerando "parte X/Y" quando há mais de uma mensagem.
+const TELEGRAM_LIMITE_CHARS = 3800; // margem de segurança abaixo do limite real de 4096
+
+async function enviarEmPartes(cabecalho, blocos, rodape = '') {
+  const partes = [];
+  let atual = cabecalho;
+
+  for (const bloco of blocos) {
+    // Se adicionar este bloco ultrapassar o limite, fecha a parte atual e abre outra
+    if ((atual + bloco).length > TELEGRAM_LIMITE_CHARS && atual !== cabecalho) {
+      partes.push(atual);
+      atual = '';
+    }
+    atual += bloco;
+  }
+  if (atual) partes.push(atual);
+
+  // Anexa o rodapé na última parte
+  if (rodape && partes.length) {
+    partes[partes.length - 1] += rodape;
+  } else if (rodape) {
+    partes.push(rodape);
+  }
+
+  const total = partes.length;
+  for (let i = 0; i < total; i++) {
+    const prefixo = total > 1 ? `<i>(parte ${i+1}/${total})</i>\n` : '';
+    await sendTelegram(prefixo + partes[i]);
+  }
+}
+
 function getFavorito(jogo) {
   const oc  = parseFloat(jogo.odd_inicial_casa || jogo.odd_casa || 99);
   const of_ = parseFloat(jogo.odd_inicial_fora || jogo.odd_fora || 99);
@@ -268,18 +303,23 @@ async function enviarCardMatinal(dataAlvo = null) {
     byHora[j.hora].push(j);
   }
 
-  let msg = `📋 <b>FUTATS — Jogos do dia ${dd}/${mm}/${yyyy}</b>\n`;
+  const cabecalho = `📋 <b>FUTATS — Jogos do dia ${dd}/${mm}/${yyyy}</b>\n`;
 
+  // Cada bloco = um horário inteiro com todos os jogos daquele horário
+  // (nunca corta um horário no meio entre duas mensagens)
+  const blocos = [];
   for (const [hora, jogos] of Object.entries(byHora)) {
-    msg += `\n🕐 <b>${hora}</b>\n`;
+    let bloco = `\n🕐 <b>${hora}</b>\n`;
     for (const j of jogos) {
       const stratsDisplay = j.strats.map(s => STRAT_DISPLAY[s] || s).join(' · ');
-      msg += `⚽ ${j.jogo}\n${stratsDisplay}\n`;
+      bloco += `⚽ ${j.jogo}\n${stratsDisplay}\n`;
     }
+    blocos.push(bloco);
   }
 
-  msg += `\n📊 ${jogosOrdenados.length} jogo(s) · ${pendHoje.length} estratégia(s)`;
-  await sendTelegram(msg);
+  const rodape = `\n📊 ${jogosOrdenados.length} jogo(s) · ${pendHoje.length} estratégia(s)`;
+
+  await enviarEmPartes(cabecalho, blocos, rodape);
   console.log('[CARD] Card matinal enviado.');
 }
 
@@ -305,8 +345,10 @@ async function enviarResumoDia(dataAlvo = null) {
   const jogosOrdenados = Object.values(byJogo).sort((a, b) => a.hora.localeCompare(b.hora));
 
   let greens = 0, reds = 0, pendCount = 0;
-  let linhas = '';
 
+  // Cada bloco = um jogo inteiro com todas as estratégias dele
+  // (nunca corta um jogo no meio entre duas mensagens)
+  const blocos = [];
   for (const j of jogosOrdenados) {
     const stratsStr = j.strats.map(p => {
       const nome = STRAT_DISPLAY[p.strat.replace(/_live$/, '')] || p.strat;
@@ -317,14 +359,15 @@ async function enviarResumoDia(dataAlvo = null) {
       return `${nome}${tipo} ⏳`;
     }).join('\n  ');
 
-    linhas += `\n⚽ <b>${j.jogo}</b> · ${j.hora}\n  ${stratsStr}\n`;
+    blocos.push(`\n⚽ <b>${j.jogo}</b> · ${j.hora}\n  ${stratsStr}\n`);
   }
 
-  const saldo = greens + reds > 0
+  const cabecalho = `📊 <b>FUTATS — Resumo ${dd}/${mm}/${yyyy}</b>`;
+  const rodape = greens + reds > 0
     ? `\n✅ ${greens} GREEN · ❌ ${reds} RED · ⏳ ${pendCount} pendente(s)`
     : `\n⏳ ${pendCount} pendente(s)`;
 
-  await sendTelegram(`📊 <b>FUTATS — Resumo ${dd}/${mm}/${yyyy}</b>${linhas}${saldo}`);
+  await enviarEmPartes(cabecalho, blocos, rodape);
   console.log('[RESUMO] Resumo do dia enviado.');
 }
 
@@ -929,7 +972,7 @@ function agendarHoraBRT(hora, minuto, callback) {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_38',
+  status: 'ok', version: 'server_39',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
