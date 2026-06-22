@@ -523,8 +523,13 @@ async function monitorarLive() {
         );
         if (!jaExiste) estado.eventos.push(ev);
       }
-      if (estado.momentum.length > 0) {
-        estado.ultimoMinuto = Math.max(...estado.momentum.map(m => m.minuto));
+      // CORREÇÃO: o array momentum vem pré-preenchido com ~92 entradas (1 a 90.5)
+      // desde o INÍCIO do jogo, com os minutos futuros zerados — NÃO é incremental.
+      // Por isso não podemos usar Math.max(momentum.minuto) para saber o minuto
+      // atual do jogo; usamos o campo jogo.tempo diretamente.
+      const tempoAtualNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
+      if (jogo.tempo !== 'Intervalo' && tempoAtualNum > 0) {
+        estado.ultimoMinuto = tempoAtualNum;
       }
 
       if (jogo.tempo === 'Encerrado' && !estado.encerrado) {
@@ -657,6 +662,13 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const raioVisit = raiosFora.length > 0;
   const temRaio   = raioMand || raioVisit;
 
+  // Raio confirmado no 2º tempo REAL — usa o campo 'periodo' de cada evento
+  // individual (existe e é confiável), em vez de inferir do estado geral do
+  // jogo. Isso garante precisão mesmo durante os acréscimos do 1T.
+  const raiosCasa2T = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa' && e.periodo === '2_tempo');
+  const raiosFora2T = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'fora' && e.periodo === '2_tempo');
+  const temRaio2T    = raiosCasa2T.length > 0 || raiosFora2T.length > 0;
+
   const chutesGolCasa = evNovos.filter(e => e.tipo_evento === 'chute_no_gol' && e.lado === 'casa').length;
   const chutesGolFora = evNovos.filter(e => e.tipo_evento === 'chute_no_gol' && e.lado === 'fora').length;
 
@@ -719,9 +731,9 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('recup_favorito', 'Favorito perdendo por 1 + Raio!', 'recup_favorito_live');
   }
 
-  // 3. GOL NO FINAL — agora só dispara depois que o jogo passou pelo intervalo (is2T)
+  // 3. GOL NO FINAL — exige raio CONFIRMADO no 2º tempo (periodo do evento)
   if (pendJogo.some(p => p.strat === 'gol_no_final')) {
-    if (is2T && !isHT && temRaio)
+    if (temRaio2T)
       await alertar('gol_no_final', 'Raio no 2T!', 'gol_no_final_live');
   }
 
@@ -896,13 +908,13 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('atolada_master', 'AM xG + HT 0x0 + Raio no 1T!', 'atolada_master_live');
   }
 
-  // OVER 0,5 GONZA — 2T corrigido para depender de já ter passado pelo intervalo
+  // OVER 0,5 GONZA — no 2T exige raio CONFIRMADO no 2º tempo (periodo do evento)
   if (pendJogo.some(p => p.strat === 'over05')) {
     if (is1T && total === 0 && raioMand && raioVisit)
       await alertar('over05', '0x0 + Raio dos dois times no 1T! (entrar Over 0,5 Limite)', 'over05_live');
     else if (isHT && total === 0 && tevRaioMand)
       await alertar('over05', 'Intervalo 0x0! Entrar agora no Over 0,5 Limite!', 'over05_live');
-    else if (is2T && total === 0 && temRaio)
+    else if (!isHT && total === 0 && temRaio2T)
       await alertar('over05', '0x0 + Raio no 2T!', 'over05_live');
   }
 
@@ -1107,6 +1119,7 @@ app.listen(PORT, async () => {
     '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
     '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
     '✅ Fix is2T/is1T — campo periodo (inexistente na API) removido, usa histórico do jogo\n' +
+    '✅ Gol no Final / Over 0,5 2T — raio confirmado via periodo do evento (precisão total)\n' +
     '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20'
   );
 
