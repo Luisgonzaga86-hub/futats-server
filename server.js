@@ -175,12 +175,12 @@ function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
   const s   = strat.replace(/_live$|_pre$/, '');
   const tot = ftH + ftA;
   switch(s) {
-    case 'lay_0x1':              return (ftH === 0 && ftA === 1) ? 'red' : 'green';
-    case 'lay_1x0':              return (ftH === 1 && ftA === 0) ? 'red' : 'green';
-    case 'lay_0x2':              return (ftH === 0 && ftA === 2) ? 'red' : 'green';
+    case 'lay_0x1_ia':           return (ftH === 0 && ftA === 1) ? 'red' : 'green';
+    case 'lay_1x0_ia':           return (ftH === 1 && ftA === 0) ? 'red' : 'green';
+    case 'lay_0x2_manu':         return (ftH === 0 && ftA === 2) ? 'red' : 'green';
     case 'lay_0x3':               return (ftH === 0 && ftA === 3) ? 'red' : 'green';
-    case 'lay_goleada_visit':    return (ftA - ftH >= 4 && ftA > ftH) ? 'red' : 'green';
-    case 'lay_goleada_mand':     return (ftH - ftA >= 4 && ftH > ftA) ? 'red' : 'green';
+    case 'lay_gol_visit':        return (ftA - ftH >= 4 && ftA > ftH) ? 'red' : 'green';
+    case 'lay_gol_mand':         return (ftH - ftA >= 4 && ftH > ftA) ? 'red' : 'green';
     case 'favorito_ht_gonza':
     case 'lay_away_manu':
     case 'lay_manu4':            return ftA > ftH ? 'red' : 'green';
@@ -188,11 +188,11 @@ function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
     case 'back_favorito':
     case 'back_fav_ht':
     case 'back_gonza_xg':        return ftH > ftA ? 'green' : 'red';
-    case 'recuperacao_favorito': return null;
+    case 'recup_favorito':       return null;
     case 'over05':               return (htH === 0 && htA === 0) ? (tot > 0 ? 'green' : 'red') : 'nao_entra';
-    case 'over15':
+    case 'over15_ia':
     case 'felipe_over15':        return tot > 1 ? 'green' : 'red';
-    case 'over25':               return tot > 2 ? 'green' : 'red';
+    case 'over25_ia':            return tot > 2 ? 'green' : 'red';
     case 'over05_ht':            return tot > 0 ? 'green' : 'red';
     case 'over15_ht':            return tot > 1 ? 'green' : 'red';
     case 'ambas_marcam':
@@ -200,8 +200,8 @@ function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
     case 'am_xg':                return (ftH > 0 && ftA > 0) ? 'green' : 'red';
     case 'ambas_marcam_xg':       return (ftH > 0 && ftA > 0) ? 'green' : 'red';
     case 'gol_no_final':         return (ftH + ftA) > (htH + htA) ? 'green' : 'red';
-    case 'correcao_lay_fav':
-    case 'correcao_lay_zebra':   return null;
+    case 'corr_lay_fav':
+    case 'corr_lay_zebra':       return null;
     default:                     return tot > 0 ? 'green' : 'red';
   }
 }
@@ -209,25 +209,25 @@ function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
 // ── DISPLAY NAMES ─────────────────────────────────────────────
 const STRAT_DISPLAY = {
   back_favorito:        '🤖 Back Favorito',
-  recuperacao_favorito: '🤖 Recuperação Favorito',
+  recup_favorito:       '🤖 Recuperação Favorito',
   gol_no_final:         '🤖 Gol no Final',
   over05_ht:            '🤖 Over 0.5 HT',
   over15_ht:            '🤖 Over 1.5 HT',
-  over15:               '🤖 Over 1.5',
-  over25:               '🤖 Over 2.5',
+  over15_ia:            '🤖 Over 1.5',
+  over25_ia:            '🤖 Over 2.5',
   ambas_marcam:         '🤖 Ambas Marcam',
-  lay_0x1:              '🤖 Lay Resultado 0x1',
-  lay_1x0:              '🤖 Lay Resultado 1x0',
-  lay_goleada_visit:    '🤖 Lay Goleada Visitante',
-  lay_goleada_mand:     '🤖 Lay Goleada Mandante',
-  correcao_lay_fav:     '🤖 Correção Lay Favorito',
-  correcao_lay_zebra:   '🤖 Correção Lay Zebra',
+  lay_0x1_ia:           '🤖 Lay Resultado 0x1',
+  lay_1x0_ia:           '🤖 Lay Resultado 1x0',
+  lay_gol_visit:        '🤖 Lay Goleada Visitante',
+  lay_gol_mand:         '🤖 Lay Goleada Mandante',
+  corr_lay_fav:         '🤖 Correção Lay Favorito',
+  corr_lay_zebra:       '🤖 Correção Lay Zebra',
   favorito_ht_gonza:    '🔵 Favorito ht Gonza',
   felipe_over15:        '🟠 Felipe Over 1.5',
   lay_away_manu:        '⚪ Lay Away Manu',
   lay_manu4:            '⚪ Lay Manu 4',
   back_gonza_xg:        '🔵 Back Gonza com xG',
-  lay_0x2:              '⚪ Lay 0x2 Manu',
+  lay_0x2_manu:         '🪗 Lay 0x2 Manu',
   lay_0x3:              '⚪ Lay 0x3',
   lay_xg:               '🟣 Lay xG',
   am_xg:                '🟤 AM xG',
@@ -239,18 +239,18 @@ const STRAT_DISPLAY = {
 
 const IA_PARA_STRAT = {
   'Back Favorito':          'back_favorito',
-  'Recuperação Favorito':   'recuperacao_favorito',
+  'Recuperação Favorito':   'recup_favorito',
   'Gol no Final':           'gol_no_final',
   'Over 0.5 HT':            'over05_ht',
-  'Over 1.5':               'over15',
-  'Over 2.5':               'over25',
+  'Over 1.5':               'over15_ia',
+  'Over 2.5':               'over25_ia',
   'Ambas Marcam':           'ambas_marcam',
-  'Lay Resultado 0x1':      'lay_0x1',
-  'Lay Resultado 1x0':      'lay_1x0',
-  'Lay Goleada Visitante':  'lay_goleada_visit',
-  'Lay Goleada Mandante':   'lay_goleada_mand',
-  'Correção Lay Favorito':  'correcao_lay_fav',
-  'Correção Lay Zebra':     'correcao_lay_zebra',
+  'Lay Resultado 0x1':      'lay_0x1_ia',
+  'Lay Resultado 1x0':      'lay_1x0_ia',
+  'Lay Goleada Visitante':  'lay_gol_visit',
+  'Lay Goleada Mandante':   'lay_gol_mand',
+  'Correção Lay Favorito':  'corr_lay_fav',
+  'Correção Lay Zebra':     'corr_lay_zebra',
 };
 
 const FILTRO_PARA_STRAT = {
@@ -259,19 +259,16 @@ const FILTRO_PARA_STRAT = {
   'lay away Manu':      'lay_away_manu',
   'Lay Manu 4':         'lay_manu4',
   'back gonza com xg':  'back_gonza_xg',
-  'lay 0x2 Manu':       'lay_0x2',
+  'lay 0x2 Manu':       'lay_0x2_manu',
   'lay 0x3':            'lay_0x3',
   'ambas marcam xg':    'ambas_marcam_xg',
 };
 
 const ESTRAT_PARA_STRAT = {
   'Over 0,5 Gonza':   'over05',
-  'Felipe over 1.5':  'felipe_over15',
-  'Back Favorito HT': 'back_fav_ht',
-  'Lay xG':           'lay_xg',
-  'AM xG':            'am_xg',
-  'AM':               'am',
-  'ambas marcam xg':  'ambas_marcam_xg',
+  'Lay xg':           'lay_xg',
+  'ambas gonza':      'am',
+  'ambos xg pro':     'am_xg',
 };
 
 // ── CARD MATINAL ──────────────────────────────────────────────
@@ -713,10 +710,10 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   }
 
   // 2. RECUPERAÇÃO FAVORITO
-  if (pendJogo.some(p => p.strat === 'recuperacao_favorito')) {
+  if (pendJogo.some(p => p.strat === 'recup_favorito')) {
     const favPerdendo1 = (favorito==='casa' && golsFora-golsCasa===1) || (favorito==='fora' && golsCasa-golsFora===1);
     if (favPerdendo1 && tevRaioFav)
-      await alertar('recuperacao_favorito', 'Favorito perdendo por 1 + Raio!', 'recuperacao_favorito_live');
+      await alertar('recup_favorito', 'Favorito perdendo por 1 + Raio!', 'recup_favorito_live');
   }
 
   // 3. GOL NO FINAL — agora só dispara em periodo === '2_tempo' real
@@ -735,25 +732,25 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('over15_ht', '1 gol + Raio antes min 20!', 'over15_ht_live');
   }
 
-  // 5. OVER 1.5
-  if (pendJogo.some(p => p.strat === 'over15')) {
+  // 5. OVER 1.5 (Seleção IA)
+  if (pendJogo.some(p => p.strat === 'over15_ia')) {
     if (total === 0 && temRaio)
-      await alertar('over15', '0x0 + Raio!', 'over15_live');
+      await alertar('over15_ia', '0x0 + Raio!', 'over15_ia_live');
     if (is1T && total === 1 && temRaio) {
       const raioPerdendo = (golsCasa < golsFora && raioMand) || (golsFora < golsCasa && raioVisit);
       if (raioPerdendo)
-        await alertar('over15', `${placar} + Raio do time perdendo!`, 'over15_live');
+        await alertar('over15_ia', `${placar} + Raio do time perdendo!`, 'over15_ia_live');
     }
   }
 
-  // 6. OVER 2.5
-  if (pendJogo.some(p => p.strat === 'over25')) {
+  // 6. OVER 2.5 (Seleção IA)
+  if (pendJogo.some(p => p.strat === 'over25_ia')) {
     if (total === 0 && temRaio)
-      await alertar('over25', '0x0 + Raio! (entrar Over 1.5)', 'over25_live');
+      await alertar('over25_ia', '0x0 + Raio! (entrar Over 1.5)', 'over25_ia_live');
     if (is1T && total === 1 && temRaio) {
       const raioPerdendo = (golsCasa < golsFora && raioMand) || (golsFora < golsCasa && raioVisit);
       if (raioPerdendo)
-        await alertar('over25', `${placar} + Raio do time perdendo! (entrar Over 1.5)`, 'over25_live');
+        await alertar('over25_ia', `${placar} + Raio do time perdendo! (entrar Over 1.5)`, 'over25_ia_live');
     }
   }
 
@@ -782,48 +779,48 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 8. LAY 0x1 — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
-  if (pendJogo.some(p => p.strat === 'lay_0x1')) {
+  // 8. LAY 0x1 (IA) — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
+  if (pendJogo.some(p => p.strat === 'lay_0x1_ia')) {
     if (tempo <= 20 && !isHT) {
       if (raioMand && total === 0)
-        await alertar('lay_0x1', '0x0 + Raio do Mandante (até min 20)!', 'lay_0x1_live');
+        await alertar('lay_0x1_ia', '0x0 + Raio do Mandante (até min 20)!', 'lay_0x1_ia_live');
       else if (raioMand && golsCasa === 0 && golsFora === 1)
-        await alertar('lay_0x1', '⚠️ Placar 0x1! Raio Mandante — feche e aguarde!', 'lay_0x1_live');
+        await alertar('lay_0x1_ia', '⚠️ Placar 0x1! Raio Mandante — feche e aguarde!', 'lay_0x1_ia_live');
     }
   }
 
-  // 9. LAY 1x0 — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
-  if (pendJogo.some(p => p.strat === 'lay_1x0')) {
+  // 9. LAY 1x0 (IA) — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
+  if (pendJogo.some(p => p.strat === 'lay_1x0_ia')) {
     if (tempo <= 20 && !isHT) {
       if (raioVisit && total === 0)
-        await alertar('lay_1x0', '0x0 + Raio do Visitante (até min 20)!', 'lay_1x0_live');
+        await alertar('lay_1x0_ia', '0x0 + Raio do Visitante (até min 20)!', 'lay_1x0_ia_live');
       else if (raioVisit && golsCasa === 1 && golsFora === 0)
-        await alertar('lay_1x0', '⚠️ Placar 1x0! Raio Visitante — feche e aguarde!', 'lay_1x0_live');
+        await alertar('lay_1x0_ia', '⚠️ Placar 1x0! Raio Visitante — feche e aguarde!', 'lay_1x0_ia_live');
     }
   }
 
   // 10. LAY GOLEADA VISITANTE — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
-  if (pendJogo.some(p => p.strat === 'lay_goleada_visit')) {
+  if (pendJogo.some(p => p.strat === 'lay_gol_visit')) {
     if (tempo <= 20 && !isHT && raioMand)
-      await alertar('lay_goleada_visit', 'Raio do Mandante (até min 20)!', 'lay_goleada_visit_live');
+      await alertar('lay_gol_visit', 'Raio do Mandante (até min 20)!', 'lay_gol_visit_live');
   }
 
   // 11. LAY GOLEADA MANDANTE — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
-  if (pendJogo.some(p => p.strat === 'lay_goleada_mand')) {
+  if (pendJogo.some(p => p.strat === 'lay_gol_mand')) {
     if (tempo <= 20 && !isHT && raioVisit)
-      await alertar('lay_goleada_mand', 'Raio do Visitante (até min 20)!', 'lay_goleada_mand_live');
+      await alertar('lay_gol_mand', 'Raio do Visitante (até min 20)!', 'lay_gol_mand_live');
   }
 
   // 12. CORREÇÃO LAY FAVORITO
-  if (pendJogo.some(p => p.strat === 'correcao_lay_fav')) {
+  if (pendJogo.some(p => p.strat === 'corr_lay_fav')) {
     if (tempo <= 5 && !isHT && raioZebra)
-      await alertar('correcao_lay_fav', `Raio da Zebra no min ${tempo}!`, 'correcao_lay_fav_live');
+      await alertar('corr_lay_fav', `Raio da Zebra no min ${tempo}!`, 'corr_lay_fav_live');
   }
 
   // 13. CORREÇÃO LAY ZEBRA
-  if (pendJogo.some(p => p.strat === 'correcao_lay_zebra')) {
+  if (pendJogo.some(p => p.strat === 'corr_lay_zebra')) {
     if (tempo <= 5 && !isHT && raioFav)
-      await alertar('correcao_lay_zebra', `Raio do Favorito no min ${tempo}!`, 'correcao_lay_zebra_live');
+      await alertar('corr_lay_zebra', `Raio do Favorito no min ${tempo}!`, 'corr_lay_zebra_live');
   }
 
   // ── FILTROS ───────────────────────────────────────────────
@@ -861,9 +858,9 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   }
 
   // LAY 0x2 MANU — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
-  if (pendJogo.some(p => p.strat === 'lay_0x2')) {
+  if (pendJogo.some(p => p.strat === 'lay_0x2_manu')) {
     if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 2 && raioMand)
-      await alertar('lay_0x2', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x2_live');
+      await alertar('lay_0x2_manu', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x2_manu_live');
   }
 
   // LAY 0x3 — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
@@ -1022,7 +1019,7 @@ function agendarHoraBRT(hora, minuto, callback) {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_40',
+  status: 'ok', version: 'server_41',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -1063,7 +1060,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v40 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v41 funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -1079,7 +1076,7 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v40 na porta ${PORT}`);
+  console.log(`FUTATS Server v41 na porta ${PORT}`);
 
   // Buscar jogos pré-jogo imediatamente ao subir
   await buscarPreJogo();
@@ -1102,7 +1099,7 @@ app.listen(PORT, async () => {
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v40 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v41 iniciado!</b>\n' +
     '✅ Horários das APIs ajustados conforme documentação\n' +
     '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
     '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
