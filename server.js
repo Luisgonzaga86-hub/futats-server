@@ -540,34 +540,41 @@ async function monitorarLive() {
       }
       estado.ultimoPlacar = placarAtual;
 
-      // Salvar placar HT — usa os campos diretos da API (gols_casa_ht/gols_fora_ht)
-      // quando disponíveis; fallback para detecção pelo intervalo se a API não mandar.
-      const htCasaApi = jogo.gols_casa_ht;
-      const htForaApi = jogo.gols_fora_ht;
-      if ((htCasaApi !== undefined && htCasaApi !== null) &&
-          (htForaApi !== undefined && htForaApi !== null) && !estado.htPlacar) {
-        // Só fixa o HT quando o jogo já passou do 1T (campo passa a vir preenchido)
-        if (jogo.tempo === 'Intervalo' || jogo.periodo === '2_tempo' || estado.passouHT) {
-          estado.htPlacar = `${parseInt(htCasaApi)||0}x${parseInt(htForaApi)||0}`;
-          console.log(`[HT-API] ${jogoId} → HT (direto da API): ${estado.htPlacar}`);
-        }
-      }
-      // Fallback: detectar pelo intervalo, caso a API não tenha mandado os campos _ht
+      // Salvar placar HT — usa os campos diretos da API (gols_casa_ht/gols_fora_ht).
+      // Esses campos existem desde o início do jogo (zerados), então só os fixamos
+      // quando o jogo já estiver de fato no intervalo ou depois dele.
       if (jogo.tempo === 'Intervalo' && !estado.htPlacar) {
-        estado.htPlacar = placarAtual;
-        console.log(`[HT-FALLBACK] ${jogoId} → HT: ${placarAtual}`);
-      }
-      if (jogo.tempo === 'Intervalo' && !estado.passouHT) {
+        const htCasaApi = parseInt(jogo.gols_casa_ht);
+        const htForaApi = parseInt(jogo.gols_fora_ht);
+        estado.htPlacar = (!isNaN(htCasaApi) && !isNaN(htForaApi))
+          ? `${htCasaApi}x${htForaApi}`
+          : placarAtual; // fallback caso a API não envie os campos _ht nesse jogo
         estado.passouHT = true;
+        console.log(`[HT] ${jogoId} → HT: ${estado.htPlacar}`);
+      }
+      // Se por algum motivo a API NUNCA reportar 'Intervalo' para esse jogo
+      // (caso raro, ex: falha pontual de dados), usamos um threshold bem alto
+      // (60min) como rede de segurança — isso nunca vai capturar acréscimos
+      // normais do 1T (que ficam tipicamente entre 45-50min), evitando o bug
+      // antigo de contar acréscimos como 2T.
+      if (!estado.passouHT && (parseInt(jogo.tempo) || 0) > 60) {
+        estado.passouHT = true;
+        console.log(`[HT-FORÇADO] ${jogoId} → API nunca reportou Intervalo, forçando passouHT no minuto ${jogo.tempo}`);
+        if (!estado.htPlacar) {
+          const htCasaApi = parseInt(jogo.gols_casa_ht);
+          const htForaApi = parseInt(jogo.gols_fora_ht);
+          estado.htPlacar = (!isNaN(htCasaApi) && !isNaN(htForaApi))
+            ? `${htCasaApi}x${htForaApi}`
+            : null;
+        }
       }
 
       // ── Detectar pênaltis/prorrogação e congelar placar do tempo normal ──
-      const periodoStr = String(jogo.periodo || '').toLowerCase();
+      // NOTA: o campo 'periodo' não existe na API real — detecção feita só por
+      // texto em 'tempo' (ex: pode vir como 'Penaltis', 'Prorrogação' em alguns casos).
       const tempoStr    = String(jogo.tempo   || '').toLowerCase();
       const ehPenaltisOuProrrogacao =
-        periodoStr.includes('penalt') || tempoStr.includes('penalt') ||
-        periodoStr.includes('prorrog') || tempoStr.includes('prorrog') ||
-        periodoStr.includes('acrescimo_2t_extra');
+        tempoStr.includes('penalt') || tempoStr.includes('prorrog');
       if (ehPenaltisOuProrrogacao && !estado.placarTempoNormal) {
         estado.placarTempoNormal = estado.ultimoPlacarTempoNormalCandidato || placarAtual;
         console.log(`[PRORROGAÇÃO/PÊNALTIS] ${jogoId} → congelando placar do tempo normal: ${estado.placarTempoNormal}`);
@@ -620,7 +627,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const tempo    = tempoNum;
   // tempoDisplay: usado só para exibição na mensagem — mostra "HT" no intervalo
   const tempoDisplay = ehIntervalo ? 'HT' : tempoNum;
-  const periodo  = jogo.periodo || '';
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
   const total    = golsCasa + golsFora;
@@ -632,18 +638,15 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const oddFora  = parseFloat(jogo.odd_atual_fora || 0);
 
   const isHT  = jogo.tempo === 'Intervalo';
-  // CORREÇÃO: usar o histórico do jogo (passou pelo intervalo) como sinal confiável
-  // de 2T, combinado com o campo periodo quando disponível. Isso evita tanto o bug
-  // de acréscimos do 1T contados como 2T quanto o problema de "periodo" não vir
-  // exatamente como esperado da API.
-  const periodoIndica1T = periodo === '1_tempo';
-  const periodoIndica2T = periodo === '2_tempo';
-  const jaPassouHT      = !!estado.passouHT;
-
-  // 2T = não está no intervalo E (periodo confirma 2T OU já passamos pelo HT)
-  const is2T = !isHT && (periodoIndica2T || (jaPassouHT && !periodoIndica1T));
-  // 1T = não está no intervalo, não é 2T, e (periodo confirma 1T OU ainda não passamos pelo HT)
-  const is1T = !isHT && !is2T && (periodoIndica1T || !jaPassouHT);
+  // CORREÇÃO CRÍTICA: o campo 'periodo' NÃO EXISTE na API real (confirmado em
+  // teste ao vivo em 22/06/2026) — a lógica antiga dependia de um campo que
+  // nunca chegou a vir preenchido, causando bugs silenciosos (ex: Gol no Final
+  // nunca disparando). Agora usamos apenas o histórico do próprio jogo
+  // (estado.passouHT, setado quando detectamos 'Intervalo' ou tempo > 45min)
+  // como sinal confiável de que estamos no 2º tempo.
+  const jaPassouHT = !!estado.passouHT;
+  const is2T = !isHT && jaPassouHT;
+  const is1T = !isHT && !jaPassouHT;
 
   const evNovos   = jogo.eventos || [];
   const raiosCasa = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa');
@@ -716,7 +719,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('recup_favorito', 'Favorito perdendo por 1 + Raio!', 'recup_favorito_live');
   }
 
-  // 3. GOL NO FINAL — agora só dispara em periodo === '2_tempo' real
+  // 3. GOL NO FINAL — agora só dispara depois que o jogo passou pelo intervalo (is2T)
   if (pendJogo.some(p => p.strat === 'gol_no_final')) {
     if (is2T && !isHT && temRaio)
       await alertar('gol_no_final', 'Raio no 2T!', 'gol_no_final_live');
@@ -893,7 +896,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('atolada_master', 'AM xG + HT 0x0 + Raio no 1T!', 'atolada_master_live');
   }
 
-  // OVER 0,5 GONZA — 2T corrigido para depender só de periodo === '2_tempo'
+  // OVER 0,5 GONZA — 2T corrigido para depender de já ter passado pelo intervalo
   if (pendJogo.some(p => p.strat === 'over05')) {
     if (is1T && total === 0 && raioMand && raioVisit)
       await alertar('over05', '0x0 + Raio dos dois times no 1T! (entrar Over 0,5 Limite)', 'over05_live');
@@ -1019,7 +1022,7 @@ function agendarHoraBRT(hora, minuto, callback) {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_41',
+  status: 'ok', version: 'server_42',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -1060,7 +1063,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v41 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v42 funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -1076,7 +1079,7 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v41 na porta ${PORT}`);
+  console.log(`FUTATS Server v42 na porta ${PORT}`);
 
   // Buscar jogos pré-jogo imediatamente ao subir
   await buscarPreJogo();
@@ -1099,11 +1102,11 @@ app.listen(PORT, async () => {
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v41 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v42 iniciado!</b>\n' +
     '✅ Horários das APIs ajustados conforme documentação\n' +
     '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
     '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
-    '✅ Fix is2T/is1T — periodo + histórico do jogo\n' +
+    '✅ Fix is2T/is1T — campo periodo (inexistente na API) removido, usa histórico do jogo\n' +
     '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20'
   );
 
