@@ -984,12 +984,25 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       if (isHT) return;
       const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
 
-      if (total === 0 && tempo <= 60 && checaIndicadorGonza(jogo, estado, periodoAtual))
-        await alertar(stratKey, `Indicador do Gonza 🪗 (${periodoAtual==='1_tempo'?'1T':'2T'}) — jogo aberto!`, `${stratKey}_live`);
-      else if (total === 1) {
-        const raioDoSemGol = (golsCasa > golsFora && raioVisit) || (golsFora > golsCasa && raioMand);
-        if (raioDoSemGol && checaIndicadorGonza(jogo, estado, periodoAtual))
-          await alertar(stratKey, `${placar} + Raio do time atrás + Indicador do Gonza 🪗`, `${stratKey}_live`);
+      // 1º TEMPO + 0x0 → exige Indicador completo (2 raios, período inteiro do 1T).
+      // Isso confirma que o jogo está realmente aberto pelos dois lados antes de entrar.
+      if (total === 0 && periodoAtual === '1_tempo' && checaIndicadorGonza(jogo, estado, periodoAtual)) {
+        await alertar(stratKey, `Indicador do Gonza 🪗 (1T) — jogo aberto!`, `${stratKey}_live`);
+        return;
+      }
+
+      // QUALQUER OUTRA SITUAÇÃO (já saiu gol, OU 2T mesmo com 0x0) → só 1 raio
+      // (de qualquer time) + esse time precisa ter índice>=20 e eficiência>=0.20
+      // nos últimos 10min — sem importar o time da frente, pois qualquer gol qualifica.
+      const raioCasaAgora = raioMand;
+      const raioForaAgora = raioVisit;
+      if (raioCasaAgora || raioForaAgora) {
+        const ind = getIndicadores(jogo, 'ult_10min');
+        const ladoDoRaio = raioCasaAgora ? 'casa' : 'fora';
+        const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
+        const efRaio  = ladoDoRaio === 'casa' ? ind.efCasa  : ind.efFora;
+        if (idxRaio >= 20 && efRaio >= 0.20)
+          await alertar(stratKey, `${placar} + Raio (últ. 10min, índice≥20/eficiência≥0.20) — Gol Limite!`, `${stratKey}_live`);
       }
     })();
   }
@@ -1145,38 +1158,34 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       if (total === 0 && tevRaioMand)
         await alertar('over05', 'Intervalo 0x0! Entrar agora no Over 0,5 Limite!', 'over05_live');
     } else if (!jaPassouHT) {
-      // ── 1º TEMPO ──
-      if (tempo <= 20) {
-        if (total === 0 && checaIndicadorGonza(jogo, estado, '1_tempo'))
-          await alertar('over05', 'Indicador do Gonza 🪗 (1T, até min 20) — entrar Over 1,5 HT!', 'over05_live');
-        else if (total === 1 && temRaio && checaCondicaoReacao(jogo, golsCasa > golsFora ? 'casa' : 'fora'))
-          await alertar('over05', `${placar} + Raio (até min 20) — qualifica Over 1,5 HT!`, 'over05_live');
-      } else {
-        // Depois do min 20: só 1 raio + índices do Indicador
-        if (total === 0) {
-          const ind = getIndicadores(jogo, '1_tempo');
-          const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
-          const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
-          if (temRaio && idxOk && efOk)
-            await alertar('over05', '0x0 + Raio (após min 20) — entrar Over 0,5 HT!', 'over05_live');
-        }
+      // ── 1º TEMPO, 0x0, até min 20 → exige Indicador completo (2 raios) ──
+      if (tempo <= 20 && total === 0 && checaIndicadorGonza(jogo, estado, '1_tempo')) {
+        await alertar('over05', 'Indicador do Gonza 🪗 (1T, até min 20) — entrar Over 1,5 HT!', 'over05_live');
+      } else if (raioMand || raioVisit) {
+        // Já saiu gol (total>=1), OU passou do min 20 ainda 0x0 → só 1 raio +
+        // índice>=20/eficiência>=0.20 (últ. 10min) do time do raio
+        const ind = getIndicadores(jogo, 'ult_10min');
+        const ladoDoRaio = raioMand ? 'casa' : 'fora';
+        const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
+        const efRaio  = ladoDoRaio === 'casa' ? ind.efCasa  : ind.efFora;
+        if (idxRaio >= 20 && efRaio >= 0.20)
+          await alertar('over05', `${placar} + Raio (últ. 10min) — entrar Over 1,5 HT / Over 0,5 HT!`, 'over05_live');
       }
     } else {
-      // ── 2º TEMPO ──
-      if (tempo <= 60) {
-        if (checaIndicadorGonza(jogo, estado, '2_tempo')) {
+      // ── 2º TEMPO — só 1 raio + índice>=20/eficiência>=0.20 (últ. 10min) ──
+      // (mesmo com jogo ainda 0x0 no 2T, não exige mais o Indicador completo)
+      if (raioMand || raioVisit) {
+        const ind = getIndicadores(jogo, 'ult_10min');
+        const ladoDoRaio = raioMand ? 'casa' : 'fora';
+        const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
+        const efRaio  = ladoDoRaio === 'casa' ? ind.efCasa  : ind.efFora;
+        if (idxRaio >= 20 && efRaio >= 0.20) {
           let mercado = 'Over 1,5';
           if ((golsCasa === 1 && golsFora === 0) || (golsCasa === 0 && golsFora === 1)) mercado = 'Over 2,5';
           else if (golsCasa === 1 && golsFora === 1) mercado = 'Over 3,5';
-          await alertar('over05', `Indicador do Gonza 🪗 (2T, até min 60) — entrar ${mercado}!`, 'over05_live');
+          const limitTexto = tempo > 60 ? ' (Gol Limite)' : '';
+          await alertar('over05', `${placar} + Raio (últ. 10min) — entrar ${mercado}${limitTexto}!`, 'over05_live');
         }
-      } else {
-        // Depois do min 60: só 1 raio + índices do Indicador → Gol Limite
-        const ind = getIndicadores(jogo, 'ult_10min');
-        const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
-        const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
-        if (temRaio2T && idxOk && efOk)
-          await alertar('over05', 'Raio (após min 60, últ. 10min) — entrar Gol Limite!', 'over05_live');
       }
     }
   }
