@@ -1013,6 +1013,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   await processarGrupo5e6('ambas_marcam_xg', 'Ambas Marcam xG');
   await processarGrupo5e6('am', 'Ambas Gonza');
   await processarGrupo5e6('am_xg', 'Ambos xG Pro');
+  await processarGrupo5e6('felipe_over15', 'Felipe Over 1.5');
 
   // 8. LAY 0x1 (IA) — 1 alerta por jogo, até min 20, lay contra visitante
   // (condição espelhada do Grupo 1: mandante precisa estar dominando)
@@ -1086,17 +1087,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // FELIPE OVER 1.5
-  if (pendJogo.some(p => p.strat === 'felipe_over15')) {
-    if (total === 0 && temRaio)
-      await alertar('felipe_over15', '0x0 + Raio!', 'felipe_over15_live');
-    else if (is1T && total === 1 && temRaio) {
-      const raioPerdendo = (golsCasa < golsFora && raioMand) || (golsFora < golsCasa && raioVisit);
-      if (raioPerdendo)
-        await alertar('felipe_over15', `${placar} + Raio do time perdendo!`, 'felipe_over15_live');
-    }
-  }
-
   // LAY 0x2 MANU — até min 20, lay contra visitante (mandante dominando)
   if (pendJogo.some(p => p.strat === 'lay_0x2_manu')) {
     if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 2 && raioMand) {
@@ -1156,7 +1146,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     if (isHT) {
       // Intervalo: lembrete simples (mantido como estava)
       if (total === 0 && tevRaioMand)
-        await alertar('over05', 'Intervalo 0x0! Entrar agora no Over 0,5 Limite!', 'over05_live');
+        await alertar('over05', 'Intervalo 0x0 · Verificar CHUVA DE GOLS no 2º tempo', 'over05_live');
     } else if (!jaPassouHT) {
       // ── 1º TEMPO, 0x0, até min 20 → exige Indicador completo (2 raios) ──
       if (tempo <= 20 && total === 0 && checaIndicadorGonza(jogo, estado, '1_tempo')) {
@@ -1174,16 +1164,18 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     } else {
       // ── 2º TEMPO — só 1 raio + índice>=20/eficiência>=0.20 (últ. 10min) ──
       // (mesmo com jogo ainda 0x0 no 2T, não exige mais o Indicador completo)
-      if (raioMand || raioVisit) {
+      // Limite de minuto 80 — depois disso não há tempo hábil pra mercado de over.
+      if (tempo <= 80 && (raioMand || raioVisit)) {
         const ind = getIndicadores(jogo, 'ult_10min');
         const ladoDoRaio = raioMand ? 'casa' : 'fora';
         const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
         const efRaio  = ladoDoRaio === 'casa' ? ind.efCasa  : ind.efFora;
         if (idxRaio >= 20 && efRaio >= 0.20) {
-          let mercado = 'Over 1,5';
-          if ((golsCasa === 1 && golsFora === 0) || (golsCasa === 0 && golsFora === 1)) mercado = 'Over 2,5';
-          else if (golsCasa === 1 && golsFora === 1) mercado = 'Over 3,5';
-          const limitTexto = tempo > 60 ? ' (Gol Limite)' : '';
+          // Até o min 60: "over à frente" = total + 1,5 (antecipa +1 gol).
+          // Depois do min 60 (Gol Limite): só precisa de +1 gol = total + 0,5.
+          const golLimite = tempo > 60;
+          const mercado = `Over ${(total + (golLimite ? 0.5 : 1.5)).toFixed(1).replace('.', ',')}`;
+          const limitTexto = golLimite ? ' (Gol Limite)' : '';
           await alertar('over05', `${placar} + Raio (últ. 10min) — entrar ${mercado}${limitTexto}!`, 'over05_live');
         }
       }
@@ -1270,7 +1262,11 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     });
 
     const res     = pLive?.result || calcularResultado(stratBase, golsCasa, golsFora, htH, htA);
-    const emoji   = res === 'green' ? '✅ GREEN' : '❌ RED';
+    let emoji;
+    if (res === 'green')        emoji = '✅ GREEN';
+    else if (res === 'red')     emoji = '❌ RED';
+    else if (res === 'nao_entra') emoji = '⚪ NÃO ENTROU (condição não bateu)';
+    else                        emoji = '⏳ AVALIAR MANUALMENTE';
     const display = STRAT_DISPLAY[stratKey] || stratKey;
 
     // Linha fixa mantém tempo e placar do alerta
@@ -1300,7 +1296,7 @@ function agendarHoraBRT(hora, minuto, callback) {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_43',
+  status: 'ok', version: 'server_44',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -1341,7 +1337,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v43 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v44 funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -1357,7 +1353,7 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v43 na porta ${PORT}`);
+  console.log(`FUTATS Server v44 na porta ${PORT}`);
 
   // Buscar jogos pré-jogo imediatamente ao subir
   await buscarPreJogo();
@@ -1380,13 +1376,14 @@ app.listen(PORT, async () => {
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v43 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v44 iniciado!</b>\n' +
     '✅ Horários das APIs ajustados conforme documentação\n' +
     '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
     '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
     '✅ Fix is2T/is1T — campo periodo (inexistente na API) removido, usa histórico do jogo\n' +
     '✅ Gol no Final / Over 0,5 2T — raio confirmado via periodo do evento (precisão total)\n' +
-    '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20'
+    '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20\n' +
+    '✅ Fix Over 0,5 Gonza (Gol Limite) — mercado agora é total+0,5 após min 60 / total+1,5 antes, nunca mais fixo em Over 1,5'
   );
 
   // Enviar card do dia imediatamente ao subir (apenas o card, não o resumo)
