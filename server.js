@@ -137,6 +137,71 @@ function getFavorito(jogo) {
   return oc <= of_ ? 'casa' : 'fora';
 }
 
+// ── INDICADORES DE PRESSÃO (resumo_pressao da API) ────────────
+// Extrai % pressão, índice de pressão e eficiência de um período específico.
+// periodo: 'total' | '1_tempo' | '2_tempo' | 'ult_10min'
+function getIndicadores(jogo, periodo) {
+  const rp = jogo.resumo_pressao?.[periodo];
+  if (!rp) return { pctCasa: 0, pctFora: 0, idxCasa: 0, idxFora: 0, efCasa: 0, efFora: 0 };
+  return {
+    pctCasa: rp.porcentagem_pressao?.casa || 0,
+    pctFora: rp.porcentagem_pressao?.fora || 0,
+    idxCasa: rp.indice_pressao?.casa || 0,
+    idxFora: rp.indice_pressao?.fora || 0,
+    efCasa:  rp.eficiencia_pressao?.casa || 0,
+    efFora:  rp.eficiencia_pressao?.fora || 0,
+  };
+}
+
+// Condição "Grupo 1" — pressão/índice/eficiência do time mandante (ou espelhado pro visitante)
+// alvo: 'casa' ou 'fora' — qual lado deve estar dominando
+function checaCondicaoGrupo1(jogo, periodo, alvo) {
+  const ind = getIndicadores(jogo, periodo);
+  if (alvo === 'casa') {
+    return ind.pctCasa >= 65 && ind.idxCasa >= 20 && ind.idxFora <= 9 &&
+           ind.efCasa >= 0.17 && ind.efFora <= 0.09;
+  } else {
+    return ind.pctFora >= 65 && ind.idxFora >= 20 && ind.idxCasa <= 9 &&
+           ind.efFora >= 0.17 && ind.efCasa <= 0.09;
+  }
+}
+
+// Condição "modo reação" (favorito perdendo, últimos 10min) — mais rígida
+function checaCondicaoReacao(jogo, alvo) {
+  const ind = getIndicadores(jogo, 'ult_10min');
+  if (alvo === 'casa') {
+    return ind.pctCasa >= 70 && ind.idxCasa >= 20 && ind.idxFora <= 7 &&
+           ind.efCasa >= 0.20 && ind.efFora <= 0.07;
+  } else {
+    return ind.pctFora >= 70 && ind.idxFora >= 20 && ind.idxCasa <= 7 &&
+           ind.efFora >= 0.20 && ind.efCasa <= 0.07;
+  }
+}
+
+// Condição "Indicador do Gonza" — jogo empatado, raio dos dois times APÓS o
+// gol mais recente (que gerou o empate), índice >=15 ambos, eficiência um>=0.20 outro>0.10
+function checaIndicadorGonza(jogo, estado, periodo) {
+  const ind = getIndicadores(jogo, periodo);
+  const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
+  const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
+  if (!idxOk || !efOk) return false;
+
+  // Minuto do último gol (qualquer lado) — raios precisam ser DEPOIS dele
+  const golsEventos = (jogo.eventos || []).filter(e => e.tipo_evento === 'gol');
+  const minutoUltimoGol = golsEventos.length ? Math.max(...golsEventos.map(e => e.minuto)) : 0;
+
+  const periodoFiltro = periodo === '1_tempo' ? '1_tempo' : periodo === '2_tempo' ? '2_tempo' : null;
+  const raiosValidos = (jogo.eventos || []).filter(e =>
+    e.tipo_evento === 'raio' &&
+    e.minuto > minutoUltimoGol &&
+    (!periodoFiltro || e.periodo === periodoFiltro)
+  );
+  const temRaioCasaAposGol = raiosValidos.some(e => e.lado === 'casa');
+  const temRaioForaAposGol = raiosValidos.some(e => e.lado === 'fora');
+
+  return temRaioCasaAposGol && temRaioForaAposGol;
+}
+
 // ── REGISTRAR PENDENTE ────────────────────────────────────────
 function registrarPendente(jogo, strat, tipo = 'pre') {
   const id    = Date.now() + Math.random();
@@ -591,6 +656,8 @@ async function monitorarLive() {
       }
 
       await processarAlertasLive(jogo, estado, jogoId, hoje);
+      await processarEstadoGrupo1(jogo, estado, jogoId, hoje);
+      await processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje);
     }
   } catch(e) {
     console.error('[LIVE] Erro:', e.message);
@@ -615,12 +682,155 @@ async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
 
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
+    // Estratégias do Grupo 1 têm sua própria máquina de estados — não
+    // sobrescrever aqui, ela é tratada em processarEstadoGrupo1.
+    if (info.grupo1Status) continue;
     const display = STRAT_DISPLAY[stratKey] || stratKey;
+    const statusLinha = `📊 Placar atual: ${placarAtual} · ${tempo}'`;
+    info.ultimoStatusTexto = statusLinha;
     const novoTexto = montarMsgAlerta(
       display, jogo, info.tempoAlerta, info.placarAlerta,
       `${placarAtual} · ${tempo}'`, links
     );
     await editTelegram(info.ids, novoTexto);
+  }
+}
+
+// ── INDICADOR DO GONZA — universal, em qualquer jogo monitorado ──
+// Sempre que a condição bater (raio dos dois times APÓS o último gol, índice
+// >=15 ambos, eficiência um>=0.20 outro>0.10), adiciona uma linha extra em
+// TODAS as mensagens ativas daquele jogo — sem nunca remover o que já tinha.
+async function processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje) {
+  if (jogo.tempo === 'Intervalo') return;
+  const golsCasa = parseInt(jogo.gols_casa) || 0;
+  const golsFora = parseInt(jogo.gols_fora) || 0;
+  // Só faz sentido em jogo empatado (qualquer placar X-X)
+  if (golsCasa !== golsFora) return;
+
+  const jaPassouHT = !!estado.passouHT;
+  const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+  const tempo = parseInt(jogo.tempo) || 0;
+
+  if (!checaIndicadorGonza(jogo, estado, periodoAtual)) return;
+
+  // Já marcamos esse período pra esse jogo? Não repete.
+  const chaveIndicador = `indicadorGonza_${periodoAtual}`;
+  if (estado[chaveIndicador]) return;
+  estado[chaveIndicador] = true;
+
+  const links = linksExchanges(jogo.urls_exchanges || {});
+  const labelPeriodo = periodoAtual === '1_tempo' ? '1T' : '2T';
+
+  for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
+    if (!info?.ids?.length) continue;
+    const display = STRAT_DISPLAY[stratKey] || stratKey;
+    const linhaFixa = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
+    const statusAtual = info.ultimoStatusTexto || `📊 Placar atual: ${golsCasa}x${golsFora} · ${tempo}'`;
+    const novoTexto = `${linhaFixa}\n${statusAtual}\n🪗 Indicador do Gonza (${labelPeriodo}, min ${tempo}) — jogo aberto!${links}`;
+    await editTelegram(info.ids, novoTexto);
+  }
+}
+
+
+// Estados possíveis (info.grupo1Status):
+//   null/undefined → ainda não tomou gol, monitorando normalmente
+//   'green'        → mandante marcou primeiro, encerrado
+//   'atencao'      → visitante na frente, avaliando reação até o min 60
+//   'reacao'       → reação confirmada, considerar lay contra visitante
+//   'red'          → chegou no min 60 sem reação, encerrado em RED
+//   'red_reacao'   → depois do RED, reação ainda confirmou (Gol Limite)
+//   'red_gonza'    → depois do RED, Indicador do Gonza apareceu (Gol Limite)
+const GRUPO1_STRATS = ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg','back_favorito','lay_xg'];
+
+async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
+  const golsCasa = parseInt(jogo.gols_casa) || 0;
+  const golsFora = parseInt(jogo.gols_fora) || 0;
+  const tempo     = jogo.tempo === 'Intervalo' ? (estado.ultimoMinuto || 45) : (parseInt(jogo.tempo) || 0);
+  const isHT      = jogo.tempo === 'Intervalo';
+  const jaPassouHT = !!estado.passouHT;
+  const links     = linksExchanges(jogo.urls_exchanges || {});
+  const favorito  = getFavorito(jogo);
+
+  for (const stratKey of GRUPO1_STRATS) {
+    const info = estado.msgIds[stratKey];
+    if (!info || !info.ids?.length) continue;
+    if (info.grupo1Status === 'green' || info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') continue; // já fechado
+
+    // Determina o lado alvo (mandante fixo, ou favorito dinâmico, ou lay_team manual)
+    let alvo = 'casa';
+    if (stratKey === 'back_favorito') alvo = favorito;
+    if (stratKey === 'lay_xg') {
+      const pendLayXg = pendentes.find(p => p.condicao === 'lay_xg' && p.data === hoje &&
+        (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`));
+      alvo = pendLayXg?.lay_team === 'home' ? 'casa' : 'fora';
+    }
+    const alvoGols = alvo === 'casa' ? golsCasa : golsFora;
+    const contraGols = alvo === 'casa' ? golsFora : golsCasa;
+
+    const display = STRAT_DISPLAY[stratKey] || stratKey;
+    const fixo = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
+
+    // Estado inicial: ainda sem gol decidido
+    if (!info.grupo1Status) {
+      if (alvoGols > contraGols) {
+        // Alvo marcou primeiro → GREEN, encerra
+        info.grupo1Status = 'green';
+        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${links}`);
+      } else if (contraGols > alvoGols) {
+        // Time contra marcou → modo atenção
+        info.grupo1Status = 'atencao';
+        info.minutoGolContra = tempo;
+        await editTelegram(info.ids, `${fixo}\n⚠️ Time contra na frente (${golsCasa}x${golsFora}, min ${tempo}) — avaliar reação${links}`);
+      }
+      continue;
+    }
+
+    // Estado "atenção" — monitora reação até o minuto 60
+    if (info.grupo1Status === 'atencao') {
+      if (alvoGols > contraGols) {
+        info.grupo1Status = 'green';
+        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${links}`);
+        continue;
+      }
+      if (tempo > 60 && !isHT) {
+        info.grupo1Status = 'red';
+        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60) — sem reação confirmada${links}`);
+        continue;
+      }
+      // Checa reação (últimos 10min)
+      if (checaCondicaoReacao(jogo, alvo)) {
+        const raioNovoAlvo = (jogo.eventos || []).some(e =>
+          e.tipo_evento === 'raio' && e.lado === alvo && e.minuto > (info.minutoGolContra || 0)
+        );
+        if (raioNovoAlvo) {
+          info.grupo1Status = 'reacao';
+          await editTelegram(info.ids, `${fixo}\n🔄 Reação confirmada (min ${tempo}) — considerar Lay contra o time da frente até o fim do 1T${links}`);
+        }
+      }
+      continue;
+    }
+
+    // Estado "reacao" — já confirmado, só falta o fim de jogo decidir (tratado em processarFimDeJogo)
+    if (info.grupo1Status === 'reacao') continue;
+
+    // Estado "red" — depois do RED no min 60, monitora reação atrasada ou Indicador do Gonza
+    if (info.grupo1Status === 'red') {
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      if (checaCondicaoReacao(jogo, alvo)) {
+        const raioNovoAlvo = (jogo.eventos || []).some(e =>
+          e.tipo_evento === 'raio' && e.lado === alvo && e.minuto > 60
+        );
+        if (raioNovoAlvo) {
+          info.grupo1Status = 'red_reacao';
+          await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60)\n🔄 Reação confirmada (${tempo}') — avaliar Gol Limite${links}`);
+          continue;
+        }
+      }
+      if (checaIndicadorGonza(jogo, estado, periodoAtual)) {
+        info.grupo1Status = 'red_gonza';
+        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60)\n🪗 Indicador do Gonza (${tempo}') — avaliar Gol Limite${links}`);
+      }
+    }
   }
 }
 
@@ -715,26 +925,44 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
 
   // ── SELEÇÕES IA ───────────────────────────────────────────
 
-  // 1. BACK FAVORITO
+  // 1. BACK FAVORITO — segue o lado do favorito (casa ou fora)
   if (pendJogo.some(p => p.strat === 'back_favorito')) {
-    if (total === 0 && tempo <= 70 && raioFav)
-      await alertar('back_favorito', '0x0 + Raio do Favorito!', 'back_favorito_live');
+    const periodoAtual = isHT ? null : (jaPassouHT ? '2_tempo' : '1_tempo');
+    const minuteLimite2T = 60;
     const favPerdendo = (favorito==='casa' && golsFora-golsCasa===1) || (favorito==='fora' && golsCasa-golsFora===1);
-    if (favPerdendo && tempo <= 70 && raioFav)
-      await alertar('back_favorito', 'Favorito perdendo + Raio!', 'back_favorito_live');
+
+    if (!isHT && periodoAtual) {
+      // 0x0 — condição padrão do Grupo 1 no período atual + raio do favorito
+      if (total === 0 && raioFav && checaCondicaoGrupo1(jogo, periodoAtual, favorito))
+        await alertar('back_favorito', `0x0 + Raio do Favorito! (${periodoAtual==='1_tempo'?'1T':'2T'})`, 'back_favorito_live');
+
+      // Favorito perdendo por 1 — condição de reação (últimos 10min) + raio do favorito
+      else if (favPerdendo && raioFav && checaCondicaoReacao(jogo, favorito)) {
+        const limiteMin = periodoAtual === '1_tempo' ? 999 : minuteLimite2T; // 1T sempre vale; 2T só até o min 60
+        if (tempo <= limiteMin)
+          await alertar('back_favorito', 'Favorito perdendo + Reação confirmada (Raio)!', 'back_favorito_live');
+      }
+    }
   }
 
-  // 2. RECUPERAÇÃO FAVORITO
+  // 2. RECUPERAÇÃO FAVORITO — mesma lógica de reação do Back Favorito, só 1T
   if (pendJogo.some(p => p.strat === 'recup_favorito')) {
     const favPerdendo1 = (favorito==='casa' && golsFora-golsCasa===1) || (favorito==='fora' && golsCasa-golsFora===1);
-    if (favPerdendo1 && tevRaioFav)
-      await alertar('recup_favorito', 'Favorito perdendo por 1 + Raio!', 'recup_favorito_live');
+    if (!isHT && !jaPassouHT && favPerdendo1 && raioFav && checaCondicaoReacao(jogo, favorito))
+      await alertar('recup_favorito', 'Favorito perdendo por 1 + Reação confirmada (Raio)!', 'recup_favorito_live');
   }
 
-  // 3. GOL NO FINAL — exige raio CONFIRMADO no 2º tempo (periodo do evento)
+  // 3. GOL NO FINAL — raio confirmado no 2T + índices (pressão/eficiência) do
+  // Indicador do Gonza nos últimos 10min. Vale na hora do raio ou depois dele
+  // (enquanto o gol não saiu), até no máximo o minuto 80.
   if (pendJogo.some(p => p.strat === 'gol_no_final')) {
-    if (temRaio2T)
-      await alertar('gol_no_final', 'Raio no 2T!', 'gol_no_final_live');
+    if (temRaio2T && tempo <= 80) {
+      const ind = getIndicadores(jogo, 'ult_10min');
+      const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
+      const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
+      if (idxOk && efOk)
+        await alertar('gol_no_final', 'Raio no 2T + índices do Indicador do Gonza (últ. 10min)!', 'gol_no_final_live');
+    }
   }
 
   // 4. OVER 0.5 HT
@@ -747,83 +975,72 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('over15_ht', '1 gol + Raio antes min 20!', 'over15_ht_live');
   }
 
-  // 5. OVER 1.5 (Seleção IA)
-  if (pendJogo.some(p => p.strat === 'over15_ia')) {
-    if (total === 0 && temRaio)
-      await alertar('over15_ia', '0x0 + Raio!', 'over15_ia_live');
-    if (is1T && total === 1 && temRaio) {
-      const raioPerdendo = (golsCasa < golsFora && raioMand) || (golsFora < golsCasa && raioVisit);
-      if (raioPerdendo)
-        await alertar('over15_ia', `${placar} + Raio do time perdendo!`, 'over15_ia_live');
-    }
-  }
+  // ── GRUPO 5/6 — OVER GOLS E AMBAS MARCAM (lógica unificada) ──
+  // 0x0 até min 60: usa o Indicador do Gonza completo (raio dos 2 + índices)
+  // 1x0/0x1: precisa do raio do time que está atrás + índices do Indicador do Gonza
+  function processarGrupo5e6(stratKey, nomeDisplay) {
+    return (async () => {
+      if (!pendJogo.some(p => p.strat === stratKey)) return;
+      if (isHT) return;
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
 
-  // 6. OVER 2.5 (Seleção IA)
-  if (pendJogo.some(p => p.strat === 'over25_ia')) {
-    if (total === 0 && temRaio)
-      await alertar('over25_ia', '0x0 + Raio! (entrar Over 1.5)', 'over25_ia_live');
-    if (is1T && total === 1 && temRaio) {
-      const raioPerdendo = (golsCasa < golsFora && raioMand) || (golsFora < golsCasa && raioVisit);
-      if (raioPerdendo)
-        await alertar('over25_ia', `${placar} + Raio do time perdendo! (entrar Over 1.5)`, 'over25_ia_live');
-    }
-  }
-
-  // 7. AMBAS MARCAM
-  if (pendJogo.some(p => p.strat === 'ambas_marcam')) {
-    if (total === 0 && todosRaiosCasa.length > 0 && todosRaiosFora.length > 0)
-      await alertar('ambas_marcam', '0x0 + Raio dos dois times!', 'ambas_marcam_live');
-    if (total === 1 && temRaio) {
-      const raioPerdendo = (golsCasa > golsFora && raioVisit) || (golsFora > golsCasa && raioMand);
-      if (raioPerdendo)
-        await alertar('ambas_marcam', `${placar} + Raio do time perdendo!`, 'ambas_marcam_live');
-    }
-  }
-
-  // 7b. AMBAS MARCAM xG (nova) — só vale até o final do 1º tempo
-  if (pendJogo.some(p => p.strat === 'ambas_marcam_xg')) {
-    if (!is2T && !isHT) {
-      if (total === 0 && todosRaiosCasa.length > 0 && todosRaiosFora.length > 0)
-        await alertar('ambas_marcam_xg', '0x0 + Raio dos dois times no 1T!', 'ambas_marcam_xg_live');
-      else if (total === 1 && temRaio) {
-        // Raio do time que ainda não marcou
+      if (total === 0 && tempo <= 60 && checaIndicadorGonza(jogo, estado, periodoAtual))
+        await alertar(stratKey, `Indicador do Gonza 🪗 (${periodoAtual==='1_tempo'?'1T':'2T'}) — jogo aberto!`, `${stratKey}_live`);
+      else if (total === 1) {
         const raioDoSemGol = (golsCasa > golsFora && raioVisit) || (golsFora > golsCasa && raioMand);
-        if (raioDoSemGol)
-          await alertar('ambas_marcam_xg', `${placar} + Raio do time que não marcou!`, 'ambas_marcam_xg_live');
+        if (raioDoSemGol && checaIndicadorGonza(jogo, estado, periodoAtual))
+          await alertar(stratKey, `${placar} + Raio do time atrás + Indicador do Gonza 🪗`, `${stratKey}_live`);
       }
-    }
+    })();
   }
 
-  // 8. LAY 0x1 (IA) — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
+  await processarGrupo5e6('over15_ia', 'Over 1.5');
+  await processarGrupo5e6('over25_ia', 'Over 2.5');
+  await processarGrupo5e6('ambas_marcam', 'Ambas Marcam');
+  await processarGrupo5e6('ambas_marcam_xg', 'Ambas Marcam xG');
+  await processarGrupo5e6('am', 'Ambas Gonza');
+  await processarGrupo5e6('am_xg', 'Ambos xG Pro');
+
+  // 8. LAY 0x1 (IA) — 1 alerta por jogo, até min 20, lay contra visitante
+  // (condição espelhada do Grupo 1: mandante precisa estar dominando)
   if (pendJogo.some(p => p.strat === 'lay_0x1_ia')) {
     if (tempo <= 20 && !isHT) {
-      if (raioMand && total === 0)
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      if (raioMand && total === 0 && checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
         await alertar('lay_0x1_ia', '0x0 + Raio do Mandante (até min 20)!', 'lay_0x1_ia_live');
       else if (raioMand && golsCasa === 0 && golsFora === 1)
         await alertar('lay_0x1_ia', '⚠️ Placar 0x1! Raio Mandante — feche e aguarde!', 'lay_0x1_ia_live');
     }
   }
 
-  // 9. LAY 1x0 (IA) — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
+  // 9. LAY 1x0 (IA) — 1 alerta por jogo, até min 20, lay contra mandante
+  // (condição espelhada do Grupo 1: visitante precisa estar dominando)
   if (pendJogo.some(p => p.strat === 'lay_1x0_ia')) {
     if (tempo <= 20 && !isHT) {
-      if (raioVisit && total === 0)
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      if (raioVisit && total === 0 && checaCondicaoGrupo1(jogo, periodoAtual, 'fora'))
         await alertar('lay_1x0_ia', '0x0 + Raio do Visitante (até min 20)!', 'lay_1x0_ia_live');
       else if (raioVisit && golsCasa === 1 && golsFora === 0)
         await alertar('lay_1x0_ia', '⚠️ Placar 1x0! Raio Visitante — feche e aguarde!', 'lay_1x0_ia_live');
     }
   }
 
-  // 10. LAY GOLEADA VISITANTE — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
+  // 10. LAY GOLEADA VISITANTE — até min 20, lay contra visitante (mandante dominando)
   if (pendJogo.some(p => p.strat === 'lay_gol_visit')) {
-    if (tempo <= 20 && !isHT && raioMand)
-      await alertar('lay_gol_visit', 'Raio do Mandante (até min 20)!', 'lay_gol_visit_live');
+    if (tempo <= 20 && !isHT) {
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      if (raioMand && checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
+        await alertar('lay_gol_visit', 'Raio do Mandante (até min 20)!', 'lay_gol_visit_live');
+    }
   }
 
-  // 11. LAY GOLEADA MANDANTE — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
+  // 11. LAY GOLEADA MANDANTE — até min 20, lay contra mandante (visitante dominando)
   if (pendJogo.some(p => p.strat === 'lay_gol_mand')) {
-    if (tempo <= 20 && !isHT && raioVisit)
-      await alertar('lay_gol_mand', 'Raio do Visitante (até min 20)!', 'lay_gol_mand_live');
+    if (tempo <= 20 && !isHT) {
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      if (raioVisit && checaCondicaoGrupo1(jogo, periodoAtual, 'fora'))
+        await alertar('lay_gol_mand', 'Raio do Visitante (até min 20)!', 'lay_gol_mand_live');
+    }
   }
 
   // 12. CORREÇÃO LAY FAVORITO
@@ -840,25 +1057,20 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
 
   // ── FILTROS ───────────────────────────────────────────────
 
-  // FAVORITO HT GONZA / LAY AWAY MANU / LAY MANU 4
-  for (const sf of ['favorito_ht_gonza','lay_away_manu','lay_manu4']) {
+  // ── GRUPO 1 — fixos no mandante: FAVORITO HT GONZA / LAY AWAY MANU / LAY MANU 4 / BACK GONZA xG
+  for (const sf of ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg']) {
     if (!pendJogo.some(p => p.strat === sf)) continue;
-    if (total === 0 && raioMand)
-      await alertar(sf, `0x0 + Raio do Mandante! · Lay Visitante · Odd: ${oddFora.toFixed(2)}`, `${sf}_live`);
-    else if (golsFora > golsCasa && raioMand && tempo <= 70)
-      await alertar(sf, `Mandante perdendo + Raio! · Lay Visitante · Odd: ${oddFora.toFixed(2)}`, `${sf}_live`);
-    else if (golsFora > golsCasa && raioMand && tempo > 70)
-      await alertar(sf, `Mandante perdendo + Raio (após min 70)! · Mercado de GOLS`, `${sf}_live`);
-  }
+    if (isHT) continue;
+    const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+    const mandantePerdendo = golsFora > golsCasa;
 
-  // BACK GONZA COM xG
-  if (pendJogo.some(p => p.strat === 'back_gonza_xg')) {
-    if (is1T && tempo <= 20 && total === 0 && raioMand)
-      await alertar('back_gonza_xg', `Raio Mandante até min 20 · 0x0! · Odd: ${oddCasa.toFixed(2)}`, 'back_gonza_xg_live');
-    else if (tempo > 35 && total === 0 && raioMand)
-      await alertar('back_gonza_xg', `Raio Mandante após min 35 · 0x0! · Odd: ${oddCasa.toFixed(2)}`, 'back_gonza_xg_live');
-    else if (is2T && total === 0 && tempo <= 70 && raioMand)
-      await alertar('back_gonza_xg', `0x0 + Raio Mandante no 2T! · Odd: ${oddCasa.toFixed(2)}`, 'back_gonza_xg_live');
+    if (total === 0 && raioMand && checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
+      await alertar(sf, `0x0 + Raio do Mandante! (${periodoAtual==='1_tempo'?'1T':'2T'}) · Lay Visitante · Odd: ${oddFora.toFixed(2)}`, `${sf}_live`);
+    else if (mandantePerdendo && raioMand && checaCondicaoReacao(jogo, 'casa')) {
+      const limiteMin = periodoAtual === '1_tempo' ? 999 : 60;
+      if (tempo <= limiteMin)
+        await alertar(sf, `Mandante perdendo + Reação confirmada (Raio)! · Lay Visitante · Odd: ${oddFora.toFixed(2)}`, `${sf}_live`);
+    }
   }
 
   // FELIPE OVER 1.5
@@ -872,60 +1084,100 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // LAY 0x2 MANU — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
+  // LAY 0x2 MANU — até min 20, lay contra visitante (mandante dominando)
   if (pendJogo.some(p => p.strat === 'lay_0x2_manu')) {
-    if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 2 && raioMand)
-      await alertar('lay_0x2_manu', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x2_manu_live');
-  }
-
-  // LAY 0x3 — 1 alerta por jogo, só até o minuto 20 (não no intervalo)
-  if (pendJogo.some(p => p.strat === 'lay_0x3')) {
-    if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 3 && raioMand)
-      await alertar('lay_0x3', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x3_live');
-  }
-
-  // LAY xG
-  if (pendJogo.some(p => p.strat === 'lay_xg')) {
-    const p        = pendJogo.find(p => p.strat === 'lay_xg');
-    const layHome  = p?.lay_team === 'home';
-    const maiorXgRaio    = layHome ? raioVisit : raioMand;
-    const empatado       = golsCasa === golsFora;
-    const menorXgFrente  = (layHome && golsCasa > golsFora) || (!layHome && golsFora > golsCasa);
-    if (maiorXgRaio && (empatado || menorXgFrente))
-      await alertar('lay_xg', 'Raio do time de maior xG!', 'lay_xg_live');
-  }
-
-  // AM xG
-  if (pendJogo.some(p => p.strat === 'am_xg')) {
-    if (total === 0 && todosRaiosCasa.length > 0 && todosRaiosFora.length > 0)
-      await alertar('am_xg', '0x0 + Raio dos dois times!', 'am_xg_live');
-    else if (total === 1 && temRaio) {
-      const raioPerdendo = (golsCasa > golsFora && raioVisit) || (golsFora > golsCasa && raioMand);
-      if (raioPerdendo)
-        await alertar('am_xg', `${placar} + Raio do time perdendo!`, 'am_xg_live');
+    if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 2 && raioMand) {
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      if (checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
+        await alertar('lay_0x2_manu', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x2_manu_live');
     }
-    if (isHT && total === 0 && tevRaioMand)
-      await alertar('atolada_master', 'AM xG + HT 0x0 + Raio no 1T!', 'atolada_master_live');
   }
 
-  // OVER 0,5 GONZA — no 2T exige raio CONFIRMADO no 2º tempo (periodo do evento)
+  // LAY 0x3 — até min 20, lay contra visitante (mandante dominando)
+  if (pendJogo.some(p => p.strat === 'lay_0x3')) {
+    if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 3 && raioMand) {
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      if (checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
+        await alertar('lay_0x3', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x3_live');
+    }
+  }
+
+  // LAY xG — usa o time indicado manualmente no index (lay_team: 'home' ou 'away')
+  // como o lado de MAIOR xG a ser layado (mesma lógica do Grupo 1, aplicada
+  // ao lado indicado, podendo ser casa ou fora dependendo do jogo)
+  if (pendJogo.some(p => p.strat === 'lay_xg')) {
+    const pendLayXg = pendJogo.find(p => p.strat === 'lay_xg');
+    const layHome   = pendLayXg?.lay_team === 'home';
+    const ladoAlvo  = layHome ? 'casa' : 'fora'; // lado de maior xG, que será layado
+    const placarAlvoPerdendo = layHome ? (golsFora > golsCasa) : (golsCasa > golsFora);
+    const raioAlvo  = layHome ? raioMand : raioVisit;
+
+    if (!isHT && pendLayXg?.lay_team) {
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      if (total === 0 && raioAlvo && checaCondicaoGrupo1(jogo, periodoAtual, ladoAlvo))
+        await alertar('lay_xg', `0x0 + Raio do time de maior xG! (${periodoAtual==='1_tempo'?'1T':'2T'})`, 'lay_xg_live');
+      else if (placarAlvoPerdendo && raioAlvo && checaCondicaoReacao(jogo, ladoAlvo)) {
+        const limiteMin = periodoAtual === '1_tempo' ? 999 : 60;
+        if (tempo <= limiteMin)
+          await alertar('lay_xg', 'Time de maior xG perdendo + Reação confirmada (Raio)!', 'lay_xg_live');
+      }
+    }
+  }
+
+  // ATOLADA MASTER — versão nova baseada no Indicador do Gonza, mas com
+  // exigência mais rígida: eficiência >= 0.20 em AMBOS os times (não só um),
+  // jogo 0x0. Só para jogos do nosso card (AM xG pendente).
+  if (pendJogo.some(p => p.strat === 'am_xg')) {
+    if (!isHT && total === 0) {
+      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
+      const ind = getIndicadores(jogo, periodoAtual);
+      const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
+      const efAmbosOk = ind.efCasa >= 0.20 && ind.efFora >= 0.20;
+      if (idxOk && efAmbosOk && checaIndicadorGonza(jogo, estado, periodoAtual))
+        await alertar('atolada_master', `Atolada Master do Gonza 🪗 (${periodoAtual==='1_tempo'?'1T':'2T'}) — 0x0 + eficiência alta dos dois!`, 'atolada_master_live');
+    }
+  }
+
+  // ── OVER 0,5 GONZA — 7 cenários derivados de mercado ──────────
   if (pendJogo.some(p => p.strat === 'over05')) {
-    if (is1T && total === 0 && raioMand && raioVisit)
-      await alertar('over05', '0x0 + Raio dos dois times no 1T! (entrar Over 0,5 Limite)', 'over05_live');
-    else if (isHT && total === 0 && tevRaioMand)
-      await alertar('over05', 'Intervalo 0x0! Entrar agora no Over 0,5 Limite!', 'over05_live');
-    else if (!isHT && total === 0 && temRaio2T)
-      await alertar('over05', '0x0 + Raio no 2T!', 'over05_live');
-  }
-
-  // AM
-  if (pendJogo.some(p => p.strat === 'am')) {
-    if (total === 0 && todosRaiosCasa.length > 0 && todosRaiosFora.length > 0)
-      await alertar('am', '0x0 + Raio dos dois times!', 'am_live');
-    else if (total === 1 && temRaio) {
-      const raioPerdendo = (golsCasa > golsFora && raioVisit) || (golsFora > golsCasa && raioMand);
-      if (raioPerdendo)
-        await alertar('am', `${placar} + Raio do time perdendo!`, 'am_live');
+    if (isHT) {
+      // Intervalo: lembrete simples (mantido como estava)
+      if (total === 0 && tevRaioMand)
+        await alertar('over05', 'Intervalo 0x0! Entrar agora no Over 0,5 Limite!', 'over05_live');
+    } else if (!jaPassouHT) {
+      // ── 1º TEMPO ──
+      if (tempo <= 20) {
+        if (total === 0 && checaIndicadorGonza(jogo, estado, '1_tempo'))
+          await alertar('over05', 'Indicador do Gonza 🪗 (1T, até min 20) — entrar Over 1,5 HT!', 'over05_live');
+        else if (total === 1 && temRaio && checaCondicaoReacao(jogo, golsCasa > golsFora ? 'casa' : 'fora'))
+          await alertar('over05', `${placar} + Raio (até min 20) — qualifica Over 1,5 HT!`, 'over05_live');
+      } else {
+        // Depois do min 20: só 1 raio + índices do Indicador
+        if (total === 0) {
+          const ind = getIndicadores(jogo, '1_tempo');
+          const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
+          const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
+          if (temRaio && idxOk && efOk)
+            await alertar('over05', '0x0 + Raio (após min 20) — entrar Over 0,5 HT!', 'over05_live');
+        }
+      }
+    } else {
+      // ── 2º TEMPO ──
+      if (tempo <= 60) {
+        if (checaIndicadorGonza(jogo, estado, '2_tempo')) {
+          let mercado = 'Over 1,5';
+          if ((golsCasa === 1 && golsFora === 0) || (golsCasa === 0 && golsFora === 1)) mercado = 'Over 2,5';
+          else if (golsCasa === 1 && golsFora === 1) mercado = 'Over 3,5';
+          await alertar('over05', `Indicador do Gonza 🪗 (2T, até min 60) — entrar ${mercado}!`, 'over05_live');
+        }
+      } else {
+        // Depois do min 60: só 1 raio + índices do Indicador → Gol Limite
+        const ind = getIndicadores(jogo, 'ult_10min');
+        const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
+        const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
+        if (temRaio2T && idxOk && efOk)
+          await alertar('over05', 'Raio (após min 60, últ. 10min) — entrar Gol Limite!', 'over05_live');
+      }
     }
   }
 }
@@ -997,6 +1249,11 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
 
+    // Estratégias do Grupo 1 com estado já fechado pela própria máquina de
+    // estados (green/red/red_reacao/red_gonza) não devem ser sobrescritas aqui.
+    if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
+        info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') continue;
+
     const stratBase = stratKey.replace(/_live$/, '');
     const pLive = pendJogo.find(p => {
       const ps = p.strat.replace(/_live$/, '');
@@ -1034,7 +1291,7 @@ function agendarHoraBRT(hora, minuto, callback) {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_42',
+  status: 'ok', version: 'server_43',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -1075,7 +1332,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v42 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v43 funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -1091,7 +1348,7 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v42 na porta ${PORT}`);
+  console.log(`FUTATS Server v43 na porta ${PORT}`);
 
   // Buscar jogos pré-jogo imediatamente ao subir
   await buscarPreJogo();
@@ -1114,7 +1371,7 @@ app.listen(PORT, async () => {
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v42 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v43 iniciado!</b>\n' +
     '✅ Horários das APIs ajustados conforme documentação\n' +
     '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
     '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
