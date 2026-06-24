@@ -839,14 +839,29 @@ function montarMsgAlerta(display, jogo, tempo, placarAlerta, placarAtual, links,
 async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
   const tempo = jogo.tempo === 'Intervalo' ? 'HT' : (parseInt(jogo.tempo) || 0);
   const links = linksExchanges(estado.jogo?.urls_exchanges || {});
+  const linksIndicador = linksExchanges(jogo.urls_exchanges || {});
 
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
     // Estratégias do Grupo 1 têm sua própria máquina de estados — não
-    // sobrescrever aqui, ela é tratada em processarEstadoGrupo1. Mensagens
-    // dos indicadores próprios (Pressão Gonza/Jogo Aberto) também têm seu
-    // próprio texto de status, gerido em atualizarIndicadorProprio.
-    if (info.grupo1Status || info.indicadorTipo) continue;
+    // sobrescrever aqui, ela é tratada em processarEstadoGrupo1.
+    if (info.grupo1Status) continue;
+
+    if (info.indicadorTipo) {
+      // Mensagens dos indicadores próprios (Pressão Gonza/Jogo Aberto):
+      // mantém a linha do indicador (ou o último status, se já evoluiu —
+      // ex: "oponente reagiu") e só atualiza o placar/minuto ao redor dela.
+      const conteudo = info.ultimoStatusTexto || info.linhaIndicador || '';
+      const novoTexto = info.formatoSimplificado
+        ? `${conteudo}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempo}' · 📊 ${placarAtual}`
+        : montarMsgAlerta(
+            `${STRAT_DISPLAY[stratKey] || stratKey}\n${conteudo}`, jogo,
+            info.tempoAlerta, info.placarAlerta, `${placarAtual} · ${tempo}'`, linksIndicador
+          );
+      await editTelegram(info.ids, novoTexto);
+      continue;
+    }
+
     const display = STRAT_DISPLAY[stratKey] || stratKey;
     const statusLinha = `📊 Placar atual: ${placarAtual} · ${tempo}'`;
     info.ultimoStatusTexto = statusLinha;
@@ -909,12 +924,30 @@ const LADO_STRATS_PROPRIOS = [
   'lay_gol_visit', 'lay_gol_mand',
 ];
 
+// Estas 6 só existem (pela definição original, raio antigo) até o minuto 20
+// — entrada por momento de fragilidade bem no início do jogo. O indicador
+// próprio respeita o mesmo limite: não abre entrada nova depois do min 20,
+// e também não participa da conversão pra Gol Limite no 2T (não faz sentido
+// pra uma estratégia que é, por definição, só sobre os primeiros 20min).
+const LADO_STRATS_LIMITE_MIN20 = [
+  'lay_0x1_ia', 'lay_1x0_ia', 'lay_0x2_manu', 'lay_0x3', 'lay_gol_visit', 'lay_gol_mand',
+];
+
 // Estratégias de GOLS — Pressão Gonza aplicado a favor do favorito do jogo
 // + Jogo Aberto como gatilho extra, somado ao que já existe (raio antigo).
 const GOLS_STRATS_PROPRIOS = [
   'over05', 'over15_ia', 'over25_ia', 'ambas_marcam', 'ambas_marcam_xg',
   'am', 'am_xg', 'felipe_over15', 'gol_no_final', 'over05_ht',
 ];
+
+// over05_ht só existe no 1T (por definição — é "HT", antes do intervalo).
+// gol_no_final só existe no 2T, até o min 80 (mesma janela do raio antigo).
+// As demais (over05, Grupo 5/6) valem nos dois períodos.
+function periodoValidoParaGols(stratKey, is1T, is2T, tempoNum) {
+  if (stratKey === 'over05_ht')   return is1T;
+  if (stratKey === 'gol_no_final') return is2T && tempoNum <= 80;
+  return true;
+}
 
 // Resolve qual lado é o "nosso" pra cada estratégia de lado (mesma lógica
 // já usada em processarAlertasLive/processarEstadoGrupo1 pra cada uma).
@@ -967,7 +1000,7 @@ async function dispararIndicadorProprio(jogo, estado, stratKey, linhaIndicador, 
 
   estado.msgIds[stratKey] = {
     ids, placarAlerta: placar, tempoAlerta: tempoDisplay, stratKey,
-    indicadorTipo, formatoSimplificado,
+    indicadorTipo, formatoSimplificado, linhaIndicador,
   };
 
   if (registrarComoEntradaReal) {
@@ -1067,7 +1100,8 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     if (!ladoAlvo) continue; // ex: lay_xg sem lay_team definido ainda
 
     if (!estado.msgIds[stratKey]) {
-      if (is1T) {
+      const limitadaMin20 = LADO_STRATS_LIMITE_MIN20.includes(stratKey);
+      if (is1T && (!limitadaMin20 || tempoNum <= 20)) {
         // 1º Tempo: dispara normal (Pressão Gonza). Jogo Aberto aqui é só
         // sinal de atenção pra quem JÁ entrou — não dispara entrada nova.
         const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
@@ -1082,9 +1116,11 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
               'pressao_sem_eficiencia', false);
           }
         }
-      } else if (is2T) {
+      } else if (is2T && !limitadaMin20) {
         // 2º Tempo: se qualquer um dos dois indicadores bater, não entra
         // mais em lado — converte direto pra Gol Limite (mensagem simples).
+        // (As 6 estratégias "até min 20" ficam de fora dessa conversão —
+        // são definidas só pelos primeiros 20min, não tem Gol Limite pra elas.)
         const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
         const ja = checaJogoAberto(jogo, tempoNum);
         if (pg && pg.tipo === 'completo') {
@@ -1121,14 +1157,29 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
   for (const stratKey of GOLS_STRATS_PROPRIOS) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     if (estado.msgIds[stratKey]) continue; // gols não tem monitoramento de saída, só entrada 1x
+    if (!periodoValidoParaGols(stratKey, is1T, is2T, tempoNum)) continue;
 
-    const pg = checaPressaoGonza(jogo, estado, favorito, tempoNum);
+    // Gol no Final é simétrico por definição (índice dos dois lados,
+    // eficiência de QUALQUER um deles) — então o Pressão Gonza também
+    // checa os dois lados aqui, não só o favorito. As outras estratégias
+    // de gols continuam só a favor do favorito, como definido.
+    const ladoZebra  = ladoOposto(favorito);
+    const pgFavorito = checaPressaoGonza(jogo, estado, favorito, tempoNum);
+    const pgZebra    = (stratKey === 'gol_no_final') ? checaPressaoGonza(jogo, estado, ladoZebra, tempoNum) : null;
+
+    let pg = pgFavorito, rotuloLado = '(favorito)';
+    if (pgFavorito?.tipo !== 'completo' && pgZebra?.tipo === 'completo') {
+      pg = pgZebra; rotuloLado = '(zebra)';
+    } else if (!pgFavorito && pgZebra) {
+      pg = pgZebra; rotuloLado = '(zebra)';
+    }
+
     const ja = checaJogoAberto(jogo, tempoNum);
     const golLimiteTxt = is2T ? ' (Gol Limite)' : '';
 
     if (pg && pg.tipo === 'completo') {
       await dispararIndicadorProprio(jogo, estado, stratKey,
-        `🟣 Pressão Gonza (favorito) — média ${pg.media}, chute no gol min ${pg.minutoChute}${golLimiteTxt}`,
+        `🟣 Pressão Gonza ${rotuloLado} — média ${pg.media}, chute no gol min ${pg.minutoChute}${golLimiteTxt}`,
         'pressao_completo', true);
     } else if (ja) {
       await dispararIndicadorProprio(jogo, estado, stratKey,
@@ -1136,7 +1187,7 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
         'jogo_aberto', true);
     } else if (pg && pg.tipo === 'sem_eficiencia') {
       await dispararIndicadorProprio(jogo, estado, stratKey,
-        `🟣 Pressão Gonza sem eficiência (favorito) — média ${pg.media} (aguardando chute no gol)${golLimiteTxt}`,
+        `🟣 Pressão Gonza ${rotuloLado} sem eficiência — média ${pg.media} (aguardando chute no gol)${golLimiteTxt}`,
         'pressao_sem_eficiencia', false);
     }
   }
@@ -1768,7 +1819,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v45 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v45b funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -1784,7 +1835,7 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v45 na porta ${PORT}`);
+  console.log(`FUTATS Server v45b na porta ${PORT}`);
 
   // Buscar jogos pré-jogo imediatamente ao subir
   await buscarPreJogo();
@@ -1807,7 +1858,7 @@ app.listen(PORT, async () => {
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v45 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v45b iniciado!</b>\n' +
     '✅ Horários das APIs ajustados conforme documentação\n' +
     '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
     '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
@@ -1815,7 +1866,10 @@ app.listen(PORT, async () => {
     '✅ Gol no Final / Over 0,5 2T — raio confirmado via periodo do evento (precisão total)\n' +
     '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20\n' +
     '✅ Fix Over 0,5 Gonza (Gol Limite) — mercado agora é total+0,5 após min 60 / total+1,5 antes, nunca mais fixo em Over 1,5\n' +
-    '🆕 Indicadores próprios Pressão Gonza & Jogo Aberto (substituem o raio do futats.com nas entradas)'
+    '🆕 Indicadores próprios Pressão Gonza & Jogo Aberto (substituem o raio do futats.com nas entradas)\n' +
+    '✅ Fix: indicadores próprios agora respeitam a janela de cada estratégia (gol_no_final só 2T/min80, over05_ht só 1T, lay_0x1_ia/1x0_ia/0x2_manu/0x3/gol_visit/gol_mand até min 20)\n' +
+    '✅ Fix: placar/minuto das mensagens dos indicadores próprios agora atualiza a cada ciclo (antes ficava congelado no momento da entrada)\n' +
+    '✅ Gol no Final agora checa Pressão Gonza nos dois lados (favorito e zebra), não só no favorito'
   );
 
   // Enviar card do dia imediatamente ao subir (apenas o card, não o resumo)
