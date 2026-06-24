@@ -202,6 +202,156 @@ function checaIndicadorGonza(jogo, estado, periodo) {
   return temRaioCasaAposGol && temRaioForaAposGol;
 }
 
+// ════════════════════════════════════════════════════════════════
+// ── INDICADORES PRÓPRIOS — PRESSÃO GONZA & JOGO ABERTO ──────────
+// ════════════════════════════════════════════════════════════════
+// Substituem a dependência do "raio" do futats.com (que só dispara em
+// múltiplos de 5min, sempre atrasado em relação à pressão real) por um
+// cálculo direto cima do momentum[] + eventos[], a cada ciclo (90s).
+//
+// PRESSÃO GONZA (estratégias de LADO — nosso time precisa marcar e o
+// oponente não): janela de 5 minutos-calendário consecutivos terminando
+// no minuto atual, com o oponente em momentum=0 o tempo todo (janela
+// "limpa"). Dentro dela:
+//   • média (módulo) >= 136 + chute no gol do nosso lado + eficiência
+//     (período correto) >= 0.17  → "completo" (entrada real confirmada)
+//   • média (módulo) >= 180, mesmo sem chute no gol               → "sem_eficiencia"
+//     (só observação — fica monitorando até confirmar ou o jogo acabar)
+//
+// JOGO ABERTO: os dois lados com pico de momentum >=150 (módulo) + algum
+// chute, dentro de até 2 minutos um do outro. Pra estratégias de GOLS é
+// gatilho de entrada; pra estratégias de LADO é sinal de saída/atenção.
+//
+// CONDIÇÃO DE SAÍDA/PROTEÇÃO (lado já com entrada aberta) — o OPONENTE
+// mostrou reação real, qualquer uma destas (janela de 5min terminando
+// no minuto atual):
+//   • pico >=150 (módulo) + chute (no gol OU pra fora) no mesmo minuto
+//   • média (módulo) dos 5 minutos > 100
+//   • 2 chutes (qualquer tipo) dentro da janela
+// + cartão vermelho do nosso lado = saída imediata, sempre.
+// ════════════════════════════════════════════════════════════════
+
+function round2(n) { return Math.round(n * 100) / 100; }
+
+function ladoOposto(lado) { return lado === 'casa' ? 'fora' : 'casa'; }
+
+// Valor de momentum de um lado num minuto específico (0 se não houver dado)
+function valorMomento(jogo, minuto, lado) {
+  const m = (jogo.momentum || []).find(x => x.minuto === minuto);
+  if (!m) return 0;
+  return (lado === 'casa' ? m.valor_casa : m.valor_fora) || 0;
+}
+
+// Janela dos últimos 5 minutos-calendário (consecutivos, incluindo zeros)
+// terminando no minutoAtual. ladoAlvo = de quem queremos a "força";
+// também devolve o valor do lado oposto em cada minuto (pra checar limpeza).
+function janelaUltimos5(jogo, ladoAlvo, minutoAtual) {
+  const janela = [];
+  for (let min = minutoAtual - 4; min <= minutoAtual; min++) {
+    janela.push({
+      minuto: min,
+      alvo: valorMomento(jogo, min, ladoAlvo),
+      oposto: valorMomento(jogo, min, ladoOposto(ladoAlvo)),
+    });
+  }
+  return janela;
+}
+
+// Eficiência do nosso lado no período "correto": ult_10min no 1T sempre;
+// no 2T, usa resumo_pressao['2_tempo'] enquanto faltarem menos de 10min
+// de jogo no 2T (dados ainda muito recentes pro ult_10min fazer sentido),
+// e troca pra ult_10min depois disso. estado.minutoInicio2T é marcado em
+// monitorarLive no primeiro tick numérico após o intervalo.
+function getEficienciaPeriodoAtual(jogo, estado, lado) {
+  const tempoNum = parseInt(jogo.tempo) || 0;
+  let periodo = 'ult_10min';
+  if (estado.passouHT && estado.minutoInicio2T != null) {
+    const minutosNo2T = tempoNum - estado.minutoInicio2T;
+    if (minutosNo2T >= 0 && minutosNo2T < 10) periodo = '2_tempo';
+  }
+  const ind = getIndicadores(jogo, periodo);
+  return lado === 'casa' ? ind.efCasa : ind.efFora;
+}
+
+// ── PRESSÃO GONZA ──────────────────────────────────────────────
+// Retorna null (não bate nada) ou { tipo: 'completo'|'sem_eficiencia', media, minutoChute?, eficiencia? }
+function checaPressaoGonza(jogo, estado, ladoAlvo, minutoAtual) {
+  if (!minutoAtual || minutoAtual < 5) return null;
+  const janela = janelaUltimos5(jogo, ladoAlvo, minutoAtual);
+  // janela limpa: oponente em 0 nos 5 minutos inteiros
+  if (!janela.every(j => j.oposto === 0)) return null;
+
+  const media   = janela.reduce((s, j) => s + Math.abs(j.alvo), 0) / 5;
+  const minutos = janela.map(j => j.minuto);
+  const chutes  = (jogo.eventos || []).filter(e =>
+    e.lado === ladoAlvo && minutos.includes(e.minuto) && e.tipo_evento.startsWith('chute')
+  );
+  const chuteGol = chutes.find(c => c.tipo_evento === 'chute_no_gol');
+
+  if (media >= 136 && chuteGol) {
+    const efNosso = getEficienciaPeriodoAtual(jogo, estado, ladoAlvo);
+    if (efNosso >= 0.17) {
+      return { tipo: 'completo', media: round2(media), minutoChute: chuteGol.minuto, eficiencia: round2(efNosso) };
+    }
+  }
+  if (media >= 180) {
+    return { tipo: 'sem_eficiencia', media: round2(media) };
+  }
+  return null;
+}
+
+// ── CONDIÇÃO DE SAÍDA/PROTEÇÃO — reação real do oponente ───────
+function checaReacaoOponente(jogo, ladoOponente, minutoAtual) {
+  if (!minutoAtual || minutoAtual < 5) return null;
+  const janela  = janelaUltimos5(jogo, ladoOponente, minutoAtual); // .alvo = valor do oponente
+  const minutos = janela.map(j => j.minuto);
+
+  // 1) pico >=150 (módulo) + chute (no gol OU pra fora) no MESMO minuto
+  for (const j of janela) {
+    if (Math.abs(j.alvo) >= 150) {
+      const chute = (jogo.eventos || []).find(e =>
+        e.lado === ladoOponente && e.minuto === j.minuto &&
+        (e.tipo_evento === 'chute_no_gol' || e.tipo_evento === 'chute_para_fora')
+      );
+      if (chute) return { tipo: 'momentum_forte', minuto: j.minuto, valor: j.alvo, chute: chute.tipo_evento };
+    }
+  }
+
+  // 2) média dos 5 minutos (módulo) > 100
+  const media = janela.reduce((s, j) => s + Math.abs(j.alvo), 0) / 5;
+  if (media > 100) return { tipo: 'media_sustentada', media: round2(media) };
+
+  // 3) 2 chutes (qualquer tipo) dentro da janela
+  const chutesNaJanela = (jogo.eventos || []).filter(e =>
+    e.lado === ladoOponente && minutos.includes(e.minuto) && e.tipo_evento.startsWith('chute')
+  );
+  if (chutesNaJanela.length >= 2) return { tipo: 'dois_chutes', qtd: chutesNaJanela.length };
+
+  return null;
+}
+
+// ── JOGO ABERTO — os dois lados com pico+chute, perto no tempo ──
+function checaJogoAberto(jogo, minutoAtual) {
+  if (!minutoAtual || minutoAtual < 2) return null;
+  function ultimoPicoComChute(lado) {
+    for (let min = minutoAtual; min >= Math.max(1, minutoAtual - 9); min--) {
+      const valor = valorMomento(jogo, min, lado);
+      if (Math.abs(valor) >= 150) {
+        const temChute = (jogo.eventos || []).some(e =>
+          e.lado === lado && e.minuto === min && e.tipo_evento.startsWith('chute')
+        );
+        if (temChute) return min;
+      }
+    }
+    return null;
+  }
+  const minCasa = ultimoPicoComChute('casa');
+  const minFora = ultimoPicoComChute('fora');
+  if (minCasa == null || minFora == null) return null;
+  if (Math.abs(minCasa - minFora) <= 2) return { minCasa, minFora };
+  return null;
+}
+
 // ── REGISTRAR PENDENTE ────────────────────────────────────────
 function registrarPendente(jogo, strat, tipo = 'pre') {
   const id    = Date.now() + Math.random();
@@ -639,6 +789,15 @@ async function monitorarLive() {
         }
       }
 
+      // Marca o minuto exato em que o 2T começou de verdade (primeiro tick
+      // numérico após o intervalo) — usado pelos indicadores próprios
+      // (Pressão Gonza) pra saber quando usar resumo_pressao['2_tempo']
+      // (primeiros 10min do 2T) vs ult_10min (depois disso).
+      if (estado.passouHT && estado.minutoInicio2T == null && jogo.tempo !== 'Intervalo') {
+        const tNumInicio2T = parseInt(jogo.tempo) || 0;
+        if (tNumInicio2T > 0) estado.minutoInicio2T = tNumInicio2T;
+      }
+
       // ── Detectar pênaltis/prorrogação e congelar placar do tempo normal ──
       // NOTA: o campo 'periodo' não existe na API real — detecção feita só por
       // texto em 'tempo' (ex: pode vir como 'Penaltis', 'Prorrogação' em alguns casos).
@@ -656,6 +815,7 @@ async function monitorarLive() {
       }
 
       await processarAlertasLive(jogo, estado, jogoId, hoje);
+      await processarIndicadoresProprios(jogo, estado, jogoId, hoje);
       await processarEstadoGrupo1(jogo, estado, jogoId, hoje);
       await processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje);
     }
@@ -683,8 +843,10 @@ async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
     // Estratégias do Grupo 1 têm sua própria máquina de estados — não
-    // sobrescrever aqui, ela é tratada em processarEstadoGrupo1.
-    if (info.grupo1Status) continue;
+    // sobrescrever aqui, ela é tratada em processarEstadoGrupo1. Mensagens
+    // dos indicadores próprios (Pressão Gonza/Jogo Aberto) também têm seu
+    // próprio texto de status, gerido em atualizarIndicadorProprio.
+    if (info.grupo1Status || info.indicadorTipo) continue;
     const display = STRAT_DISPLAY[stratKey] || stratKey;
     const statusLinha = `📊 Placar atual: ${placarAtual} · ${tempo}'`;
     info.ultimoStatusTexto = statusLinha;
@@ -731,6 +893,254 @@ async function processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje) {
   }
 }
 
+
+// ════════════════════════════════════════════════════════════════
+// ── ORQUESTRADOR — PRESSÃO GONZA & JOGO ABERTO ──────────────────
+// ════════════════════════════════════════════════════════════════
+
+// Estratégias de LADO (precisam que um time específico marque e o outro
+// não) onde os indicadores próprios se aplicam. Ficam de fora: corr_lay_fav
+// e corr_lay_zebra (janela de só 5min do próprio jogo, lógica legada
+// diferente — não dá pra formar uma janela de momentum de 5min ali).
+const LADO_STRATS_PROPRIOS = [
+  'favorito_ht_gonza', 'lay_away_manu', 'lay_manu4', 'back_gonza_xg',
+  'back_favorito', 'lay_xg', 'recup_favorito',
+  'lay_0x1_ia', 'lay_1x0_ia', 'lay_0x2_manu', 'lay_0x3',
+  'lay_gol_visit', 'lay_gol_mand',
+];
+
+// Estratégias de GOLS — Pressão Gonza aplicado a favor do favorito do jogo
+// + Jogo Aberto como gatilho extra, somado ao que já existe (raio antigo).
+const GOLS_STRATS_PROPRIOS = [
+  'over05', 'over15_ia', 'over25_ia', 'ambas_marcam', 'ambas_marcam_xg',
+  'am', 'am_xg', 'felipe_over15', 'gol_no_final', 'over05_ht',
+];
+
+// Resolve qual lado é o "nosso" pra cada estratégia de lado (mesma lógica
+// já usada em processarAlertasLive/processarEstadoGrupo1 pra cada uma).
+function getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo) {
+  switch (stratKey) {
+    case 'favorito_ht_gonza':
+    case 'lay_away_manu':
+    case 'lay_manu4':
+    case 'back_gonza_xg':
+    case 'lay_0x1_ia':
+    case 'lay_0x2_manu':
+    case 'lay_0x3':
+    case 'lay_gol_visit':
+      return 'casa';
+    case 'lay_1x0_ia':
+    case 'lay_gol_mand':
+      return 'fora';
+    case 'back_favorito':
+    case 'recup_favorito':
+      return getFavorito(jogo);
+    case 'lay_xg': {
+      const p = (pendJogo || []).find(x => x.strat === 'lay_xg');
+      return p?.lay_team === 'home' ? 'casa' : 'fora';
+    }
+    default:
+      return null;
+  }
+}
+
+// Dispara um alerta novo usando os indicadores próprios (não duplica se já
+// existir alerta dessa estratégia por qualquer caminho — raio antigo ou
+// indicador novo). registrarComoEntradaReal=false → só observação, ainda
+// não conta no resultado final (caso do "Pressão Gonza sem eficiência").
+async function dispararIndicadorProprio(jogo, estado, stratKey, linhaIndicador, indicadorTipo, registrarComoEntradaReal, formatoSimplificado = false) {
+  if (estado.msgIds[stratKey]) return false;
+
+  const tempoNum     = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
+  const isHTAgora     = jogo.tempo === 'Intervalo';
+  const tempoDisplay = isHTAgora ? 'HT' : tempoNum;
+  const golsCasa = parseInt(jogo.gols_casa) || 0, golsFora = parseInt(jogo.gols_fora) || 0;
+  const placar   = `${golsCasa}x${golsFora}`;
+  const links    = linksExchanges(jogo.urls_exchanges || {});
+  const display  = STRAT_DISPLAY[stratKey] || stratKey;
+
+  const textoCompleto = formatoSimplificado
+    ? `${linhaIndicador}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempoDisplay}' · 📊 ${placar}`
+    : montarMsgAlerta(`${display}\n${linhaIndicador}`, jogo, tempoDisplay, placar, placar, links);
+
+  const ids = await sendTelegram(textoCompleto);
+
+  estado.msgIds[stratKey] = {
+    ids, placarAlerta: placar, tempoAlerta: tempoDisplay, stratKey,
+    indicadorTipo, formatoSimplificado,
+  };
+
+  if (registrarComoEntradaReal) {
+    const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
+    pendLive.condicao = indicadorTipo;
+    pendLive.msgIds   = ids;
+    salvarArquivo(PEND_FILE, pendentes);
+  }
+  return true;
+}
+
+// Monitora uma estratégia de LADO já alertada (por qualquer caminho):
+// 1) upgrade de "sem eficiência" pra "completo" (registra a entrada real
+//    só nesse momento); 2) reação do oponente (aviso de saída/proteção);
+// 3) cartão vermelho nosso (saída imediata).
+async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
+  const info = estado.msgIds[stratKey];
+  if (!info || !info.ids?.length) return;
+  if (jogo.tempo === 'Intervalo') return; // não recalcula janela de momentum no intervalo
+  if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
+      info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') return;
+
+  const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
+  const links    = linksExchanges(jogo.urls_exchanges || {});
+  const fixo     = `${STRAT_DISPLAY[stratKey] || stratKey}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
+
+  // 1) Upgrade "sem eficiência" → "completo" (só se foi nosso indicador que disparou)
+  if (info.indicadorTipo === 'pressao_sem_eficiencia' && !info.pressaoConfirmada) {
+    const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
+    if (pg && pg.tipo === 'completo') {
+      info.pressaoConfirmada = true;
+      const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
+      pendLive.condicao = 'pressao_gonza_confirmada';
+      pendLive.msgIds   = info.ids;
+      salvarArquivo(PEND_FILE, pendentes);
+      const statusTexto = `🟣 Pressão Gonza confirmada — chute no gol min ${pg.minutoChute}\n✅ Entrada confirmada`;
+      info.ultimoStatusTexto = statusTexto;
+      await editTelegram(info.ids, `${fixo}\n${statusTexto}${links}`);
+    }
+    return; // não checa saída no mesmo ciclo em que acabou de confirmar (ou ainda não confirmou)
+  }
+
+  if (!ladoAlvo) return; // estratégia de gols não tem "saída" pra monitorar aqui
+
+  // 2) Reação do oponente — aviso de saída/proteção (só 1x por jogo)
+  if (!info.saidaAvisada) {
+    const ladoOp  = ladoOposto(ladoAlvo);
+    const reacao  = checaReacaoOponente(jogo, ladoOp, tempoNum);
+    if (reacao) {
+      info.saidaAvisada = true;
+      let descricao;
+      if (reacao.tipo === 'momentum_forte') {
+        descricao = `momentum ${reacao.valor} + ${reacao.chute === 'chute_no_gol' ? 'chute no gol' : 'chute pra fora'} (min ${reacao.minuto})`;
+      } else if (reacao.tipo === 'media_sustentada') {
+        descricao = `média ${reacao.media} sustentada nos últ. 5min`;
+      } else {
+        descricao = `${reacao.qtd} chutes nos últ. 5min`;
+      }
+      const statusBase = info.ultimoStatusTexto || `📊 Placar atual: ${jogo.gols_casa}x${jogo.gols_fora}`;
+      const statusTexto = `${statusBase}\n⚠️ Oponente reagiu — ${descricao}\n⚠️ Considerar proteção/saída`;
+      info.ultimoStatusTexto = statusTexto;
+      await editTelegram(info.ids, `${fixo}\n${statusTexto}${links}`);
+      return;
+    }
+  }
+
+  // 3) Cartão vermelho do nosso lado — saída imediata, sempre
+  if (!info.cartaoVermelhoAvisado) {
+    const vermelho = (jogo.eventos || []).find(e => e.tipo_evento === 'cartao_vermelho' && e.lado === ladoAlvo);
+    if (vermelho) {
+      info.cartaoVermelhoAvisado = true;
+      const statusTexto = `🔴 Cartão vermelho nosso (min ${vermelho.minuto})\n⚠️ Saída recomendada`;
+      info.ultimoStatusTexto = statusTexto;
+      await editTelegram(info.ids, `${fixo}\n${statusTexto}${links}`);
+    }
+  }
+}
+
+// Orquestrador principal — chamado a cada ciclo (90s) pra todo jogo live.
+async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
+  if (jogo.tempo === 'Intervalo' || jogo.tempo === 'Encerrado') return;
+  const tempoNum   = parseInt(jogo.tempo) || 0;
+  const jaPassouHT = !!estado.passouHT;
+  const is1T       = !jaPassouHT;
+  const is2T       = jaPassouHT;
+  const favorito   = getFavorito(jogo);
+
+  const pendJogo = pendentes.filter(p =>
+    p.data === hoje && p.result === 'pendente' &&
+    (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
+  );
+
+  // ── ESTRATÉGIAS DE LADO ──────────────────────────────────────
+  for (const stratKey of LADO_STRATS_PROPRIOS) {
+    if (!pendJogo.some(p => p.strat === stratKey)) continue;
+    const ladoAlvo = getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo);
+    if (!ladoAlvo) continue; // ex: lay_xg sem lay_team definido ainda
+
+    if (!estado.msgIds[stratKey]) {
+      if (is1T) {
+        // 1º Tempo: dispara normal (Pressão Gonza). Jogo Aberto aqui é só
+        // sinal de atenção pra quem JÁ entrou — não dispara entrada nova.
+        const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
+        if (pg) {
+          if (pg.tipo === 'completo') {
+            await dispararIndicadorProprio(jogo, estado, stratKey,
+              `🟣 Pressão Gonza — média ${pg.media}, chute no gol min ${pg.minutoChute}`,
+              'pressao_completo', true);
+          } else {
+            await dispararIndicadorProprio(jogo, estado, stratKey,
+              `🟣 Pressão Gonza sem eficiência — média ${pg.media} (aguardando chute no gol)`,
+              'pressao_sem_eficiencia', false);
+          }
+        }
+      } else if (is2T) {
+        // 2º Tempo: se qualquer um dos dois indicadores bater, não entra
+        // mais em lado — converte direto pra Gol Limite (mensagem simples).
+        const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
+        const ja = checaJogoAberto(jogo, tempoNum);
+        if (pg && pg.tipo === 'completo') {
+          if (await dispararIndicadorProprio(jogo, estado, stratKey,
+              '🟢 Indicador Pressão Gonza Confirmado', 'gol_limite_pressao', false, true)) {
+            const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
+            pendLive.condicao = 'gol_limite_pressao';
+            pendLive.golLimiteConversao = true;
+            pendLive.placarNaConversao  = `${jogo.gols_casa}x${jogo.gols_fora}`;
+            pendLive.msgIds = estado.msgIds[stratKey].ids;
+            salvarArquivo(PEND_FILE, pendentes);
+            estado.msgIds[stratKey].golLimiteConversao = true;
+          }
+        } else if (ja) {
+          if (await dispararIndicadorProprio(jogo, estado, stratKey,
+              '🟡 Indicador Jogo Aberto Confirmado', 'gol_limite_jogo_aberto', false, true)) {
+            const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
+            pendLive.condicao = 'gol_limite_jogo_aberto';
+            pendLive.golLimiteConversao = true;
+            pendLive.placarNaConversao  = `${jogo.gols_casa}x${jogo.gols_fora}`;
+            pendLive.msgIds = estado.msgIds[stratKey].ids;
+            salvarArquivo(PEND_FILE, pendentes);
+            estado.msgIds[stratKey].golLimiteConversao = true;
+          }
+        }
+      }
+    } else {
+      // Já alertado (por qualquer caminho) — monitora upgrade/saída/cartão
+      await atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo);
+    }
+  }
+
+  // ── ESTRATÉGIAS DE GOLS ───────────────────────────────────────
+  for (const stratKey of GOLS_STRATS_PROPRIOS) {
+    if (!pendJogo.some(p => p.strat === stratKey)) continue;
+    if (estado.msgIds[stratKey]) continue; // gols não tem monitoramento de saída, só entrada 1x
+
+    const pg = checaPressaoGonza(jogo, estado, favorito, tempoNum);
+    const ja = checaJogoAberto(jogo, tempoNum);
+    const golLimiteTxt = is2T ? ' (Gol Limite)' : '';
+
+    if (pg && pg.tipo === 'completo') {
+      await dispararIndicadorProprio(jogo, estado, stratKey,
+        `🟣 Pressão Gonza (favorito) — média ${pg.media}, chute no gol min ${pg.minutoChute}${golLimiteTxt}`,
+        'pressao_completo', true);
+    } else if (ja) {
+      await dispararIndicadorProprio(jogo, estado, stratKey,
+        `🟠 Jogo Aberto — os dois lados reagindo (min ${ja.minCasa}-${ja.minFora})${golLimiteTxt}`,
+        'jogo_aberto', true);
+    } else if (pg && pg.tipo === 'sem_eficiencia') {
+      await dispararIndicadorProprio(jogo, estado, stratKey,
+        `🟣 Pressão Gonza sem eficiência (favorito) — média ${pg.media} (aguardando chute no gol)${golLimiteTxt}`,
+        'pressao_sem_eficiencia', false);
+    }
+  }
+}
 
 // Estados possíveis (info.grupo1Status):
 //   null/undefined → ainda não tomou gol, monitorando normalmente
@@ -1246,6 +1656,14 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   for (const p of pendJogo) {
     p.final  = placarFT;
     p.ht     = estado.htPlacar || '';
+    // Conversão pra Gol Limite (indicadores próprios no 2T, estratégia de
+    // lado virou mercado de gols): qualquer gol a partir da conversão = green.
+    if (p.golLimiteConversao) {
+      const [pcConv, pfConv] = (p.placarNaConversao || '0x0').split('x').map(Number);
+      const totalNaConversao = (pcConv||0) + (pfConv||0);
+      p.result = (golsCasa + golsFora) > totalNaConversao ? 'green' : 'red';
+      continue;
+    }
     const res = calcularResultado(p.strat, golsCasa, golsFora, htH, htA);
     p.result  = res || 'resolvido';
   }
@@ -1266,7 +1684,15 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
       return ps === stratBase || ps === stratKey;
     });
 
-    const res     = pLive?.result || calcularResultado(stratBase, golsCasa, golsFora, htH, htA);
+    let res;
+    // Pressão Gonza "sem eficiência" que NUNCA confirmou (sem pendente
+    // registrado) — não conta como entrada de verdade, sempre "não entrou",
+    // independente do que a estratégia normal diria.
+    if (info.indicadorTipo === 'pressao_sem_eficiencia' && !info.pressaoConfirmada) {
+      res = 'nao_entra';
+    } else {
+      res = pLive?.result || calcularResultado(stratBase, golsCasa, golsFora, htH, htA);
+    }
     let emoji;
     if (res === 'green')        emoji = '✅ GREEN';
     else if (res === 'red')     emoji = '❌ RED';
@@ -1301,7 +1727,7 @@ function agendarHoraBRT(hora, minuto, callback) {
 
 // ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_44',
+  status: 'ok', version: 'server_45',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -1342,7 +1768,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v44 funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v45 funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -1358,7 +1784,7 @@ app.post('/card-agora', async (req, res) => {
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v44 na porta ${PORT}`);
+  console.log(`FUTATS Server v45 na porta ${PORT}`);
 
   // Buscar jogos pré-jogo imediatamente ao subir
   await buscarPreJogo();
@@ -1381,14 +1807,15 @@ app.listen(PORT, async () => {
 
   // Avisos de inicio
   await sendTelegram(
-    '🚀 <b>FUTATS Server v44 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v45 iniciado!</b>\n' +
     '✅ Horários das APIs ajustados conforme documentação\n' +
     '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
     '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
     '✅ Fix is2T/is1T — campo periodo (inexistente na API) removido, usa histórico do jogo\n' +
     '✅ Gol no Final / Over 0,5 2T — raio confirmado via periodo do evento (precisão total)\n' +
     '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20\n' +
-    '✅ Fix Over 0,5 Gonza (Gol Limite) — mercado agora é total+0,5 após min 60 / total+1,5 antes, nunca mais fixo em Over 1,5'
+    '✅ Fix Over 0,5 Gonza (Gol Limite) — mercado agora é total+0,5 após min 60 / total+1,5 antes, nunca mais fixo em Over 1,5\n' +
+    '🆕 Indicadores próprios Pressão Gonza & Jogo Aberto (substituem o raio do futats.com nas entradas)'
   );
 
   // Enviar card do dia imediatamente ao subir (apenas o card, não o resumo)
