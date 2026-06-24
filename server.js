@@ -864,8 +864,13 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const is1T = !isHT && !jaPassouHT;
 
   const evNovos   = jogo.eventos || [];
-  const raiosCasa = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa');
-  const raiosFora = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'fora');
+  // CORREÇÃO: antes contava QUALQUER raio do jogo inteiro (cumulativo), então
+  // um raio do 1T ficava "travado" como true pro resto do jogo todo, mesmo
+  // já estando no 2T há muito tempo. Agora só conta raio do período ATUAL
+  // (mesma lógica já usada com sucesso em raiosCasa2T/raiosFora2T abaixo).
+  const periodoAtualRaio = jaPassouHT ? '2_tempo' : '1_tempo';
+  const raiosCasa = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa' && e.periodo === periodoAtualRaio);
+  const raiosFora = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'fora' && e.periodo === periodoAtualRaio);
   const raioFav   = favorito === 'casa' ? raiosCasa.length > 0 : raiosFora.length > 0;
   const raioZebra = favorito === 'casa' ? raiosFora.length > 0 : raiosCasa.length > 0;
   const raioMand  = raiosCasa.length > 0;
