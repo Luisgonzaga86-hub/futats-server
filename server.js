@@ -1878,6 +1878,173 @@ app.post('/pendentes', (req, res) => {
   res.json({ ok: true, total: pendentes.length });
 });
 
+// ── /momentum-status — consulta visual (não altera nada, só lê) ─
+// Mostra, pra cada jogo live que tenha alguma estratégia nossa pendente,
+// as sequências de momentum (min/valores/média/eventos) e a contagem de
+// chutes por tipo, separado por 1º e 2º tempo, dos dois lados.
+const TIPO_EVENTO_LABEL_MS = {
+  chute_no_gol: 'chute no gol', chute_para_fora: 'chute pra fora',
+  chute_bloqueado: 'bloqueado', chute_na_trave: 'na trave',
+  raio: 'raio', escanteio: 'escanteio', gol: 'GOL',
+  cartao_amarelo: 'cartão amarelo', cartao_vermelho: 'cartão vermelho',
+};
+
+function msEventosDaJanela(jogo, lado, minutos) {
+  const evs = (jogo.eventos || []).filter(e => e.lado === lado && minutos.includes(e.minuto));
+  if (!evs.length) return '—';
+  return evs.map(e => `${e.minuto}' ${TIPO_EVENTO_LABEL_MS[e.tipo_evento] || e.tipo_evento}`).join(', ');
+}
+
+function msSequenciasMomentum(jogo, lado, periodo) {
+  const campo  = lado === 'casa' ? 'valor_casa' : 'valor_fora';
+  const oposto = lado === 'casa' ? 'valor_fora' : 'valor_casa';
+  const m = (jogo.momentum || [])
+    .filter(x => periodo === '1T' ? x.minuto <= 45.5 : x.minuto > 45.5)
+    .sort((a, b) => a.minuto - b.minuto);
+
+  const seqs = []; let atual = null;
+  m.forEach(x => {
+    if (x[oposto] === 0 && x[campo] !== 0) { if (!atual) atual = []; atual.push({ minuto: x.minuto, valor: x[campo] }); }
+    else if (x[oposto] !== 0) { if (atual && atual.length) seqs.push(atual); atual = null; }
+  });
+  if (atual && atual.length) seqs.push(atual);
+
+  return seqs.map(s => {
+    const minutos = s.map(x => x.minuto);
+    const media = s.reduce((sum, x) => sum + Math.abs(x.valor), 0) / s.length;
+    return {
+      faixa: minutos.length > 1 ? `${minutos[0]}-${minutos[minutos.length - 1]}` : `${minutos[0]}`,
+      valores: s.map(x => Math.round(x.valor * 100) / 100),
+      media: Math.round(media * 100) / 100,
+      eventos: msEventosDaJanela(jogo, lado, minutos),
+    };
+  });
+}
+
+function msContarChutes(jogo, lado, periodo) {
+  const periodoApi = periodo === '1T' ? '1_tempo' : '2_tempo';
+  const evs = (jogo.eventos || []).filter(e =>
+    e.lado === lado && e.periodo === periodoApi && e.tipo_evento.startsWith('chute')
+  );
+  return {
+    no_gol:    evs.filter(e => e.tipo_evento === 'chute_no_gol').length,
+    pra_fora:  evs.filter(e => e.tipo_evento === 'chute_para_fora').length,
+    bloqueado: evs.filter(e => e.tipo_evento === 'chute_bloqueado').length,
+    na_trave:  evs.filter(e => e.tipo_evento === 'chute_na_trave').length,
+  };
+}
+
+function msBlocoTime(jogo, lado, periodo, nomeTime) {
+  const seqs   = msSequenciasMomentum(jogo, lado, periodo);
+  const chutes = msContarChutes(jogo, lado, periodo);
+  const ladoTxt = lado === 'casa' ? 'casa' : 'fora';
+
+  let html = `<div class="ms-card"><p class="ms-team">${nomeTime} <span class="ms-muted">(${ladoTxt})</span></p>`;
+  if (!seqs.length) {
+    html += `<p class="ms-muted ms-small">sem sequências nesse período</p>`;
+  } else {
+    seqs.forEach(s => {
+      const destaque = Math.abs(s.media) >= 136 ? ' ms-good' : '';
+      html += `<div class="ms-seq">
+        <div class="ms-muted ms-small">min ${s.faixa} &middot; ${s.valores.join(',')}</div>
+        <div class="ms-seq-row"><span class="ms-media${destaque}">média ${s.media}</span><span class="ms-muted ms-small">${s.eventos}</span></div>
+      </div>`;
+    });
+  }
+  html += `<div class="ms-chutes">
+    <div><div class="ms-num">${chutes.no_gol}</div><div class="ms-muted ms-small">no gol</div></div>
+    <div><div class="ms-num">${chutes.pra_fora}</div><div class="ms-muted ms-small">pra fora</div></div>
+    <div><div class="ms-num">${chutes.bloqueado}</div><div class="ms-muted ms-small">bloqueado</div></div>
+    <div><div class="ms-num">${chutes.na_trave}</div><div class="ms-muted ms-small">na trave</div></div>
+  </div></div>`;
+  return html;
+}
+
+function msHTMLJogo(jogo) {
+  const tempoTxt = jogo.tempo === 'Intervalo' ? 'Intervalo' : jogo.tempo === 'Encerrado' ? 'Encerrado' : `${jogo.tempo}'`;
+  let html = `<div class="ms-jogo">
+    <div class="ms-jogo-header">
+      <p class="ms-jogo-nome">${jogo.mandante} x ${jogo.visitante}</p>
+      <p class="ms-muted ms-small">${tempoTxt} &middot; placar ${jogo.gols_casa}x${jogo.gols_fora}</p>
+    </div>
+    <p class="ms-periodo">1º tempo</p>
+    <div class="ms-grid">${msBlocoTime(jogo, 'casa', '1T', jogo.mandante)}${msBlocoTime(jogo, 'fora', '1T', jogo.visitante)}</div>`;
+
+  const temDados2T = (jogo.momentum || []).some(m => m.minuto > 45.5 && (m.valor_casa !== 0 || m.valor_fora !== 0));
+  if (temDados2T) {
+    html += `<p class="ms-periodo">2º tempo</p>
+    <div class="ms-grid">${msBlocoTime(jogo, 'casa', '2T', jogo.mandante)}${msBlocoTime(jogo, 'fora', '2T', jogo.visitante)}</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+
+function msPaginaHTML(corpo) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="30">
+  <title>FUTATS — Momentum Status</title>
+  <style>
+    body { background:#0e0e10; color:#e8e8e6; font-family:-apple-system,Segoe UI,Roboto,sans-serif; margin:0; padding:16px; }
+    h1 { font-size:16px; font-weight:600; margin:0 0 16px; }
+    .ms-jogo { background:#18181b; border-radius:12px; padding:14px 16px; margin-bottom:16px; }
+    .ms-jogo-header { display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+    .ms-jogo-nome { font-size:15px; font-weight:600; margin:0; }
+    .ms-periodo { font-size:12px; font-weight:600; color:#9a9a96; margin:14px 0 6px; text-transform:uppercase; letter-spacing:.04em; }
+    .ms-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(240px,1fr)); gap:10px; }
+    .ms-card { background:#212124; border-radius:10px; padding:10px 12px; }
+    .ms-team { font-size:13px; font-weight:600; margin:0 0 8px; }
+    .ms-seq { font-size:13px; margin-bottom:7px; padding-bottom:7px; border-bottom:1px solid #2c2c30; }
+    .ms-seq:last-of-type { border-bottom:none; }
+    .ms-seq-row { display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-top:2px; flex-wrap:wrap; }
+    .ms-media { font-weight:600; }
+    .ms-good { color:#5dcaa5; }
+    .ms-muted { color:#9a9a96; }
+    .ms-small { font-size:11px; }
+    .ms-chutes { margin-top:8px; background:#18181b; border-radius:8px; padding:8px; display:grid; grid-template-columns:repeat(4,1fr); gap:4px; text-align:center; }
+    .ms-num { font-size:14px; font-weight:600; }
+    .ms-empty { color:#9a9a96; font-size:14px; }
+  </style></head><body>
+  <h1>FUTATS — Momentum Status <span style="color:#9a9a96;font-weight:400;">(atualiza a cada 30s)</span></h1>
+  ${corpo}
+  </body></html>`;
+}
+
+app.get('/momentum-status', async (req, res) => {
+  try {
+    const hoje = dataHoje();
+    const stratsRelevantes = new Set([...LADO_STRATS_PROPRIOS, ...GOLS_STRATS_PROPRIOS]);
+    const pendRelevantes = pendentes.filter(p =>
+      p.data === hoje && p.result === 'pendente' && stratsRelevantes.has(p.strat)
+    );
+    if (!pendRelevantes.length) {
+      return res.send(msPaginaHTML('<p class="ms-empty">Nenhuma estratégia nossa pendente hoje.</p>'));
+    }
+
+    let jogosLive = [];
+    try {
+      const rLive = await futatsGet('api-games-live');
+      jogosLive = rLive[0]?.eventos || [];
+    } catch (e) {
+      return res.send(msPaginaHTML('<p class="ms-empty">Não consegui consultar a API live agora.</p>'));
+    }
+
+    const jogosRelevantes = jogosLive.filter(jogo =>
+      pendRelevantes.some(p => p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
+    );
+
+    if (!jogosRelevantes.length) {
+      return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo com estratégia nossa pendente está na live agora.</p>'));
+    }
+
+    const corpo = jogosRelevantes.map(msHTMLJogo).join('');
+    res.send(msPaginaHTML(corpo));
+  } catch (e) {
+    res.status(500).send('Erro ao gerar status: ' + e.message);
+  }
+});
+
+
 app.get('/dados',  (req, res) => res.json(dadosHist));
 app.post('/dados', (req, res) => {
   const novos = req.body;
