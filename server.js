@@ -2044,7 +2044,6 @@ app.get('/momentum-status', async (req, res) => {
   }
 });
 
-
 app.get('/dados',  (req, res) => res.json(dadosHist));
 app.post('/dados', (req, res) => {
   const novos = req.body;
