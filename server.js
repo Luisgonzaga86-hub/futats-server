@@ -1000,9 +1000,17 @@ async function dispararIndicadorProprio(jogo, estado, stratKey, linhaIndicador, 
 
   const ids = await sendTelegram(textoCompleto);
 
+  // Marca de uma vez o "slot" do período em que essa entrada aconteceu,
+  // pra reconfirmação (checarReconfirmacao) não duplicar a mesma janela
+  // como se fosse uma reconfirmação nova no mesmo período.
+  const slotEntrada = estado.passouHT ? '2T' : '1T';
+  const notados = { pg1T: false, pg2T: false, ja1T: false, ja2T: false };
+  if (indicadorTipo === 'pressao_completo' || indicadorTipo === 'pressao_sem_eficiencia') notados['pg' + slotEntrada] = true;
+  else if (indicadorTipo === 'jogo_aberto') notados['ja' + slotEntrada] = true;
+
   estado.msgIds[stratKey] = {
     ids, placarAlerta: placar, tempoAlerta: tempoDisplay, stratKey,
-    indicadorTipo, formatoSimplificado, linhaIndicador,
+    indicadorTipo, formatoSimplificado, linhaIndicador, notados,
   };
 
   if (registrarComoEntradaReal) {
@@ -1081,41 +1089,55 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
   }
 }
 
-// Estratégia de GOLS que já foi alertada (por raio antigo OU por um dos
-// nossos indicadores) — se um indicador AINDA NÃO anotado também bater,
-// edita a mensagem acrescentando a confirmação extra, sem duplicar alerta
-// nem re-registrar pendente (a entrada já existe).
-async function notificarIndicadorExtraGols(jogo, estado, stratKey, favorito, hoje) {
+// Reconfirmação dos indicadores — vale pra QUALQUER estratégia já alertada
+// (lado ou gols, por raio antigo ou pelos nossos indicadores). No máximo
+// 1 nota por indicador (Pressão Gonza / Jogo Aberto) POR PERÍODO (1T/2T) —
+// ou seja, no máximo 2 notas de cada um no jogo inteiro. Nunca duplica
+// alerta nem re-registra pendente — só acrescenta uma linha na mensagem.
+async function checarReconfirmacao(jogo, estado, stratKey, ladoOuFavorito, hoje) {
   const info = estado.msgIds[stratKey];
   if (!info?.ids?.length) return;
   if (jogo.tempo === 'Intervalo') return;
+  if (info.golLimiteConversao) return; // mensagem terminal/simplificada, sem reconfirmação
+  if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
+      info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') return;
+
+  const tempoNum = parseInt(jogo.tempo) || 0;
+  const slot     = estado.passouHT ? '2T' : '1T';
+  info.notados = info.notados || { pg1T: false, pg2T: false, ja1T: false, ja2T: false };
+
+  let linhaNova = null;
+
+  if (!info.notados['pg' + slot]) {
+    let pg = checaPressaoGonza(jogo, estado, ladoOuFavorito, tempoNum);
+    let rotuloLado = '';
+    if (stratKey === 'gol_no_final') {
+      const pgZebra = checaPressaoGonza(jogo, estado, ladoOposto(ladoOuFavorito), tempoNum);
+      if (pg?.tipo !== 'completo' && pgZebra?.tipo === 'completo') { pg = pgZebra; rotuloLado = ' (zebra)'; }
+    }
+    if (pg) {
+      info.notados['pg' + slot] = true;
+      linhaNova = pg.tipo === 'completo'
+        ? `🟣 Pressão Gonza${rotuloLado} reconfirmou (${slot}) — média ${pg.media}, chute no gol min ${pg.minutoChute}`
+        : `🟣 Pressão Gonza sem eficiência${rotuloLado} reconfirmou (${slot}) — média ${pg.media}`;
+    }
+  }
+
+  if (!linhaNova && !info.notados['ja' + slot]) {
+    const ja = checaJogoAberto(jogo, tempoNum);
+    if (ja) {
+      info.notados['ja' + slot] = true;
+      linhaNova = `🟠 Jogo Aberto reconfirmou (${slot}) — os dois lados reagindo (min ${ja.minCasa}-${ja.minFora})`;
+    }
+  }
+  if (!linhaNova) return;
+
   info.linhasExtras = info.linhasExtras || [];
-  // Já anotamos os dois tipos possíveis — nada mais a checar.
-  if (info.linhasExtras.length >= 2) return;
+  info.linhasExtras.push(linhaNova);
 
-  const tempoNum  = parseInt(jogo.tempo) || 0;
-  const ladoZebra = ladoOposto(favorito);
-  let pg = checaPressaoGonza(jogo, estado, favorito, tempoNum);
-  let rotuloLado = 'favorito';
-  if (stratKey === 'gol_no_final') {
-    const pgZebra = checaPressaoGonza(jogo, estado, ladoZebra, tempoNum);
-    if (pg?.tipo !== 'completo' && pgZebra?.tipo === 'completo') { pg = pgZebra; rotuloLado = 'zebra'; }
-    else if (!pg && pgZebra) { pg = pgZebra; rotuloLado = 'zebra'; }
-  }
-  const ja = checaJogoAberto(jogo, tempoNum);
-
-  let chave = null, linhaExtra = null;
-  if (pg && pg.tipo === 'completo' && !info.linhasExtras.some(l => l.startsWith('PG:'))) {
-    chave = 'PG:'; linhaExtra = `🟣 Pressão Gonza (${rotuloLado}) também confirmou — média ${pg.media}, chute no gol min ${pg.minutoChute}`;
-  } else if (ja && !info.linhasExtras.some(l => l.startsWith('JA:'))) {
-    chave = 'JA:'; linhaExtra = `🟠 Jogo Aberto também confirmou — os dois lados reagindo (min ${ja.minCasa}-${ja.minFora})`;
-  }
-  if (!linhaExtra) return;
-
-  info.linhasExtras.push(chave + linhaExtra);
   const links   = linksExchanges(jogo.urls_exchanges || {});
   const placar  = `${jogo.gols_casa}x${jogo.gols_fora}`;
-  const extras  = info.linhasExtras.map(l => l.replace(/^(PG:|JA:)/, '')).join('\n');
+  const extras  = info.linhasExtras.join('\n');
 
   if (info.indicadorTipo) {
     const conteudo = (info.ultimoStatusTexto || info.linhaIndicador || '') + `\n${extras}`;
@@ -1201,7 +1223,9 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
       }
     } else {
       // Já alertado (por qualquer caminho) — monitora upgrade/saída/cartão
+      // + reconfirmação por período (máx 1 por indicador por tempo).
       await atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo);
+      await checarReconfirmacao(jogo, estado, stratKey, ladoAlvo, hoje);
     }
   }
 
@@ -1211,9 +1235,9 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     if (!periodoValidoParaGols(stratKey, is1T, is2T, tempoNum)) continue;
 
     if (estado.msgIds[stratKey]) {
-      // Já alertado (raio antigo ou nosso indicador) — se outro indicador
-      // ainda não anotado também bater, anexa a confirmação na mensagem.
-      await notificarIndicadorExtraGols(jogo, estado, stratKey, favorito, hoje);
+      // Já alertado (raio antigo ou nosso indicador) — reconfirmação por
+      // período (máx 1 por indicador por tempo), igual ao lado.
+      await checarReconfirmacao(jogo, estado, stratKey, favorito, hoje);
       continue;
     }
 
@@ -1928,7 +1952,8 @@ app.listen(PORT, async () => {
     '✅ Fix: indicadores próprios agora respeitam a janela de cada estratégia (gol_no_final só 2T/min80, over05_ht só 1T, lay_0x1_ia/1x0_ia/0x2_manu/0x3/gol_visit/gol_mand até min 20)\n' +
     '✅ Fix: placar/minuto das mensagens dos indicadores próprios agora atualiza a cada ciclo (antes ficava congelado no momento da entrada)\n' +
     '✅ Gol no Final agora checa Pressão Gonza nos dois lados (favorito e zebra), não só no favorito\n' +
-    '🆕 Estratégias de gols já alertadas (raio antigo ou indicador próprio) agora recebem confirmação extra na mesma mensagem quando o outro indicador também bate (Pressão Gonza ou Jogo Aberto)'
+    '🆕 Estratégias de gols já alertadas (raio antigo ou indicador próprio) agora recebem confirmação extra na mesma mensagem quando o outro indicador também bate (Pressão Gonza ou Jogo Aberto)\n' +
+    '🆕 Reconfirmação por período: qualquer estratégia (lado ou gols) já alertada agora anota até 1x por tempo (1T/2T) quando Pressão Gonza ou Jogo Aberto bate de novo, sem duplicar alerta'
   );
 
   // Enviar card do dia imediatamente ao subir (apenas o card, não o resumo)
