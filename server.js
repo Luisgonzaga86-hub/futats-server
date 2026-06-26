@@ -15,8 +15,9 @@ const PORT        = process.env.PORT        || 3000;
 const FUTATS_TOKEN = 'w8e6q2xa';
 const FUTATS_BASE  = 'https://gz.futats.com/opta';
 
-const DATA_FILE  = path.join(__dirname, 'dados.json');
-const PEND_FILE  = path.join(__dirname, 'pendentes.json');
+const DATA_FILE   = path.join(__dirname, 'dados.json');
+const PEND_FILE   = path.join(__dirname, 'pendentes.json');
+const ESTADO_FILE = path.join(__dirname, 'estado_live.json');
 
 function lerArquivo(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -29,8 +30,20 @@ function salvarArquivo(file, data) {
 let dadosHist = lerArquivo(DATA_FILE, []);
 let pendentes = lerArquivo(PEND_FILE, []);
 
-// Estado live por jogo
-let estadoLive = {};
+// Estado live por jogo — persistido em arquivo (estado_live.json) a cada
+// ciclo do monitorarLive, pra sobreviver a um restart do Railway. Sem isso,
+// reiniciar com jogo rolando perdia o controle de mensagens já enviadas
+// (gerando duplicatas), o placar do HT, e a noção de 1T/2T do jogo.
+let estadoLive = lerArquivo(ESTADO_FILE, {});
+// Reseta "ultimaVez" de tudo que foi restaurado — sem isso, o tempo que
+// passou durante o restart contaria como "sumiu do live" e forçaria o
+// encerramento de jogos que ainda estão rolando de verdade.
+for (const k of Object.keys(estadoLive)) {
+  if (estadoLive[k]) estadoLive[k].ultimaVez = Date.now();
+}
+if (Object.keys(estadoLive).length) {
+  console.log(`[ESTADO] Restaurado estado de ${Object.keys(estadoLive).length} jogo(s) do arquivo (estado_live.json).`);
+}
 
 function dataHoje() {
   return new Date(new Date().getTime() - 3*60*60*1000).toISOString().split('T')[0];
@@ -90,10 +103,19 @@ async function editTelegram(msgIds, novoTexto) {
 }
 
 async function futatsGet(endpoint) {
-  const r = await fetch(`${FUTATS_BASE}/${endpoint}`, {
-    headers: { 'x-token': FUTATS_TOKEN }
-  });
-  return r.json();
+  // Timeout de 10s — se a API do futats.com não responder nesse prazo,
+  // a chamada é abortada (sem retry — só falha e o próximo ciclo tenta de novo).
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+  try {
+    const r = await fetch(`${FUTATS_BASE}/${endpoint}`, {
+      headers: { 'x-token': FUTATS_TOKEN },
+      signal: controller.signal,
+    });
+    return await r.json();
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ── Envio paginado para mensagens longas ──────────────────────
@@ -819,6 +841,10 @@ async function monitorarLive() {
       await processarEstadoGrupo1(jogo, estado, jogoId, hoje);
       await processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje);
     }
+
+    // Persiste o estado live a cada ciclo — é o que permite sobreviver a um
+    // restart do Railway sem perder mensagens ativas, placar do HT, etc.
+    salvarArquivo(ESTADO_FILE, estadoLive);
   } catch(e) {
     console.error('[LIVE] Erro:', e.message);
   }
@@ -1895,6 +1921,35 @@ function msEventosDaJanela(jogo, lado, minutos) {
   return evs.map(e => `${e.minuto}' ${TIPO_EVENTO_LABEL_MS[e.tipo_evento] || e.tipo_evento}`).join(', ');
 }
 
+// Dentro de uma sequência (já "limpa" por definição), varre todas as
+// janelas de 5min-calendário possíveis e marca as que batem o piso do
+// Pressão Gonza (média >=136) — é a mesma régua usada nos alertas,
+// só que aqui é puramente visual (não confere chute no gol/eficiência,
+// só o tamanho do momentum, pra dar uma visão rápida de onde "bateria").
+function msJanelasDestaque5min(jogo, lado, minutos) {
+  if (minutos.length < 5) return [];
+  const campo  = lado === 'casa' ? 'valor_casa' : 'valor_fora';
+  const oposto = lado === 'casa' ? 'valor_fora' : 'valor_casa';
+  function valor(min, campoAlvo) {
+    const m = (jogo.momentum || []).find(x => x.minuto === min);
+    return m ? (m[campoAlvo] || 0) : 0;
+  }
+  const min0 = minutos[0], minN = minutos[minutos.length - 1];
+  const destaques = [];
+  for (let i = min0; i <= minN - 4; i++) {
+    let limpa = true;
+    const vals = [];
+    for (let k = i; k <= i + 4; k++) {
+      if (valor(k, oposto) !== 0) limpa = false;
+      vals.push(valor(k, campo));
+    }
+    if (!limpa) continue;
+    const media = vals.reduce((s, v) => s + Math.abs(v), 0) / 5;
+    if (media >= 136) destaques.push({ faixa: `${i}-${i + 4}`, media: Math.round(media * 100) / 100 });
+  }
+  return destaques;
+}
+
 function msSequenciasMomentum(jogo, lado, periodo) {
   const campo  = lado === 'casa' ? 'valor_casa' : 'valor_fora';
   const oposto = lado === 'casa' ? 'valor_fora' : 'valor_casa';
@@ -1917,6 +1972,7 @@ function msSequenciasMomentum(jogo, lado, periodo) {
       valores: s.map(x => Math.round(x.valor * 100) / 100),
       media: Math.round(media * 100) / 100,
       eventos: msEventosDaJanela(jogo, lado, minutos),
+      janelasDestaque: msJanelasDestaque5min(jogo, lado, minutos),
     };
   });
 }
@@ -1947,8 +2003,13 @@ function msBlocoTime(jogo, lado, periodo, nomeTime) {
       const destaque = Math.abs(s.media) >= 136 ? ' ms-good' : '';
       html += `<div class="ms-seq">
         <div class="ms-muted ms-small">min ${s.faixa} &middot; ${s.valores.join(',')}</div>
-        <div class="ms-seq-row"><span class="ms-media${destaque}">média ${s.media}</span><span class="ms-muted ms-small">${s.eventos}</span></div>
-      </div>`;
+        <div class="ms-seq-row"><span class="ms-media${destaque}">média ${s.media}</span><span class="ms-muted ms-small">${s.eventos}</span></div>`;
+      if (s.janelasDestaque && s.janelasDestaque.length) {
+        s.janelasDestaque.forEach(j => {
+          html += `<div class="ms-janela-destaque">🟣 janela ${j.faixa} → ${j.media} (BATE)</div>`;
+        });
+      }
+      html += `</div>`;
     });
   }
   html += `<div class="ms-chutes">
@@ -1999,6 +2060,7 @@ function msPaginaHTML(corpo) {
     .ms-seq-row { display:flex; justify-content:space-between; align-items:baseline; gap:8px; margin-top:2px; flex-wrap:wrap; }
     .ms-media { font-weight:600; }
     .ms-good { color:#5dcaa5; }
+    .ms-janela-destaque { font-size:11px; color:#c08bf0; margin-top:3px; font-weight:600; }
     .ms-muted { color:#9a9a96; }
     .ms-small { font-size:11px; }
     .ms-chutes { margin-top:8px; background:#18181b; border-radius:8px; padding:8px; display:grid; grid-template-columns:repeat(4,1fr); gap:4px; text-align:center; }
@@ -2097,7 +2159,7 @@ app.listen(PORT, async () => {
   agendarHoraBRT(19, 0, buscarPreJogo);
 
   // Monitoramento live (recomendação: 1-2 minutos)
-  setInterval(monitorarLive, 90 * 1000);
+  setInterval(monitorarLive, 60 * 1000);
 
   // Agendar: 08h card matinal · 18h resumo parcial · 00h resumo do dia anterior + card novo dia
   agendarHoraBRT(8,  0, enviarCardMatinal);
