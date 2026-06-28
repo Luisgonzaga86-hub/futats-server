@@ -2075,13 +2075,8 @@ function msPaginaHTML(corpo) {
 app.get('/momentum-status', async (req, res) => {
   try {
     const hoje = dataHoje();
-    const stratsRelevantes = new Set([...LADO_STRATS_PROPRIOS, ...GOLS_STRATS_PROPRIOS]);
-    const pendRelevantes = pendentes.filter(p =>
-      p.data === hoje && p.result === 'pendente' && stratsRelevantes.has(p.strat)
-    );
-    if (!pendRelevantes.length) {
-      return res.send(msPaginaHTML('<p class="ms-empty">Nenhuma estratégia nossa pendente hoje.</p>'));
-    }
+    const filtroTodos = req.query.todos === '1';
+    const filtroJogo  = (req.query.jogo || '').trim().toLowerCase();
 
     let jogosLive = [];
     try {
@@ -2091,12 +2086,36 @@ app.get('/momentum-status', async (req, res) => {
       return res.send(msPaginaHTML('<p class="ms-empty">Não consegui consultar a API live agora.</p>'));
     }
 
-    const jogosRelevantes = jogosLive.filter(jogo =>
-      pendRelevantes.some(p => p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
-    );
-
-    if (!jogosRelevantes.length) {
-      return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo com estratégia nossa pendente está na live agora.</p>'));
+    let jogosRelevantes;
+    if (filtroJogo) {
+      // Filtro manual por nome de time (qualquer jogo da live, com ou sem estratégia)
+      jogosRelevantes = jogosLive.filter(jogo =>
+        jogo.mandante.toLowerCase().includes(filtroJogo) || jogo.visitante.toLowerCase().includes(filtroJogo)
+      );
+      if (!jogosRelevantes.length) {
+        return res.send(msPaginaHTML(`<p class="ms-empty">Nenhum jogo na live agora com "${req.query.jogo}" no nome.</p>`));
+      }
+    } else if (filtroTodos) {
+      // Todos os jogos da live, com ou sem estratégia pendente
+      jogosRelevantes = jogosLive;
+      if (!jogosRelevantes.length) {
+        return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo na live agora.</p>'));
+      }
+    } else {
+      // Padrão: só jogos com alguma das nossas estratégias pendente
+      const stratsRelevantes = new Set([...LADO_STRATS_PROPRIOS, ...GOLS_STRATS_PROPRIOS]);
+      const pendRelevantes = pendentes.filter(p =>
+        p.data === hoje && p.result === 'pendente' && stratsRelevantes.has(p.strat)
+      );
+      if (!pendRelevantes.length) {
+        return res.send(msPaginaHTML('<p class="ms-empty">Nenhuma estratégia nossa pendente hoje. Use ?todos=1 pra ver todos os jogos da live, ou ?jogo=nome pra buscar um específico.</p>'));
+      }
+      jogosRelevantes = jogosLive.filter(jogo =>
+        pendRelevantes.some(p => p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
+      );
+      if (!jogosRelevantes.length) {
+        return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo com estratégia nossa pendente está na live agora. Use ?todos=1 pra ver todos os jogos da live, ou ?jogo=nome pra buscar um específico.</p>'));
+      }
     }
 
     const corpo = jogosRelevantes.map(msHTMLJogo).join('');
