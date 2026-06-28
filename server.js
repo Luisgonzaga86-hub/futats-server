@@ -2143,6 +2143,36 @@ app.post('/card-agora', async (req, res) => {
   res.json({ ok: true });
 });
 
+// ── /buscar-agora — força a busca das 3 APIs de pré-jogo na hora ──
+// Pra usar depois de marcar uma bolinha nova no futats.com, sem precisar
+// esperar os horários fixos (08:00/12:30/19:00). Só clicar o link no Chrome.
+app.get('/buscar-agora', async (req, res) => {
+  try {
+    const hoje = dataHoje();
+    const antes = pendentes.filter(p => p.tipo === 'pre' && p.data === hoje).length;
+    await buscarPreJogo();
+    const depois = pendentes.filter(p => p.tipo === 'pre' && p.data === hoje).length;
+    const novos = Math.max(0, depois - antes);
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>FUTATS — Buscar Agora</title>
+    <style>
+      body { background:#0e0e10; color:#e8e8e6; font-family:-apple-system,Segoe UI,Roboto,sans-serif; margin:0; padding:20px; }
+      h2 { font-size:18px; margin:0 0 12px; }
+      p { font-size:14px; color:#cfcfcc; }
+      a { color:#8ab4f8; text-decoration:none; }
+      .num { color:#5dcaa5; font-weight:600; }
+    </style></head><body>
+      <h2>✅ Busca concluída</h2>
+      <p><span class="num">${novos}</span> nova(s) estratégia(s) registrada(s) agora.</p>
+      <p>Total de pendentes pré-jogo hoje: <span class="num">${depois}</span></p>
+      <p><a href="/pendentes">Ver todos os pendentes</a> · <a href="/momentum-status">Ver Momentum Status</a></p>
+    </body></html>`);
+  } catch (e) {
+    res.status(500).send('Erro ao buscar: ' + e.message);
+  }
+});
+
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
   console.log(`FUTATS Server v45b na porta ${PORT}`);
