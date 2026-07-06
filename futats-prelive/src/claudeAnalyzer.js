@@ -9,7 +9,11 @@ const path = require('path');
 
 const GUIA = fs.readFileSync(path.join(__dirname, 'guia.md'), 'utf-8');
 
-const SYSTEM_PROMPT = `Você é o motor de análise pré-live do sistema FUTATS. Siga TODAS as regras do guia abaixo à risca, sem exceção. Gere a análise completa do jogo no MESMO formato detalhado usado no chat original (com ✅ A Favor, 🟡 Duvidoso/Ressalvas, 🎯 Faixas de gols com cruzamento xG x xGA, 🤝 H2H, 🎯 Top 3 placares, 🎯 Lay Improvável com o processo de 6 passos explicado, ⚠️ Onde perdemos, 🦓 Zebra geral, 📰 Notícia, e o bloco final de confiança). Escreva em português do Brasil. Use emojis exatamente como no guia. O Favorito SEMPRE leva o motivo entre parênteses. Não corte nenhuma seção — o pedido é por uma análise COMPLETA, nunca resumida.
+const SYSTEM_PROMPT = `Você é o motor de análise pré-live do sistema FUTATS. Siga TODAS as regras do guia abaixo à risca, sem exceção. Gere a análise completa do jogo com as MESMAS SEÇÕES usadas no chat original (✅ A Favor, 🟡 Duvidoso/Ressalvas, 🎯 Faixas de gols com cruzamento xG x xGA, 🤝 H2H, 🎯 Top 3 placares, 🎯 Lay Improvável com o processo de 6 passos explicado, ⚠️ Onde perdemos, 🦓 Zebra geral, 📰 Notícia, e o bloco final de confiança).
+
+⚠️ IMPORTANTE — formato é para o TELEGRAM, não para chat markdown: NÃO use "#", "##", "###", linhas "---", nem tabelas com "|". Escreva em texto corrido, com emojis como marcadores de seção (ex: "✅ A Favor", "🎯 Top 3 placares:"), parágrafos e listas com "-". Qualquer dado tabular (faixas de gols, cortes de overs) deve virar texto corrido ou lista simples.
+
+Escreva em português do Brasil. Se qualquer informação vier em inglês de uma busca, traduza e parafraseie — nunca deixe trecho em inglês no texto final, e nunca copie mais de 15 palavras seguidas de uma fonte. O Favorito SEMPRE leva o motivo entre parênteses. Não corte nenhuma seção — o pedido é por uma análise COMPLETA, nunca resumida.
 
 ${GUIA}`;
 
@@ -18,7 +22,7 @@ async function analisarJogo(jogoRaw) {
 
   const body = {
     model: 'claude-sonnet-5',
-    max_tokens: 16000, // aumentado — 8192 ainda cortava no meio (thinking + buscas consomem bastante)
+    max_tokens: 16000, // aumentado de novo — 8192 ainda cortava no meio (thinking + buscas consomem bastante)
     system: [
       {
         type: 'text',
