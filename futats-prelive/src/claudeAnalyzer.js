@@ -18,7 +18,7 @@ async function analisarJogo(jogoRaw) {
 
   const body = {
     model: 'claude-sonnet-5',
-    max_tokens: 4000,
+    max_tokens: 8192, // aumentado — o limite de 4000 estava cortando a análise depois das buscas
     system: [
       {
         type: 'text',
@@ -53,11 +53,21 @@ async function analisarJogo(jogoRaw) {
 
   const data = await resp.json();
 
+  // Log de diagnóstico — ajuda a entender por que a resposta veio vazia, se acontecer de novo
+  console.log('[claudeAnalyzer] stop_reason:', data.stop_reason);
+  console.log('[claudeAnalyzer] tipos de bloco recebidos:', data.content.map((b) => b.type).join(', '));
+
   // A resposta pode ter vários blocos (texto + buscas resolvidas). Junta só o texto final.
   const textoFinal = data.content
     .filter((bloco) => bloco.type === 'text')
     .map((bloco) => bloco.text)
     .join('\n\n');
+
+  if (!textoFinal || textoFinal.trim().length === 0) {
+    throw new Error(
+      `A IA não retornou texto final (stop_reason: ${data.stop_reason}). Blocos recebidos: ${data.content.map((b) => b.type).join(', ')}`
+    );
+  }
 
   return textoFinal;
 }
