@@ -18,7 +18,7 @@ async function analisarJogo(jogoRaw) {
 
   const body = {
     model: 'claude-sonnet-5',
-    max_tokens: 8192, // aumentado — o limite de 4000 estava cortando a análise depois das buscas
+    max_tokens: 16000, // aumentado — 8192 ainda cortava no meio (thinking + buscas consomem bastante)
     system: [
       {
         type: 'text',
