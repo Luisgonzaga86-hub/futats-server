@@ -1,5 +1,13 @@
 # FUTATS — GUIA DE ANÁLISE PRÉ-LIVE
-*Referência rápida para novo chat — atualizado 01/07/2026*
+*Referência rápida para novo chat — atualizado 06/07/2026*
+
+---
+
+## FORMATO DE ESCRITA (regra crítica, fixada 06/07 após teste real de automação)
+- **NUNCA usar Markdown de cabeçalho** (`#`, `##`, `###`) nem linhas separadoras (`---`) no texto final da análise — o Telegram não renderiza isso, aparece com os símbolos literais na tela. Escrever em texto corrido com emojis como títulos (ex: "✅ A Favor", "🎯 Top 3 placares"), exatamente como no chat original.
+- **NUNCA usar tabelas Markdown** (`| coluna | coluna |`) no texto final — também não renderiza no Telegram. Transformar qualquer dado tabular (faixas de gols, cortes de Overs) em texto corrido ou lista simples com bullets (- ).
+- **SEMPRE escrever em português do Brasil, sem exceção.** Se um resultado de busca vier em inglês (ou qualquer outro idioma), TRADUZIR e PARAFRASEAR — nunca colar o trecho original no texto final, nem em "tradução ao pé da letra" que ainda pareça cópia.
+- **Direitos autorais:** nunca reproduzir mais de 15 palavras seguidas de uma fonte, e no máximo 1 citação curta por fonte. Preferir sempre parafrasear o dado (ex: em vez de citar a frase da fonte sobre "this season started decently...", escrever "o time começou bem mas caiu de rendimento com a chegada do verão").
 
 ---
 
@@ -116,42 +124,4 @@ Dispara quando G.Mandante **ou** G.Visitante está em **1° lugar** com **≥20%
 🔒 **Placar (Lay):**
 - 🟢 Alta = nunca ocorreu no histórico geral E H2H não invalida
 - 🟡 Média = nunca ocorreu mas é categoria ampla (goleada) ou amostra pequena
-- 🔴 Baixa = já ocorreu recentemente
-
-**Formato de saída obrigatório (Favorito sempre com motivo entre parênteses):**
-```
-🎯 Confiança no FAVORITO: 🟢 Alta (motivo breve: ex. "pontos batem + diff xG forte + %s excelentes + notícia confirma")
-⚽ Confiança em GOLS: 🟡 Média
-🔒 Confiança no PLACAR (Lay [placar]): 🟢 Alta
-```
-
----
-
-## ERROS A EVITAR
-1. Faixas de EG — conferir decimais (1.534 = EG2)
-2. Favorito pela odd, nunca pelo mandante
-3. Pontos visitante = derrotas PRÓPRIAS dele fora
-4. Top 3 e Lay nunca se sobrepõem
-5. Unders no top5 — 1x0, 0x1, 0x0 são todos unders
-6. Lay = FT, não HT
-7. G.Visitante/G.Mandante = 4+ gols
-
----
-
-## DATASET
-- Jogos fechados: **135+** (72 + 63 nos dias 03-04/07)
-- 🔒 Lay Improvável: ~93-96%
-- 🎯 Favorito: 🟢 Alta ~76%, 🟡 Média ~53%, 🔴 Baixa ~44%
-- Meta 1: 100 jogos ✅ | Meta 2: 200 jogos
-
----
-
-## BOLINHAS DO CARD
-- 🤖 Seleção IA
-- ⚪ Lay Away Manu
-- 🔵 Favorito HT Gonza
-- 🟠 Felipe Over 1.5
-- 🟤 Ambas Marcam xG
-- 🟢 Over 0,5 Gonza
-- 🟣 Lay xg
-- 🟡 Gol no Final (puxado da API)
+- 🔴 Baixa = já ocorreu
