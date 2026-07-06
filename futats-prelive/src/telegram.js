@@ -39,7 +39,8 @@ async function enviarMensagem(texto, destino) {
       body: JSON.stringify({
         chat_id: chatId,
         text: parte,
-        parse_mode: 'Markdown',
+        // sem parse_mode: texto puro, evita erro "can't parse entities" quando
+        // o texto tem caracteres tipo * ou _ desbalanceados
       }),
     });
 
