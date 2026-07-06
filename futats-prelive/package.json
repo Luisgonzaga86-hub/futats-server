@@ -1,0 +1,15 @@
+{
+  "name": "futats-prelive",
+  "version": "1.0.0",
+  "description": "Análise pré-live automática FUTATS via API Claude",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "node-fetch": "^2.7.0",
+    "dotenv": "^16.4.5"
+  }
+}
