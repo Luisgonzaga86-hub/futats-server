@@ -123,3 +123,11 @@ module.exports = {
   upsertGame,
   getGame,
   getAllGames,
+  getPendingGames,
+  markAnalyzed,
+  markProcessing,
+  markProcessingFailed,
+  markConferido,
+  jaPuxouHoje,
+  marcarPullFeito,
+};
