@@ -19,13 +19,31 @@ function checarSenha(req, res, next) {
   next();
 }
 
+// Evita que o texto da análise quebre o HTML da página (escapa < > & etc.)
+function escapeHtml(texto) {
+  return String(texto)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 // Página principal: lista os jogos de hoje
 app.get('/', checarSenha, (req, res) => {
   const jogos = store.getAllGames().sort((a, b) => a.hora.localeCompare(b.hora));
 
   const linhas = jogos
     .map((j) => {
-      const status = j.analisado ? '✅ analisado' : '⏳ pendente';
+      let status;
+      if (j.analisado) status = '✅ analisado';
+      else if (j.processando) status = '⏳ processando...';
+      else status = '⏳ pendente';
+
+      const acao = j.analisado
+        ? `<a href="/analise/${j.id}?senha=${req.query.senha}" style="color:#4fd1c5;">Ver análise</a>`
+        : `<form method="POST" action="/analisar/${j.id}?senha=${req.query.senha}">
+             <button type="submit" ${j.processando ? 'disabled' : ''}>Analisar e mandar pro Telegram</button>
+           </form>`;
+
       return `
         <tr>
           <td>${j.hora}</td>
@@ -34,11 +52,7 @@ app.get('/', checarSenha, (req, res) => {
           <td>${j.odd_casa} / ${j.odd_empate} / ${j.odd_fora}</td>
           <td>${j.selecao_ia || '-'}</td>
           <td>${status}</td>
-          <td>
-            <form method="POST" action="/analisar/${j.id}?senha=${req.query.senha}">
-              <button type="submit" ${j.analisado ? 'disabled' : ''}>Analisar e mandar pro Telegram</button>
-            </form>
-          </td>
+          <td>${acao}</td>
         </tr>`;
     })
     .join('');
@@ -73,6 +87,33 @@ app.get('/', checarSenha, (req, res) => {
 app.get('/atualizar', checarSenha, async (req, res) => {
   await futatsClient.buscarJogosDoDia();
   res.redirect(`/?senha=${req.query.senha}`);
+});
+
+// Mostra o texto completo de uma análise já feita
+app.get('/analise/:id', checarSenha, (req, res) => {
+  const jogo = store.getGame(req.params.id);
+  if (!jogo) return res.status(404).send('Jogo não encontrado.');
+  if (!jogo.analise) return res.status(404).send('Esse jogo ainda não tem análise salva.');
+
+  res.send(`
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <title>${escapeHtml(jogo.mandante)} x ${escapeHtml(jogo.visitante)}</title>
+      <style>
+        body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; max-width: 700px; margin: 0 auto; }
+        pre { white-space: pre-wrap; word-wrap: break-word; font-family: sans-serif; font-size: 15px; line-height: 1.5; }
+        a { color: #4fd1c5; }
+      </style>
+    </head>
+    <body>
+      <p><a href="/?senha=${req.query.senha}">← Voltar pra lista</a></p>
+      <h3>${escapeHtml(jogo.mandante)} x ${escapeHtml(jogo.visitante)}</h3>
+      <p style="color:#888;">Analisado em: ${jogo.analisado_em || '-'}</p>
+      <pre>${escapeHtml(jogo.analise)}</pre>
+    </body>
+    </html>
+  `);
 });
 
 // Dispara a análise de um jogo específico (manual) e manda pro Telegram
