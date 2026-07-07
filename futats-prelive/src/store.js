@@ -49,9 +49,38 @@ function getAllGames() {
   return Object.values(data.jogos);
 }
 
-// Jogos de hoje que ainda não foram analisados
+// Jogos de hoje que ainda não foram analisados NEM estão sendo processados agora
+// (o "processando" é a trava que impede disparo duplicado — ver markProcessing)
 function getPendingGames() {
-  return getAllGames().filter((g) => !g.analisado);
+  return getAllGames().filter((g) => !g.analisado && !g.processando);
+}
+
+// Marca o jogo como "em processamento" — trava contra duplicação.
+// Retorna true se conseguiu travar (pode seguir), false se outro ciclo já travou primeiro.
+function markProcessing(id) {
+  const data = readAll();
+  const jogo = data.jogos[id];
+  if (!jogo) return false;
+
+  // se já está processando há mais que o timeout, considera travado (crash/erro) e libera de novo
+  if (jogo.processando) {
+    const desde = new Date(jogo.processando_desde || 0);
+    const minutosProcessando = (Date.now() - desde.getTime()) / 60000;
+    if (minutosProcessando < 10) return false; // ainda dentro do prazo normal, não deixa duplicar
+  }
+
+  jogo.processando = true;
+  jogo.processando_desde = new Date().toISOString();
+  writeAll(data);
+  return true;
+}
+
+// Libera a trava se a análise falhar no meio do processo (permite tentar de novo depois)
+function markProcessingFailed(id) {
+  const data = readAll();
+  if (!data.jogos[id]) return;
+  data.jogos[id].processando = false;
+  writeAll(data);
 }
 
 // Marca um jogo como analisado e salva o texto da análise
@@ -59,6 +88,7 @@ function markAnalyzed(id, analiseTexto, analiseEstruturada) {
   const data = readAll();
   if (!data.jogos[id]) return;
   data.jogos[id].analisado = true;
+  data.jogos[id].processando = false;
   data.jogos[id].analise = analiseTexto;
   data.jogos[id].analise_estruturada = analiseEstruturada;
   data.jogos[id].analisado_em = new Date().toISOString();
@@ -93,9 +123,3 @@ module.exports = {
   upsertGame,
   getGame,
   getAllGames,
-  getPendingGames,
-  markAnalyzed,
-  markConferido,
-  jaPuxouHoje,
-  marcarPullFeito,
-};
