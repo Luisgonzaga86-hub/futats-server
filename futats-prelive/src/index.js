@@ -27,9 +27,20 @@ function escapeHtml(texto) {
     .replace(/>/g, '&gt;');
 }
 
-// Página principal: lista os jogos de hoje
+// Data de hoje em horário de Brasília (UTC-3), no formato YYYY-MM-DD
+function hojeBrasilia() {
+  const agora = new Date();
+  const brasilia = new Date(agora.getTime() - 3 * 60 * 60 * 1000);
+  return brasilia.toISOString().slice(0, 10);
+}
+
+// Página principal: lista só os jogos de HOJE
 app.get('/', checarSenha, (req, res) => {
-  const jogos = store.getAllGames().sort((a, b) => a.hora.localeCompare(b.hora));
+  const hoje = hojeBrasilia();
+  const jogos = store
+    .getAllGames()
+    .filter((j) => j.data && j.data.slice(0, 10) === hoje)
+    .sort((a, b) => a.hora.localeCompare(b.hora));
 
   const linhas = jogos
     .map((j) => {
@@ -37,6 +48,11 @@ app.get('/', checarSenha, (req, res) => {
       if (j.analisado) status = '✅ analisado';
       else if (j.processando) status = '⏳ processando...';
       else status = '⏳ pendente';
+
+      const conf = j.analise_estruturada;
+      const confianca = j.analisado && conf
+        ? `<br><small>🎯 ${conf.favorito} · ⚽ ${conf.gols} · 🔒 ${conf.lay}</small>`
+        : '';
 
       const acao = j.analisado
         ? `<a href="/analise/${j.id}?senha=${req.query.senha}" style="color:#4fd1c5;">Ver análise</a>`
@@ -51,7 +67,7 @@ app.get('/', checarSenha, (req, res) => {
           <td>${j.mandante} x ${j.visitante}</td>
           <td>${j.odd_casa} / ${j.odd_empate} / ${j.odd_fora}</td>
           <td>${j.selecao_ia || '-'}</td>
-          <td>${status}</td>
+          <td>${status}${confianca}</td>
           <td>${acao}</td>
         </tr>`;
     })
