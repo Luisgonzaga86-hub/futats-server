@@ -414,80 +414,59 @@ function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
   switch(s) {
     case 'lay_0x1_ia':           return (ftH === 0 && ftA === 1) ? 'red' : 'green';
     case 'lay_1x0_ia':           return (ftH === 1 && ftA === 0) ? 'red' : 'green';
-    case 'lay_0x2_manu':         return (ftH === 0 && ftA === 2) ? 'red' : 'green';
-    case 'lay_0x3':               return (ftH === 0 && ftA === 3) ? 'red' : 'green';
     case 'lay_gol_visit':        return (ftA - ftH >= 4 && ftA > ftH) ? 'red' : 'green';
     case 'lay_gol_mand':         return (ftH - ftA >= 4 && ftH > ftA) ? 'red' : 'green';
     case 'favorito_ht_gonza':
     case 'lay_away_manu':
     case 'lay_manu4':            return ftA > ftH ? 'red' : 'green';
     case 'lay_xg':                return null;
-    case 'back_favorito':
     case 'back_fav_ht':
     case 'back_gonza_xg':        return ftH > ftA ? 'green' : 'red';
-    case 'recup_favorito':       return null;
     case 'over05':               return (htH === 0 && htA === 0) ? (tot > 0 ? 'green' : 'red') : 'nao_entra';
     case 'over15_ia':
     case 'felipe_over15':        return tot > 1 ? 'green' : 'red';
-    case 'over25_ia':            return tot > 2 ? 'green' : 'red';
     case 'over05_ht':            return tot > 0 ? 'green' : 'red';
     case 'over15_ht':            return tot > 1 ? 'green' : 'red';
     case 'ambas_marcam':
-    case 'am':
     case 'am_xg':                return (ftH > 0 && ftA > 0) ? 'green' : 'red';
     case 'ambas_marcam_xg':       return (ftH > 0 && ftA > 0) ? 'green' : 'red';
     case 'gol_no_final':         return (ftH + ftA) > (htH + htA) ? 'green' : 'red';
-    case 'corr_lay_fav':
-    case 'corr_lay_zebra':       return null;
     default:                     return tot > 0 ? 'green' : 'red';
   }
 }
 
 // ── DISPLAY NAMES ─────────────────────────────────────────────
 const STRAT_DISPLAY = {
-  back_favorito:        '🤖 Back Favorito',
-  recup_favorito:       '🤖 Recuperação Favorito',
   gol_no_final:         '🤖 Gol no Final',
   over05_ht:            '🤖 Over 0.5 HT',
   over15_ht:            '🤖 Over 1.5 HT',
   over15_ia:            '🤖 Over 1.5',
-  over25_ia:            '🤖 Over 2.5',
   ambas_marcam:         '🤖 Ambas Marcam',
   lay_0x1_ia:           '🤖 Lay Resultado 0x1',
   lay_1x0_ia:           '🤖 Lay Resultado 1x0',
   lay_gol_visit:        '🤖 Lay Goleada Visitante',
   lay_gol_mand:         '🤖 Lay Goleada Mandante',
-  corr_lay_fav:         '🤖 Correção Lay Favorito',
-  corr_lay_zebra:       '🤖 Correção Lay Zebra',
   favorito_ht_gonza:    '🔵 Favorito ht Gonza',
   felipe_over15:        '🟠 Felipe Over 1.5',
   lay_away_manu:        '⚪ Lay Away Manu',
   lay_manu4:            '⚪ Lay Manu 4',
   back_gonza_xg:        '🔵 Back Gonza com xG',
-  lay_0x2_manu:         '🪗 Lay 0x2 Manu',
-  lay_0x3:              '⚪ Lay 0x3',
   lay_xg:               '🟣 Lay xG',
   am_xg:                '🟤 AM xG',
   over05:               '🟢 Over 0,5 Gonza',
-  am:                   '🔴 AM',
   atolada_master:       '⚡ Atolada Master',
   ambas_marcam_xg:       '🟤 Ambas Marcam xG',
 };
 
 const IA_PARA_STRAT = {
-  'Back Favorito':          'back_favorito',
-  'Recuperação Favorito':   'recup_favorito',
   'Gol no Final':           'gol_no_final',
   'Over 0.5 HT':            'over05_ht',
   'Over 1.5':               'over15_ia',
-  'Over 2.5':               'over25_ia',
   'Ambas Marcam':           'ambas_marcam',
   'Lay Resultado 0x1':      'lay_0x1_ia',
   'Lay Resultado 1x0':      'lay_1x0_ia',
   'Lay Goleada Visitante':  'lay_gol_visit',
   'Lay Goleada Mandante':   'lay_gol_mand',
-  'Correção Lay Favorito':  'corr_lay_fav',
-  'Correção Lay Zebra':     'corr_lay_zebra',
 };
 
 const FILTRO_PARA_STRAT = {
@@ -496,15 +475,12 @@ const FILTRO_PARA_STRAT = {
   'lay away Manu':      'lay_away_manu',
   'Lay Manu 4':         'lay_manu4',
   'back gonza com xg':  'back_gonza_xg',
-  'lay 0x2 Manu':       'lay_0x2_manu',
-  'lay 0x3':            'lay_0x3',
   'ambas marcam xg':    'ambas_marcam_xg',
 };
 
 const ESTRAT_PARA_STRAT = {
   'Over 0,5 Gonza':   'over05',
   'Lay xg':           'lay_xg',
-  'ambas gonza':      'am',
   'ambos xg pro':     'am_xg',
 };
 
@@ -947,8 +923,8 @@ async function processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje) {
 // diferente — não dá pra formar uma janela de momentum de 5min ali).
 const LADO_STRATS_PROPRIOS = [
   'favorito_ht_gonza', 'lay_away_manu', 'lay_manu4', 'back_gonza_xg',
-  'back_favorito', 'lay_xg', 'recup_favorito',
-  'lay_0x1_ia', 'lay_1x0_ia', 'lay_0x2_manu', 'lay_0x3',
+  'lay_xg',
+  'lay_0x1_ia', 'lay_1x0_ia',
   'lay_gol_visit', 'lay_gol_mand',
 ];
 
@@ -958,14 +934,14 @@ const LADO_STRATS_PROPRIOS = [
 // e também não participa da conversão pra Gol Limite no 2T (não faz sentido
 // pra uma estratégia que é, por definição, só sobre os primeiros 20min).
 const LADO_STRATS_LIMITE_MIN20 = [
-  'lay_0x1_ia', 'lay_1x0_ia', 'lay_0x2_manu', 'lay_0x3', 'lay_gol_visit', 'lay_gol_mand',
+  'lay_0x1_ia', 'lay_1x0_ia', 'lay_gol_visit', 'lay_gol_mand',
 ];
 
 // Estratégias de GOLS — Pressão Gonza aplicado a favor do favorito do jogo
 // + Jogo Aberto como gatilho extra, somado ao que já existe (raio antigo).
 const GOLS_STRATS_PROPRIOS = [
-  'over05', 'over15_ia', 'over25_ia', 'ambas_marcam', 'ambas_marcam_xg',
-  'am', 'am_xg', 'felipe_over15', 'gol_no_final', 'over05_ht',
+  'over05', 'over15_ia', 'ambas_marcam', 'ambas_marcam_xg',
+  'am_xg', 'felipe_over15', 'gol_no_final', 'over05_ht',
 ];
 
 // over05_ht só existe no 1T (por definição — é "HT", antes do intervalo).
@@ -986,16 +962,11 @@ function getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo) {
     case 'lay_manu4':
     case 'back_gonza_xg':
     case 'lay_0x1_ia':
-    case 'lay_0x2_manu':
-    case 'lay_0x3':
     case 'lay_gol_visit':
       return 'casa';
     case 'lay_1x0_ia':
     case 'lay_gol_mand':
       return 'fora';
-    case 'back_favorito':
-    case 'recup_favorito':
-      return getFavorito(jogo);
     case 'lay_xg': {
       const p = (pendJogo || []).find(x => x.strat === 'lay_xg');
       return p?.lay_team === 'home' ? 'casa' : 'fora';
@@ -1269,7 +1240,7 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
 
     // Gol no Final é simétrico por definição (índice dos dois lados,
     // eficiência de QUALQUER um deles) — então o Pressão Gonza também
-    // checa os dois lados aqui, não só o favorito. As outras estratégias
+    // checa os dois lados aqui, não só no favorito. As outras estratégias
     // de gols continuam só a favor do favorito, como definido.
     const ladoZebra  = ladoOposto(favorito);
     const pgFavorito = checaPressaoGonza(jogo, estado, favorito, tempoNum);
@@ -1309,7 +1280,7 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
 //   'red'          → chegou no min 60 sem reação, encerrado em RED
 //   'red_reacao'   → depois do RED, reação ainda confirmou (Gol Limite)
 //   'red_gonza'    → depois do RED, Indicador do Gonza apareceu (Gol Limite)
-const GRUPO1_STRATS = ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg','back_favorito','lay_xg'];
+const GRUPO1_STRATS = ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg','lay_xg'];
 
 async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
   const golsCasa = parseInt(jogo.gols_casa) || 0;
@@ -1325,9 +1296,8 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     if (!info || !info.ids?.length) continue;
     if (info.grupo1Status === 'green' || info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') continue; // já fechado
 
-    // Determina o lado alvo (mandante fixo, ou favorito dinâmico, ou lay_team manual)
+    // Determina o lado alvo (mandante fixo, ou lay_team manual)
     let alvo = 'casa';
-    if (stratKey === 'back_favorito') alvo = favorito;
     if (stratKey === 'lay_xg') {
       const pendLayXg = pendentes.find(p => p.condicao === 'lay_xg' && p.data === hoje &&
         (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`));
@@ -1499,33 +1469,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
 
   // ── SELEÇÕES IA ───────────────────────────────────────────
 
-  // 1. BACK FAVORITO — segue o lado do favorito (casa ou fora)
-  if (pendJogo.some(p => p.strat === 'back_favorito')) {
-    const periodoAtual = isHT ? null : (jaPassouHT ? '2_tempo' : '1_tempo');
-    const minuteLimite2T = 60;
-    const favPerdendo = (favorito==='casa' && golsFora-golsCasa===1) || (favorito==='fora' && golsCasa-golsFora===1);
-
-    if (!isHT && periodoAtual) {
-      // 0x0 — condição padrão do Grupo 1 no período atual + raio do favorito
-      if (total === 0 && raioFav && checaCondicaoGrupo1(jogo, periodoAtual, favorito))
-        await alertar('back_favorito', `0x0 + Raio do Favorito! (${periodoAtual==='1_tempo'?'1T':'2T'})`, 'back_favorito_live');
-
-      // Favorito perdendo por 1 — condição de reação (últimos 10min) + raio do favorito
-      else if (favPerdendo && raioFav && checaCondicaoReacao(jogo, favorito)) {
-        const limiteMin = periodoAtual === '1_tempo' ? 999 : minuteLimite2T; // 1T sempre vale; 2T só até o min 60
-        if (tempo <= limiteMin)
-          await alertar('back_favorito', 'Favorito perdendo + Reação confirmada (Raio)!', 'back_favorito_live');
-      }
-    }
-  }
-
-  // 2. RECUPERAÇÃO FAVORITO — mesma lógica de reação do Back Favorito, só 1T
-  if (pendJogo.some(p => p.strat === 'recup_favorito')) {
-    const favPerdendo1 = (favorito==='casa' && golsFora-golsCasa===1) || (favorito==='fora' && golsCasa-golsFora===1);
-    if (!isHT && !jaPassouHT && favPerdendo1 && raioFav && checaCondicaoReacao(jogo, favorito))
-      await alertar('recup_favorito', 'Favorito perdendo por 1 + Reação confirmada (Raio)!', 'recup_favorito_live');
-  }
-
   // 3. GOL NO FINAL — raio confirmado no 2T + índices (pressão/eficiência) do
   // Indicador do Gonza nos últimos 10min. Vale na hora do raio ou depois dele
   // (enquanto o gol não saiu), até no máximo o minuto 80.
@@ -1582,10 +1525,8 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   }
 
   await processarGrupo5e6('over15_ia', 'Over 1.5');
-  await processarGrupo5e6('over25_ia', 'Over 2.5');
   await processarGrupo5e6('ambas_marcam', 'Ambas Marcam');
   await processarGrupo5e6('ambas_marcam_xg', 'Ambas Marcam xG');
-  await processarGrupo5e6('am', 'Ambas Gonza');
   await processarGrupo5e6('am_xg', 'Ambos xG Pro');
   await processarGrupo5e6('felipe_over15', 'Felipe Over 1.5');
 
@@ -1631,18 +1572,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 12. CORREÇÃO LAY FAVORITO
-  if (pendJogo.some(p => p.strat === 'corr_lay_fav')) {
-    if (tempo <= 5 && !isHT && raioZebra)
-      await alertar('corr_lay_fav', `Raio da Zebra no min ${tempo}!`, 'corr_lay_fav_live');
-  }
-
-  // 13. CORREÇÃO LAY ZEBRA
-  if (pendJogo.some(p => p.strat === 'corr_lay_zebra')) {
-    if (tempo <= 5 && !isHT && raioFav)
-      await alertar('corr_lay_zebra', `Raio do Favorito no min ${tempo}!`, 'corr_lay_zebra_live');
-  }
-
   // ── FILTROS ───────────────────────────────────────────────
 
   // ── GRUPO 1 — fixos no mandante: FAVORITO HT GONZA / LAY AWAY MANU / LAY MANU 4 / BACK GONZA xG
@@ -1658,24 +1587,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       const limiteMin = periodoAtual === '1_tempo' ? 999 : 60;
       if (tempo <= limiteMin)
         await alertar(sf, `Mandante perdendo + Reação confirmada (Raio)! · Lay Visitante · Odd: ${oddFora.toFixed(2)}`, `${sf}_live`);
-    }
-  }
-
-  // LAY 0x2 MANU — até min 20, lay contra visitante (mandante dominando)
-  if (pendJogo.some(p => p.strat === 'lay_0x2_manu')) {
-    if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 2 && raioMand) {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      if (checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
-        await alertar('lay_0x2_manu', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x2_manu_live');
-    }
-  }
-
-  // LAY 0x3 — até min 20, lay contra visitante (mandante dominando)
-  if (pendJogo.some(p => p.strat === 'lay_0x3')) {
-    if (tempo <= 20 && !isHT && golsCasa === 0 && golsFora <= 3 && raioMand) {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      if (checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
-        await alertar('lay_0x3', `Raio Mandante (até min 20) · ${placar}!`, 'lay_0x3_live');
     }
   }
 
