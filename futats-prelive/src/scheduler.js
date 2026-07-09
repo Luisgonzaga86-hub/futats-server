@@ -15,6 +15,21 @@ const MINUTOS_ANTES = 50;
 const JANELA_TOLERANCIA_MIN = 5; // roda o check a cada 5 min, então aceita uma folga de +-5min
 const TIMEOUT_PROCESSAMENTO_MIN = 10; // se travar processando por mais que isso, libera pra tentar de novo
 
+// Lê o texto final da análise e extrai os 3 níveis de confiança (Favorito/Gols/Placar)
+// pra mostrar como badge na tabela da página web, sem precisar abrir o texto inteiro.
+function extrairConfiancas(texto) {
+  const pegar = (rotulo) => {
+    const regex = new RegExp(`${rotulo}[^:]*:\\s*(🟢|🟡|🔴)\\s*(Alta|Média|Baixa)`, 'i');
+    const m = texto.match(regex);
+    return m ? `${m[1]} ${m[2]}` : '-';
+  };
+  return {
+    favorito: pegar('FAVORITO'),
+    gols: pegar('GOLS'),
+    lay: pegar('PLACAR'),
+  };
+}
+
 // Brasília é sempre UTC-3 (sem horário de verão desde 2019). Isso funciona
 // independente do fuso horário configurado no servidor (Railway roda em UTC).
 function horaBrasiliaAtual() {
@@ -60,7 +75,8 @@ async function processarAnaliseDoJogo(jogo, motivo) {
   console.log(`[scheduler] Analisando: ${jogo.mandante} x ${jogo.visitante} (${motivo})`);
   try {
     const textoAnalise = await analisarJogo(jogo.stats_pre_raw);
-    store.markAnalyzed(jogo.id, textoAnalise, null);
+    const confiancas = extrairConfiancas(textoAnalise);
+    store.markAnalyzed(jogo.id, textoAnalise, confiancas);
 
     await enviarMensagem(textoAnalise, 'pessoal');
     await enviarMensagem(textoAnalise, 'canal');
