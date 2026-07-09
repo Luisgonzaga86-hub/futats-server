@@ -9,15 +9,42 @@ const path = require('path');
 
 const GUIA = fs.readFileSync(path.join(__dirname, 'guia.md'), 'utf-8');
 
-const SYSTEM_PROMPT = `Você é o motor de análise pré-live do sistema FUTATS. Siga TODAS as regras do guia abaixo à risca, sem exceção. Gere a análise completa do jogo com as MESMAS SEÇÕES usadas no chat original (✅ A Favor, 🟡 Duvidoso/Ressalvas, 🎯 Faixas de gols com cruzamento xG x xGA, 🤝 H2H, 🎯 Top 3 placares, 🎯 Lay Improvável com o processo de 6 passos explicado, ⚠️ Onde perdemos, 🦓 Zebra geral, 📰 Notícia, e o bloco final de confiança).
+// Poda o JSON antes de mandar pra API — mantém só os últimos 6 jogos anteriores
+// de cada lado (a régua só usa "últimos 5" mesmo), cortando tokens de entrada à toa.
+function podarJogo(jogoRaw) {
+  try {
+    const clone = JSON.parse(JSON.stringify(jogoRaw));
+    const statsPre = clone.stats_pre;
+    if (Array.isArray(statsPre)) {
+      for (const bloco of statsPre) {
+        const jogoInteiro = bloco?.jogo_inteiro;
+        if (jogoInteiro?.home?.previousGames) {
+          jogoInteiro.home.previousGames = jogoInteiro.home.previousGames.slice(0, 6);
+        }
+        if (jogoInteiro?.away?.previousGames) {
+          jogoInteiro.away.previousGames = jogoInteiro.away.previousGames.slice(0, 6);
+        }
+      }
+    }
+    return clone;
+  } catch (err) {
+    console.error('[claudeAnalyzer] Falha ao podar JSON, usando original:', err.message);
+    return jogoRaw;
+  }
+}
+
+const SYSTEM_PROMPT = `Você é o motor de análise pré-live do sistema FUTATS. Siga TODAS as regras do guia abaixo à risca, sem exceção. Gere a análise completa do jogo com as MESMAS SEÇÕES usadas no chat original (✅ A Favor, 🟡 Duvidoso/Ressalvas, 🎯 Faixas de gols com cruzamento xG x xGA, 🤝 H2H, 🎯 Top 3 placares, 🎯 Lay Improvável, ⚠️ Onde perdemos, 🦓 Zebra geral, 📰 Notícia, e o bloco final de confiança).
+
+⭐ ECONOMIA DE TOKENS (regra de custo, fixada 07/07): o processo de raciocínio (pontos, xG, checagem de zebra, os 6 passos do Lay Improvável) continua OBRIGATÓRIO internamente — a régua tem que ser seguida à risca. Mas no texto final que você escreve, a seção 🎯 Lay Improvável deve mostrar só a CONCLUSÃO: os placares finais escolhidos + 1 linha curta explicando por que cada um foi descartado/mantido (ex: "0x1 descartado — já ocorreu em 21/05" / "Mantendo: G.Visitante · 3x0"). NÃO narre os 6 passos numerados no texto final. As outras seções (A Favor, Ressalvas, Faixas de gols, H2H, Onde perdemos, Zebra, Notícia) seguem completas como sempre, sem cortar conteúdo — só sejam objetivas, sem redundância ou floreio desnecessário.
 
 ⚠️ IMPORTANTE — formato é para o TELEGRAM, não para chat markdown: NÃO use "#", "##", "###", linhas "---", nem tabelas com "|". Escreva em texto corrido, com emojis como marcadores de seção (ex: "✅ A Favor", "🎯 Top 3 placares:"), parágrafos e listas com "-". Qualquer dado tabular (faixas de gols, cortes de overs) deve virar texto corrido ou lista simples.
 
-Escreva em português do Brasil. Se qualquer informação vier em inglês de uma busca, traduza e parafraseie — nunca deixe trecho em inglês no texto final, e nunca copie mais de 15 palavras seguidas de uma fonte. O Favorito SEMPRE leva o motivo entre parênteses. Não corte nenhuma seção — o pedido é por uma análise COMPLETA, nunca resumida.
+Escreva em português do Brasil. ⭐ REGRA MÁXIMA: zero frases em inglês no texto final — isso já causou um erro real em produção (uma frase de busca em inglês foi colada sem traduzir). Se qualquer informação vier em inglês de uma busca, traduza e reescreva com suas próprias palavras — nunca deixe frase ou trecho em inglês no texto final, e nunca copie mais de 15 palavras seguidas de uma fonte. Antes de finalizar, revise cada frase e confirme que está 100% em português. O Favorito SEMPRE leva o motivo entre parênteses. Não corte nenhuma seção — o pedido é por uma análise COMPLETA (menos a narração passo-a-passo do Lay), nunca resumida no conteúdo.
 
 ${GUIA}`;
 
-async function analisarJogo(jogoRaw) {
+async function analisarJogo(jogoRawOriginal) {
+  const jogoRaw = podarJogo(jogoRawOriginal);
   const userMessage = `Analise este jogo de futebol seguindo o guia acima. Dados do jogo (JSON):\n\n${JSON.stringify(jogoRaw, null, 2)}`;
 
   const body = {
