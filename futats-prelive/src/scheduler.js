@@ -79,7 +79,6 @@ async function processarAnaliseDoJogo(jogo, motivo) {
     store.markAnalyzed(jogo.id, textoAnalise, confiancas);
 
     await enviarMensagem(textoAnalise, 'pessoal');
-    await enviarMensagem(textoAnalise, 'canal');
 
     console.log(`[scheduler] Análise enviada: ${jogo.mandante} x ${jogo.visitante}`);
   } catch (err) {
