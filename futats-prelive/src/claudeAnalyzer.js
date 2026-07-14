@@ -54,7 +54,15 @@ async function analisarJogo(jogoRawOriginal) {
       {
         type: 'text',
         text: SYSTEM_PROMPT,
-        cache_control: { type: 'ephemeral' }, // cache do prompt do sistema, reduz custo em chamadas repetidas
+        // TTL de 1h em vez do padrão de 5min — como os jogos são analisados
+        // um a um ao longo do dia (cada um ~50min antes do próprio kickoff),
+        // o cache de 5min quase sempre expirava antes do próximo jogo chegar,
+        // fazendo pagar o write premium (25%) toda vez sem nunca colher o
+        // desconto do read (90%). Com 1h, jogos com kickoffs próximos no
+        // mesmo dia reaproveitam o cache do guia (que é sempre idêntico).
+        // Write de 1h custa 2x (vs 1.25x do 5min), mas como o 5min quase
+        // nunca sobrevivia mesmo, isso tende a reduzir o custo líquido.
+        cache_control: { type: 'ephemeral', ttl: '1h' },
       },
     ],
     messages: [{ role: 'user', content: userMessage }],
