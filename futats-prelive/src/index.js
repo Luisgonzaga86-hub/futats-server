@@ -90,6 +90,7 @@ app.get('/', checarSenha, (req, res) => {
     <body>
       <h2>⚽ FUTATS — Jogos de hoje</h2>
       <p><a class="atualizar" href="/atualizar?senha=${req.query.senha}">🔄 Puxar jogos novos agora</a></p>
+      <p><a class="atualizar" href="/historico?senha=${req.query.senha}">📜 Ver histórico de análises</a></p>
       <table>
         <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds</th><th>Seleção IA</th><th>Status</th><th></th></tr>
         ${linhas}
@@ -103,6 +104,82 @@ app.get('/', checarSenha, (req, res) => {
 app.get('/atualizar', checarSenha, async (req, res) => {
   await futatsClient.buscarJogosDoDia();
   res.redirect(`/?senha=${req.query.senha}`);
+});
+
+// Histórico de análises — todos os jogos já analisados (qualquer data), com
+// filtro opcional por data (?data=YYYY-MM-DD) e/ou nome de time (?time=nome).
+// Sem filtro nenhum, mostra tudo que já foi analisado, mais recente primeiro.
+app.get('/historico', checarSenha, (req, res) => {
+  const filtroData = (req.query.data || '').trim();
+  const filtroTime = (req.query.time || '').trim().toLowerCase();
+
+  let jogos = store.getAllGames().filter((j) => j.analisado);
+
+  if (filtroData) {
+    jogos = jogos.filter((j) => j.data && j.data.slice(0, 10) === filtroData);
+  }
+  if (filtroTime) {
+    jogos = jogos.filter(
+      (j) =>
+        (j.mandante || '').toLowerCase().includes(filtroTime) ||
+        (j.visitante || '').toLowerCase().includes(filtroTime)
+    );
+  }
+
+  // Mais recente primeiro
+  jogos.sort((a, b) => (b.analisado_em || '').localeCompare(a.analisado_em || ''));
+
+  const linhas = jogos
+    .map((j) => {
+      const conf = j.analise_estruturada;
+      const confianca = conf
+        ? `<br><small>🎯 ${conf.favorito} · ⚽ ${conf.gols} · 🔒 ${conf.lay}</small>`
+        : '';
+      const dataJogo = j.data ? j.data.slice(0, 10) : '-';
+
+      return `
+        <tr>
+          <td>${dataJogo} ${j.hora || ''}</td>
+          <td>${j.pais || ''} — ${j.campeonato || ''}</td>
+          <td>${j.mandante} x ${j.visitante}</td>
+          <td>${j.selecao_ia || '-'}${confianca}</td>
+          <td><a href="/analise/${j.id}?senha=${req.query.senha}" style="color:#4fd1c5;">Ver análise</a></td>
+        </tr>`;
+    })
+    .join('');
+
+  res.send(`
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <title>FUTATS — Histórico</title>
+      <style>
+        body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; }
+        td, th { padding: 8px; border-bottom: 1px solid #333; text-align: left; font-size: 14px; }
+        a { color: #4fd1c5; }
+        form.filtros { margin-bottom: 16px; }
+        input { background: #222; border: 1px solid #444; color: #eee; padding: 6px 8px; border-radius: 4px; margin-right: 8px; }
+        button { background: #2b6cb0; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+      </style>
+    </head>
+    <body>
+      <p><a href="/?senha=${req.query.senha}">← Voltar pra hoje</a></p>
+      <h2>📜 FUTATS — Histórico de análises (${jogos.length})</h2>
+      <form class="filtros" method="GET" action="/historico">
+        <input type="hidden" name="senha" value="${req.query.senha}" />
+        <input type="date" name="data" value="${escapeHtml(filtroData)}" />
+        <input type="text" name="time" placeholder="nome do time" value="${escapeHtml(req.query.time || '')}" />
+        <button type="submit">Filtrar</button>
+        ${filtroData || filtroTime ? `<a href="/historico?senha=${req.query.senha}" style="margin-left:8px;">Limpar filtro</a>` : ''}
+      </form>
+      <table>
+        <tr><th>Data / Hora</th><th>Liga</th><th>Jogo</th><th>Seleção IA</th><th></th></tr>
+        ${linhas}
+      </table>
+    </body>
+    </html>
+  `);
 });
 
 // Mostra o texto completo de uma análise já feita
