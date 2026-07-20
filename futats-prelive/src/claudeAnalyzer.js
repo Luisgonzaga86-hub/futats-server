@@ -53,7 +53,7 @@ async function analisarJogo(jogoRawOriginal) {
     // TESTE (20/07): effort medium em vez do padrão (high/implícito) — reduz
     // tokens de thinking (a maior fatia do custo, ~58%). Se a qualidade não
     // ficar boa, é só remover essa linha e redeployar pra voltar ao padrão.
-    effort: 'medium',
+    output_config: { effort: 'medium' },
     system: [
       {
         type: 'text',
