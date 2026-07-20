@@ -50,6 +50,10 @@ async function analisarJogo(jogoRawOriginal) {
   const body = {
     model: 'claude-sonnet-5',
     max_tokens: 16000, // aumentado de novo — 8192 ainda cortava no meio (thinking + buscas consomem bastante)
+    // TESTE (20/07): effort medium em vez do padrão (high/implícito) — reduz
+    // tokens de thinking (a maior fatia do custo, ~58%). Se a qualidade não
+    // ficar boa, é só remover essa linha e redeployar pra voltar ao padrão.
+    effort: 'medium',
     system: [
       {
         type: 'text',
