@@ -15,6 +15,72 @@ const PORT        = process.env.PORT        || 3000;
 const FUTATS_TOKEN = 'w8e6q2xa';
 const FUTATS_BASE  = 'https://gz.futats.com/opta';
 
+// ── CONFIABILIDADE PRÉ-LIVE — ponte com o futats-prelive via rede interna
+// do Railway (23/07). Busca não-bloqueante: nunca atrasa o disparo de um
+// alerta. Retry espaçado (a cada CONFIABILIDADE_RETRY_MS) enquanto não achar
+// — cobre o caso de o Luis analisar o jogo manualmente pelo site depois que
+// o alerta live já disparou.
+const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN;
+const FUTATS_PRELIVE_INTERNAL_URL = process.env.FUTATS_PRELIVE_INTERNAL_URL || 'http://futats-server.railway.internal';
+const CONFIABILIDADE_RETRY_MS = 5 * 60 * 1000;
+
+async function buscarConfiabilidadePreLive(jogo) {
+  if (!INTERNAL_TOKEN) return null;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+  try {
+    const url = `${FUTATS_PRELIVE_INTERNAL_URL}/interno/confiabilidade?mandante=${encodeURIComponent(jogo.mandante)}&visitante=${encodeURIComponent(jogo.visitante)}`;
+    const r = await fetch(url, { headers: { 'x-internal-token': INTERNAL_TOKEN }, signal: controller.signal });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    console.error('[confiabilidade] Falha ao buscar do futats-prelive:', e.message);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function formatarBlocoConfiabilidade(conf) {
+  const linhas = [
+    '🎯 Confiabilidade pré-live',
+    `🎯 Favorito: ${conf.favorito || '-'}`,
+    `⚽ Gols: ${conf.gols || '-'}`,
+    `🔒 Placar/Lay: ${conf.lay || '-'}`,
+  ];
+  if (conf.layImprovavelMantidos && conf.layImprovavelMantidos.length) {
+    linhas.push(`🎯 Lay Improvável (mantidos): ${conf.layImprovavelMantidos.join(' · ')}`);
+  }
+  if (conf.top3Placares && conf.top3Placares.length) {
+    linhas.push(`🎯 Top 3 placares: ${conf.top3Placares.join(' · ')}`);
+  }
+  return linhas.join('\n');
+}
+
+// Busca (com retry espaçado) e, assim que encontra pela 1ª vez, re-renderiza
+// TODOS os alertas já ativos desse jogo — assim o bloco fica "gravado" desde
+// já, sem precisar esperar o próximo evento de placar.
+async function garantirConfiabilidade(jogoId, estado, jogo) {
+  if (estado.confiabilidadeBloco) return;
+  const agora = Date.now();
+  if (estado.confiabilidadeUltimaTentativa && (agora - estado.confiabilidadeUltimaTentativa) < CONFIABILIDADE_RETRY_MS) return;
+  estado.confiabilidadeUltimaTentativa = agora;
+
+  const conf = await buscarConfiabilidadePreLive(jogo);
+  if (!conf || !conf.encontrado) return;
+
+  estado.confiabilidadeBloco = formatarBlocoConfiabilidade(conf);
+  console.log(`[confiabilidade] ${jogoId} → bloco carregado, re-renderizando alertas ativos.`);
+
+  const tempo = jogo.tempo === 'Intervalo' ? 'HT' : (parseInt(jogo.tempo) || estado.ultimoMinuto || 0);
+  const placarAtual = estado.ultimoPlacar || `${parseInt(jogo.gols_casa) || 0}x${parseInt(jogo.gols_fora) || 0}`;
+  for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
+    if (!info?.ids?.length) continue;
+    if (info.grupo1Status) continue; // Grupo 1 recebe o bloco na próxima transição de estado
+    await renderizarAlertaAtual(jogo, estado, stratKey, info, placarAtual, tempo);
+  }
+}
+
 const DATA_FILE   = path.join(__dirname, 'dados.json');
 const PEND_FILE   = path.join(__dirname, 'pendentes.json');
 const ESTADO_FILE = path.join(__dirname, 'estado_live.json');
@@ -623,6 +689,12 @@ async function monitorarLive() {
       estado.ultimaVez = agora;
       estado.jogo = jogo;
 
+      // Busca a confiabilidade pré-live em paralelo, sem bloquear os alertas
+      // (fire-and-forget) — assim que chega, re-renderiza os alertas ativos.
+      garantirConfiabilidade(jogoId, estado, jogo).catch((e) =>
+        console.error(`[confiabilidade] Erro inesperado em ${jogoId}:`, e.message)
+      );
+
       for (const m of (jogo.momentum || [])) {
         if (!estado.momentum.find(x => x.minuto === m.minuto)) estado.momentum.push(m);
       }
@@ -707,37 +779,44 @@ function montarMsgAlerta(display, jogo, tempo, placarAlerta, placarAtual, links,
   return fixo + sep + editavel + links;
 }
 
+// Monta e envia a edição atual de UM alerta — extraído de
+// atualizarPlacarNasMensagens pra também ser chamado quando a confiabilidade
+// pré-live chega (sem esperar o próximo evento de placar).
+async function renderizarAlertaAtual(jogo, estado, stratKey, info, placarAtual, tempo) {
+  const links = linksExchanges(jogo.urls_exchanges || {});
+  const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
+
+  if (info.indicadorTipo) {
+    const extras = (info.linhasExtras || []).join('\n');
+    const conteudo = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '') + confExtra;
+    const novoTexto = info.formatoSimplificado
+      ? `${conteudo}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempo}' · 📊 ${placarAtual}`
+      : montarMsgAlerta(
+          `${STRAT_DISPLAY[stratKey] || stratKey}\n${conteudo}`, jogo,
+          info.tempoAlerta, info.placarAlerta, `${placarAtual} · ${tempo}'`, links
+        );
+    await editTelegram(info.ids, novoTexto);
+    return;
+  }
+
+  const display = STRAT_DISPLAY[stratKey] || stratKey;
+  const extras = (info.linhasExtras || []).join('\n');
+  const statusLinha = `📊 Placar atual: ${placarAtual} · ${tempo}'` + (extras ? `\n${extras}` : '') + confExtra;
+  info.ultimoStatusTexto = statusLinha;
+  const novoTexto = montarMsgAlerta(
+    display, jogo, info.tempoAlerta, info.placarAlerta,
+    `${placarAtual} · ${tempo}'`, links, statusLinha
+  );
+  await editTelegram(info.ids, novoTexto);
+}
+
 async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
   const tempo = jogo.tempo === 'Intervalo' ? 'HT' : (parseInt(jogo.tempo) || 0);
-  const links = linksExchanges(estado.jogo?.urls_exchanges || {});
-  const linksIndicador = linksExchanges(jogo.urls_exchanges || {});
 
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
     if (info.grupo1Status) continue;
-
-    if (info.indicadorTipo) {
-      const extras = (info.linhasExtras || []).join('\n');
-      const conteudo = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '');
-      const novoTexto = info.formatoSimplificado
-        ? `${conteudo}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempo}' · 📊 ${placarAtual}`
-        : montarMsgAlerta(
-            `${STRAT_DISPLAY[stratKey] || stratKey}\n${conteudo}`, jogo,
-            info.tempoAlerta, info.placarAlerta, `${placarAtual} · ${tempo}'`, linksIndicador
-          );
-      await editTelegram(info.ids, novoTexto);
-      continue;
-    }
-
-    const display = STRAT_DISPLAY[stratKey] || stratKey;
-    const extras = (info.linhasExtras || []).join('\n');
-    const statusLinha = `📊 Placar atual: ${placarAtual} · ${tempo}'` + (extras ? `\n${extras}` : '');
-    info.ultimoStatusTexto = statusLinha;
-    const novoTexto = montarMsgAlerta(
-      display, jogo, info.tempoAlerta, info.placarAlerta,
-      `${placarAtual} · ${tempo}'`, links, statusLinha
-    );
-    await editTelegram(info.ids, novoTexto);
+    await renderizarAlertaAtual(jogo, estado, stratKey, info, placarAtual, tempo);
   }
 }
 
@@ -765,7 +844,8 @@ async function processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje) {
     const display = STRAT_DISPLAY[stratKey] || stratKey;
     const linhaFixa = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
     const statusAtual = info.ultimoStatusTexto || `📊 Placar atual: ${golsCasa}x${golsFora} · ${tempo}'`;
-    const novoTexto = `${linhaFixa}\n${statusAtual}\n🪗 Indicador do Gonza (${labelPeriodo}, min ${tempo}) — jogo aberto!${links}`;
+    const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
+    const novoTexto = `${linhaFixa}\n${statusAtual}\n🪗 Indicador do Gonza (${labelPeriodo}, min ${tempo}) — jogo aberto!${confExtra}${links}`;
     await editTelegram(info.ids, novoTexto);
   }
 }
@@ -823,10 +903,11 @@ async function dispararIndicadorProprio(jogo, estado, stratKey, linhaIndicador, 
   const placar   = `${golsCasa}x${golsFora}`;
   const links    = linksExchanges(jogo.urls_exchanges || {});
   const display  = STRAT_DISPLAY[stratKey] || stratKey;
+  const confExtraInicial = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
 
   const textoCompleto = formatoSimplificado
-    ? `${linhaIndicador}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempoDisplay}' · 📊 ${placar}`
-    : montarMsgAlerta(`${display}\n${linhaIndicador}`, jogo, tempoDisplay, placar, placar, links);
+    ? `${linhaIndicador}${confExtraInicial}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempoDisplay}' · 📊 ${placar}`
+    : montarMsgAlerta(`${display}\n${linhaIndicador}${confExtraInicial}`, jogo, tempoDisplay, placar, placar, links);
 
   const ids = await sendTelegram(textoCompleto);
 
@@ -859,6 +940,7 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
   const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
   const links    = linksExchanges(jogo.urls_exchanges || {});
   const fixo     = `${STRAT_DISPLAY[stratKey] || stratKey}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
+  const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
 
   if (info.indicadorTipo === 'pressao_sem_eficiencia' && !info.pressaoConfirmada) {
     const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
@@ -870,7 +952,7 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
       salvarArquivo(PEND_FILE, pendentes);
       const statusTexto = `🟣 Pressão Gonza confirmada — chute no gol min ${pg.minutoChute}\n✅ Entrada confirmada`;
       info.ultimoStatusTexto = statusTexto;
-      await editTelegram(info.ids, `${fixo}\n${statusTexto}${links}`);
+      await editTelegram(info.ids, `${fixo}\n${statusTexto}${confExtra}${links}`);
     }
     return;
   }
@@ -893,7 +975,7 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
       const statusBase = info.ultimoStatusTexto || `📊 Placar atual: ${jogo.gols_casa}x${jogo.gols_fora}`;
       const statusTexto = `${statusBase}\n⚠️ Oponente reagiu — ${descricao}\n⚠️ Considerar proteção/saída`;
       info.ultimoStatusTexto = statusTexto;
-      await editTelegram(info.ids, `${fixo}\n${statusTexto}${links}`);
+      await editTelegram(info.ids, `${fixo}\n${statusTexto}${confExtra}${links}`);
       return;
     }
   }
@@ -904,7 +986,7 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
       info.cartaoVermelhoAvisado = true;
       const statusTexto = `🔴 Cartão vermelho nosso (min ${vermelho.minuto})\n⚠️ Saída recomendada`;
       info.ultimoStatusTexto = statusTexto;
-      await editTelegram(info.ids, `${fixo}\n${statusTexto}${links}`);
+      await editTelegram(info.ids, `${fixo}\n${statusTexto}${confExtra}${links}`);
     }
   }
 }
@@ -955,13 +1037,15 @@ async function checarReconfirmacao(jogo, estado, stratKey, ladoOuFavorito, hoje)
   const extras  = info.linhasExtras.join('\n');
 
   if (info.indicadorTipo) {
-    const conteudo = (info.ultimoStatusTexto || info.linhaIndicador || '') + `\n${extras}`;
+    const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
+    const conteudo = (info.ultimoStatusTexto || info.linhaIndicador || '') + `\n${extras}` + confExtra;
     const novoTexto = info.formatoSimplificado
       ? `${conteudo}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempoNum}' · 📊 ${placar}`
       : montarMsgAlerta(`${STRAT_DISPLAY[stratKey] || stratKey}\n${conteudo}`, jogo, info.tempoAlerta, info.placarAlerta, `${placar} · ${tempoNum}'`, links);
     await editTelegram(info.ids, novoTexto);
   } else {
-    const statusLinha = `📊 Placar atual: ${placar} · ${tempoNum}'\n${extras}`;
+    const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
+    const statusLinha = `📊 Placar atual: ${placar} · ${tempoNum}'\n${extras}` + confExtra;
     info.ultimoStatusTexto = statusLinha;
     const novoTexto = montarMsgAlerta(STRAT_DISPLAY[stratKey] || stratKey, jogo, info.tempoAlerta, info.placarAlerta, `${placar} · ${tempoNum}'`, links, statusLinha);
     await editTelegram(info.ids, novoTexto);
@@ -1083,6 +1167,7 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
   const jaPassouHT = !!estado.passouHT;
   const links     = linksExchanges(jogo.urls_exchanges || {});
   const favorito  = getFavorito(jogo);
+  const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
 
   for (const stratKey of GRUPO1_STRATS) {
     const info = estado.msgIds[stratKey];
@@ -1104,11 +1189,11 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     if (!info.grupo1Status) {
       if (alvoGols > contraGols) {
         info.grupo1Status = 'green';
-        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${links}`);
+        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${confExtra}${links}`);
       } else if (contraGols > alvoGols) {
         info.grupo1Status = 'atencao';
         info.minutoGolContra = tempo;
-        await editTelegram(info.ids, `${fixo}\n⚠️ Time contra na frente (${golsCasa}x${golsFora}, min ${tempo}) — avaliar reação${links}`);
+        await editTelegram(info.ids, `${fixo}\n⚠️ Time contra na frente (${golsCasa}x${golsFora}, min ${tempo}) — avaliar reação${confExtra}${links}`);
       }
       continue;
     }
@@ -1116,12 +1201,12 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     if (info.grupo1Status === 'atencao') {
       if (alvoGols > contraGols) {
         info.grupo1Status = 'green';
-        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${links}`);
+        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${confExtra}${links}`);
         continue;
       }
       if (tempo > 60 && !isHT) {
         info.grupo1Status = 'red';
-        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60) — sem reação confirmada${links}`);
+        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60) — sem reação confirmada${confExtra}${links}`);
         continue;
       }
       if (checaCondicaoReacao(jogo, alvo)) {
@@ -1130,7 +1215,7 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
         );
         if (raioNovoAlvo) {
           info.grupo1Status = 'reacao';
-          await editTelegram(info.ids, `${fixo}\n🔄 Reação confirmada (min ${tempo}) — considerar Lay contra o time da frente até o fim do 1T${links}`);
+          await editTelegram(info.ids, `${fixo}\n🔄 Reação confirmada (min ${tempo}) — considerar Lay contra o time da frente até o fim do 1T${confExtra}${links}`);
         }
       }
       continue;
@@ -1146,13 +1231,13 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
         );
         if (raioNovoAlvo) {
           info.grupo1Status = 'red_reacao';
-          await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60)\n🔄 Reação confirmada (${tempo}') — avaliar Gol Limite${links}`);
+          await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60)\n🔄 Reação confirmada (${tempo}') — avaliar Gol Limite${confExtra}${links}`);
           continue;
         }
       }
       if (checaIndicadorGonza(jogo, estado, periodoAtual)) {
         info.grupo1Status = 'red_gonza';
-        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60)\n🪗 Indicador do Gonza (${tempo}') — avaliar Gol Limite${links}`);
+        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60)\n🪗 Indicador do Gonza (${tempo}') — avaliar Gol Limite${confExtra}${links}`);
       }
     }
   }
@@ -1210,8 +1295,9 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
 
     const display = STRAT_DISPLAY[stratKey] || stratKey;
     const linhaInfo = dica ? `\n💡 ${dica}` : '';
+    const confExtraInicial = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
     const textoCompleto = montarMsgAlerta(
-      display + linhaInfo, jogo, tempoDisplay, placar, placar, links
+      display + linhaInfo + confExtraInicial, jogo, tempoDisplay, placar, placar, links
     );
 
     const ids = await sendTelegram(textoCompleto);
@@ -1487,9 +1573,16 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     // antes — não tem nada extra pra preservar.
     let corpoAcumulado = '';
     if (info.indicadorTipo) {
+      // Indicadores próprios: a confiabilidade nunca fica "gravada" dentro de
+      // ultimoStatusTexto (é sempre recalculada na hora de renderizar), então
+      // precisa ser anexada aqui explicitamente.
       const extras = (info.linhasExtras || []).join('\n');
-      corpoAcumulado = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '');
+      const confExtraFinal = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
+      corpoAcumulado = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '') + confExtraFinal;
     } else if (info.ultimoStatusTexto) {
+      // Raio puro: se a confiabilidade já chegou antes do fim do jogo, ela já
+      // está embutida em ultimoStatusTexto (renderizarAlertaAtual/checarReconfirmacao
+      // gravam ela ali) — não precisa (nem deve) ser anexada de novo aqui.
       corpoAcumulado = info.ultimoStatusTexto;
     }
 
