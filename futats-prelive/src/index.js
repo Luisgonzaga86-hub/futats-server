@@ -106,6 +106,92 @@ app.get('/atualizar', checarSenha, async (req, res) => {
   res.redirect(`/?senha=${req.query.senha}`);
 });
 
+// ── ROTA INTERNA — consumida pelo server live (server_45.js) via rede
+// privada do Railway, pra anexar a confiabilidade pré-live nos alertas.
+// Protegida por INTERNAL_TOKEN (variável de ambiente, igual nos dois
+// serviços) em vez de senha de usuário — não é pra ser acessada de fora.
+const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN;
+
+function checarTokenInterno(req, res, next) {
+  if (!INTERNAL_TOKEN || req.headers['x-internal-token'] !== INTERNAL_TOKEN) {
+    return res.status(401).json({ error: 'Token interno inválido ou ausente' });
+  }
+  next();
+}
+
+// Extrai o texto de uma seção da análise (entre um título e o próximo título
+// que aparecer primeiro dentre os informados). Texto vem sem formatação
+// especial, então isso é uma busca simples por substring.
+function extrairSecao(texto, tituloInicio, titulosFim) {
+  const idxInicio = texto.indexOf(tituloInicio);
+  if (idxInicio === -1) return '';
+  let idxFim = texto.length;
+  for (const t of titulosFim) {
+    const i = texto.indexOf(t, idxInicio + tituloInicio.length);
+    if (i !== -1 && i < idxFim) idxFim = i;
+  }
+  return texto.slice(idxInicio + tituloInicio.length, idxFim).trim();
+}
+
+// Pega só as linhas de bullet ("- ...") de uma seção
+function extrairBullets(secaoTexto) {
+  return secaoTexto
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('-'))
+    .map((l) => l.replace(/^-\s*/, ''));
+}
+
+// Corta uma linha de bullet no primeiro travessão/hífen ou parêntese,
+// pra pegar só o "rótulo" (ex: "G.Mandante", "1x0") sem a explicação depois
+function primeiraParte(linha) {
+  const match = linha.match(/^(.*?)(\s*:\s*|\s+[—–-]\s+|\s*\()/);
+  return (match ? match[1] : linha).trim();
+}
+
+function extrairLayImprovavelMantidos(analiseTexto) {
+  const secao = extrairSecao(analiseTexto, '🎯 Lay Improvável', [
+    '⚠️ Onde perdemos', '🦓 Zebra geral', '📰 Notícia', 'Bloco final',
+  ]);
+  return extrairBullets(secao)
+    .filter((l) => /mantid/i.test(l))
+    .map(primeiraParte);
+}
+
+function extrairTop3Placares(analiseTexto) {
+  const secao = extrairSecao(analiseTexto, '🎯 Top 3 placares', [
+    '🤝 H2H', '🎯 Lay Improvável', '⚠️ Onde perdemos',
+  ]);
+  return extrairBullets(secao).slice(0, 3).map(primeiraParte);
+}
+
+// GET /interno/confiabilidade?mandante=X&visitante=Y
+app.get('/interno/confiabilidade', checarTokenInterno, (req, res) => {
+  const mandante = (req.query.mandante || '').trim();
+  const visitante = (req.query.visitante || '').trim();
+  if (!mandante || !visitante) {
+    return res.status(400).json({ error: 'mandante e visitante são obrigatórios' });
+  }
+
+  const jogo = store
+    .getAllGames()
+    .find((j) => j.mandante === mandante && j.visitante === visitante && j.analisado);
+
+  if (!jogo) {
+    return res.json({ encontrado: false });
+  }
+
+  const conf = jogo.analise_estruturada || {};
+  res.json({
+    encontrado: true,
+    favorito: conf.favorito || '-',
+    gols: conf.gols || '-',
+    lay: conf.lay || '-',
+    layImprovavelMantidos: extrairLayImprovavelMantidos(jogo.analise || ''),
+    top3Placares: extrairTop3Placares(jogo.analise || ''),
+  });
+});
+
 // Histórico de análises — todos os jogos já analisados (qualquer data), com
 // filtro opcional por data (?data=YYYY-MM-DD) e/ou nome de time (?time=nome).
 // Sem filtro nenhum, mostra tudo que já foi analisado, mais recente primeiro.
