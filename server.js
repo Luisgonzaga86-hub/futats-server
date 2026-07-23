@@ -30,14 +30,7 @@ function salvarArquivo(file, data) {
 let dadosHist = lerArquivo(DATA_FILE, []);
 let pendentes = lerArquivo(PEND_FILE, []);
 
-// Estado live por jogo — persistido em arquivo (estado_live.json) a cada
-// ciclo do monitorarLive, pra sobreviver a um restart do Railway. Sem isso,
-// reiniciar com jogo rolando perdia o controle de mensagens já enviadas
-// (gerando duplicatas), o placar do HT, e a noção de 1T/2T do jogo.
 let estadoLive = lerArquivo(ESTADO_FILE, {});
-// Reseta "ultimaVez" de tudo que foi restaurado — sem isso, o tempo que
-// passou durante o restart contaria como "sumiu do live" e forçaria o
-// encerramento de jogos que ainda estão rolando de verdade.
 for (const k of Object.keys(estadoLive)) {
   if (estadoLive[k]) estadoLive[k].ultimaVez = Date.now();
 }
@@ -54,14 +47,12 @@ function agoraBRT() {
 function horaBRT() {
   return agoraBRT().toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' });
 }
-// Data de N dias atrás (BRT), formato YYYY-MM-DD
 function dataOffsetBRT(diasAtras) {
   const d = new Date(new Date().getTime() - 3*60*60*1000);
   d.setDate(d.getDate() - diasAtras);
   return d.toISOString().split('T')[0];
 }
 
-// ── LINKS EXCHANGES ──────────────────────────────────────────
 function linksExchanges(urls) {
   if (!urls) return '';
   const links = [];
@@ -73,7 +64,6 @@ function linksExchanges(urls) {
   return links.length ? '\n🔗 ' + links.join(' · ') : '';
 }
 
-// ── TELEGRAM ─────────────────────────────────────────────────
 async function sendTelegram(msg, extra = {}) {
   const ids = [];
   for (const chatId of TG_CHAT_IDS) {
@@ -103,8 +93,6 @@ async function editTelegram(msgIds, novoTexto) {
 }
 
 async function futatsGet(endpoint) {
-  // Timeout de 10s — se a API do futats.com não responder nesse prazo,
-  // a chamada é abortada (sem retry — só falha e o próximo ciclo tenta de novo).
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10000);
   try {
@@ -118,19 +106,13 @@ async function futatsGet(endpoint) {
   }
 }
 
-// ── Envio paginado para mensagens longas ──────────────────────
-// Recebe um cabeçalho (sempre na 1ª parte) e uma lista de "blocos" de texto
-// (cada bloco = ex. um jogo inteiro, ou um horário inteiro) que NUNCA são
-// cortados no meio. Agrupa blocos em mensagens até o limite de caracteres,
-// numerando "parte X/Y" quando há mais de uma mensagem.
-const TELEGRAM_LIMITE_CHARS = 3800; // margem de segurança abaixo do limite real de 4096
+const TELEGRAM_LIMITE_CHARS = 3800;
 
 async function enviarEmPartes(cabecalho, blocos, rodape = '') {
   const partes = [];
   let atual = cabecalho;
 
   for (const bloco of blocos) {
-    // Se adicionar este bloco ultrapassar o limite, fecha a parte atual e abre outra
     if ((atual + bloco).length > TELEGRAM_LIMITE_CHARS && atual !== cabecalho) {
       partes.push(atual);
       atual = '';
@@ -139,7 +121,6 @@ async function enviarEmPartes(cabecalho, blocos, rodape = '') {
   }
   if (atual) partes.push(atual);
 
-  // Anexa o rodapé na última parte
   if (rodape && partes.length) {
     partes[partes.length - 1] += rodape;
   } else if (rodape) {
@@ -159,9 +140,6 @@ function getFavorito(jogo) {
   return oc <= of_ ? 'casa' : 'fora';
 }
 
-// ── INDICADORES DE PRESSÃO (resumo_pressao da API) ────────────
-// Extrai % pressão, índice de pressão e eficiência de um período específico.
-// periodo: 'total' | '1_tempo' | '2_tempo' | 'ult_10min'
 function getIndicadores(jogo, periodo) {
   const rp = jogo.resumo_pressao?.[periodo];
   if (!rp) return { pctCasa: 0, pctFora: 0, idxCasa: 0, idxFora: 0, efCasa: 0, efFora: 0 };
@@ -175,8 +153,6 @@ function getIndicadores(jogo, periodo) {
   };
 }
 
-// Condição "Grupo 1" — pressão/índice/eficiência do time mandante (ou espelhado pro visitante)
-// alvo: 'casa' ou 'fora' — qual lado deve estar dominando
 function checaCondicaoGrupo1(jogo, periodo, alvo) {
   const ind = getIndicadores(jogo, periodo);
   if (alvo === 'casa') {
@@ -188,7 +164,6 @@ function checaCondicaoGrupo1(jogo, periodo, alvo) {
   }
 }
 
-// Condição "modo reação" (favorito perdendo, últimos 10min) — mais rígida
 function checaCondicaoReacao(jogo, alvo) {
   const ind = getIndicadores(jogo, 'ult_10min');
   if (alvo === 'casa') {
@@ -200,15 +175,12 @@ function checaCondicaoReacao(jogo, alvo) {
   }
 }
 
-// Condição "Indicador do Gonza" — jogo empatado, raio dos dois times APÓS o
-// gol mais recente (que gerou o empate), índice >=15 ambos, eficiência um>=0.20 outro>0.10
 function checaIndicadorGonza(jogo, estado, periodo) {
   const ind = getIndicadores(jogo, periodo);
   const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
   const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
   if (!idxOk || !efOk) return false;
 
-  // Minuto do último gol (qualquer lado) — raios precisam ser DEPOIS dele
   const golsEventos = (jogo.eventos || []).filter(e => e.tipo_evento === 'gol');
   const minutoUltimoGol = golsEventos.length ? Math.max(...golsEventos.map(e => e.minuto)) : 0;
 
@@ -224,49 +196,16 @@ function checaIndicadorGonza(jogo, estado, periodo) {
   return temRaioCasaAposGol && temRaioForaAposGol;
 }
 
-// ════════════════════════════════════════════════════════════════
-// ── INDICADORES PRÓPRIOS — PRESSÃO GONZA & JOGO ABERTO ──────────
-// ════════════════════════════════════════════════════════════════
-// Substituem a dependência do "raio" do futats.com (que só dispara em
-// múltiplos de 5min, sempre atrasado em relação à pressão real) por um
-// cálculo direto cima do momentum[] + eventos[], a cada ciclo (90s).
-//
-// PRESSÃO GONZA (estratégias de LADO — nosso time precisa marcar e o
-// oponente não): janela de 5 minutos-calendário consecutivos terminando
-// no minuto atual, com o oponente em momentum=0 o tempo todo (janela
-// "limpa"). Dentro dela:
-//   • média (módulo) >= 136 + chute no gol do nosso lado + eficiência
-//     (período correto) >= 0.17  → "completo" (entrada real confirmada)
-//   • média (módulo) >= 180, mesmo sem chute no gol               → "sem_eficiencia"
-//     (só observação — fica monitorando até confirmar ou o jogo acabar)
-//
-// JOGO ABERTO: os dois lados com pico de momentum >=150 (módulo) + algum
-// chute, dentro de até 2 minutos um do outro. Pra estratégias de GOLS é
-// gatilho de entrada; pra estratégias de LADO é sinal de saída/atenção.
-//
-// CONDIÇÃO DE SAÍDA/PROTEÇÃO (lado já com entrada aberta) — o OPONENTE
-// mostrou reação real, qualquer uma destas (janela de 5min terminando
-// no minuto atual):
-//   • pico >=150 (módulo) + chute (no gol OU pra fora) no mesmo minuto
-//   • média (módulo) dos 5 minutos > 100
-//   • 2 chutes (qualquer tipo) dentro da janela
-// + cartão vermelho do nosso lado = saída imediata, sempre.
-// ════════════════════════════════════════════════════════════════
-
 function round2(n) { return Math.round(n * 100) / 100; }
 
 function ladoOposto(lado) { return lado === 'casa' ? 'fora' : 'casa'; }
 
-// Valor de momentum de um lado num minuto específico (0 se não houver dado)
 function valorMomento(jogo, minuto, lado) {
   const m = (jogo.momentum || []).find(x => x.minuto === minuto);
   if (!m) return 0;
   return (lado === 'casa' ? m.valor_casa : m.valor_fora) || 0;
 }
 
-// Janela dos últimos 5 minutos-calendário (consecutivos, incluindo zeros)
-// terminando no minutoAtual. ladoAlvo = de quem queremos a "força";
-// também devolve o valor do lado oposto em cada minuto (pra checar limpeza).
 function janelaUltimos5(jogo, ladoAlvo, minutoAtual) {
   const janela = [];
   for (let min = minutoAtual - 4; min <= minutoAtual; min++) {
@@ -279,11 +218,6 @@ function janelaUltimos5(jogo, ladoAlvo, minutoAtual) {
   return janela;
 }
 
-// Eficiência do nosso lado no período "correto": ult_10min no 1T sempre;
-// no 2T, usa resumo_pressao['2_tempo'] enquanto faltarem menos de 10min
-// de jogo no 2T (dados ainda muito recentes pro ult_10min fazer sentido),
-// e troca pra ult_10min depois disso. estado.minutoInicio2T é marcado em
-// monitorarLive no primeiro tick numérico após o intervalo.
 function getEficienciaPeriodoAtual(jogo, estado, lado) {
   const tempoNum = parseInt(jogo.tempo) || 0;
   let periodo = 'ult_10min';
@@ -295,12 +229,9 @@ function getEficienciaPeriodoAtual(jogo, estado, lado) {
   return lado === 'casa' ? ind.efCasa : ind.efFora;
 }
 
-// ── PRESSÃO GONZA ──────────────────────────────────────────────
-// Retorna null (não bate nada) ou { tipo: 'completo'|'sem_eficiencia', media, minutoChute?, eficiencia? }
 function checaPressaoGonza(jogo, estado, ladoAlvo, minutoAtual) {
   if (!minutoAtual || minutoAtual < 5) return null;
   const janela = janelaUltimos5(jogo, ladoAlvo, minutoAtual);
-  // janela limpa: oponente em 0 nos 5 minutos inteiros
   if (!janela.every(j => j.oposto === 0)) return null;
 
   const media   = janela.reduce((s, j) => s + Math.abs(j.alvo), 0) / 5;
@@ -322,13 +253,11 @@ function checaPressaoGonza(jogo, estado, ladoAlvo, minutoAtual) {
   return null;
 }
 
-// ── CONDIÇÃO DE SAÍDA/PROTEÇÃO — reação real do oponente ───────
 function checaReacaoOponente(jogo, ladoOponente, minutoAtual) {
   if (!minutoAtual || minutoAtual < 5) return null;
-  const janela  = janelaUltimos5(jogo, ladoOponente, minutoAtual); // .alvo = valor do oponente
+  const janela  = janelaUltimos5(jogo, ladoOponente, minutoAtual);
   const minutos = janela.map(j => j.minuto);
 
-  // 1) pico >=150 (módulo) + chute (no gol OU pra fora) no MESMO minuto
   for (const j of janela) {
     if (Math.abs(j.alvo) >= 150) {
       const chute = (jogo.eventos || []).find(e =>
@@ -339,11 +268,9 @@ function checaReacaoOponente(jogo, ladoOponente, minutoAtual) {
     }
   }
 
-  // 2) média dos 5 minutos (módulo) > 100
   const media = janela.reduce((s, j) => s + Math.abs(j.alvo), 0) / 5;
   if (media > 100) return { tipo: 'media_sustentada', media: round2(media) };
 
-  // 3) 2 chutes (qualquer tipo) dentro da janela
   const chutesNaJanela = (jogo.eventos || []).filter(e =>
     e.lado === ladoOponente && minutos.includes(e.minuto) && e.tipo_evento.startsWith('chute')
   );
@@ -352,7 +279,6 @@ function checaReacaoOponente(jogo, ladoOponente, minutoAtual) {
   return null;
 }
 
-// ── JOGO ABERTO — os dois lados com pico+chute, perto no tempo ──
 function checaJogoAberto(jogo, minutoAtual) {
   if (!minutoAtual || minutoAtual < 2) return null;
   function ultimoPicoComChute(lado) {
@@ -374,7 +300,6 @@ function checaJogoAberto(jogo, minutoAtual) {
   return null;
 }
 
-// ── REGISTRAR PENDENTE ────────────────────────────────────────
 function registrarPendente(jogo, strat, tipo = 'pre') {
   const id    = Date.now() + Math.random();
   const hoje  = dataHoje();
@@ -407,7 +332,6 @@ function registrarPendente(jogo, strat, tipo = 'pre') {
   return entrada;
 }
 
-// ── RESULTADO GREEN/RED ───────────────────────────────────────
 function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
   const s   = strat.replace(/_live$|_pre$/, '');
   const tot = ftH + ftA;
@@ -435,7 +359,6 @@ function calcularResultado(strat, ftH, ftA, htH = 0, htA = 0) {
   }
 }
 
-// ── DISPLAY NAMES ─────────────────────────────────────────────
 const STRAT_DISPLAY = {
   gol_no_final:         '🤖 Gol no Final',
   over05_ht:            '🤖 Over 0.5 HT',
@@ -484,7 +407,6 @@ const ESTRAT_PARA_STRAT = {
   'ambos xg pro':     'am_xg',
 };
 
-// ── CARD MATINAL ──────────────────────────────────────────────
 async function enviarCardMatinal(dataAlvo = null) {
   const hoje = dataAlvo || dataHoje();
   const [dd, mm, yyyy] = hoje.split('-').reverse();
@@ -495,7 +417,6 @@ async function enviarCardMatinal(dataAlvo = null) {
     return;
   }
 
-  // Agrupar por jogo (hora|jogo)
   const byJogo = {};
   for (const p of pendHoje) {
     const k = p.hora + '|' + p.jogo;
@@ -503,10 +424,8 @@ async function enviarCardMatinal(dataAlvo = null) {
     byJogo[k].strats.push(p.strat);
   }
 
-  // Ordenar por hora
   const jogosOrdenados = Object.values(byJogo).sort((a, b) => a.hora.localeCompare(b.hora));
 
-  // Agrupar por bloco de hora
   const byHora = {};
   for (const j of jogosOrdenados) {
     if (!byHora[j.hora]) byHora[j.hora] = [];
@@ -515,8 +434,6 @@ async function enviarCardMatinal(dataAlvo = null) {
 
   const cabecalho = `📋 <b>FUTATS — Jogos do dia ${dd}/${mm}/${yyyy}</b>\n`;
 
-  // Cada bloco = um horário inteiro com todos os jogos daquele horário
-  // (nunca corta um horário no meio entre duas mensagens)
   const blocos = [];
   for (const [hora, jogos] of Object.entries(byHora)) {
     let bloco = `\n🕐 <b>${hora}</b>\n`;
@@ -533,7 +450,6 @@ async function enviarCardMatinal(dataAlvo = null) {
   console.log('[CARD] Card matinal enviado.');
 }
 
-// ── RESUMO DO DIA ─────────────────────────────────────────────
 async function enviarResumoDia(dataAlvo = null) {
   const hoje = dataAlvo || dataHoje();
   const [dd, mm, yyyy] = hoje.split('-').reverse();
@@ -544,7 +460,6 @@ async function enviarResumoDia(dataAlvo = null) {
     return;
   }
 
-  // Agrupar por jogo
   const byJogo = {};
   for (const p of pendHoje) {
     const k = p.hora + '|' + p.jogo;
@@ -556,8 +471,6 @@ async function enviarResumoDia(dataAlvo = null) {
 
   let greens = 0, reds = 0, pendCount = 0;
 
-  // Cada bloco = um jogo inteiro com todas as estratégias dele
-  // (nunca corta um jogo no meio entre duas mensagens)
   const blocos = [];
   for (const j of jogosOrdenados) {
     const stratsStr = j.strats.map(p => {
@@ -581,7 +494,6 @@ async function enviarResumoDia(dataAlvo = null) {
   console.log('[RESUMO] Resumo do dia enviado.');
 }
 
-// ── RESUMO DO DIA ANTERIOR + CARD DO NOVO DIA (00h BRT) ───────
 async function enviarResumoECard() {
   const ontem = dataOffsetBRT(1);
   console.log(`[00H] Enviando resumo final de ${ontem} + card do novo dia`);
@@ -589,18 +501,12 @@ async function enviarResumoECard() {
   await enviarCardMatinal();
 }
 
-// ── RESOLVER PENDENTES ANTIGOS ────────────────────────────────
-// Pendentes de dias anteriores que ficaram presos (servidor reiniciou)
-// → busca na api-games-live se o jogo ainda está ativo
-// → se não estiver, tenta resolver via api-games-live pelo placar atual
-// → se não encontrar, marca como 'resolvido' para edição manual
 async function resolverPendentesAntigos() {
   const hoje = dataHoje();
   const antigos = pendentes.filter(p => p.result === 'pendente' && p.data < hoje);
   if (!antigos.length) return;
   console.log(`[ANTIGOS] ${antigos.length} pendentes de dias anteriores encontrados`);
 
-  // Buscar live atual para ver se algum jogo ainda está rodando
   let jogosLive = [];
   try {
     const rLive = await futatsGet('api-games-live');
@@ -612,10 +518,7 @@ async function resolverPendentesAntigos() {
   let resolvidos = 0;
   for (const p of antigos) {
     const jogoId = `${p.home}_${p.away}`;
-    // Se ainda está no live, deixa
     if (jogosLiveIds.has(jogoId)) continue;
-    // Não está no live → jogo acabou, mas não temos placar
-    // Marca como 'resolvido' para edição manual no index
     p.result = 'resolvido';
     p.final  = p.final || '?x?';
     resolvidos++;
@@ -632,11 +535,9 @@ async function resolverPendentesAntigos() {
   }
 }
 
-// ── PRÉ-JOGO ─────────────────────────────────────────────────
 async function buscarPreJogo() {
   console.log('[PRÉ] Buscando jogos das APIs do futats...');
 
-  // Resolver pendentes antigos primeiro
   await resolverPendentesAntigos();
 
   try {
@@ -683,7 +584,6 @@ async function buscarPreJogo() {
   }
 }
 
-// ── LIVE ──────────────────────────────────────────────────────
 async function monitorarLive() {
   try {
     const rLive   = await futatsGet('api-games-live');
@@ -692,18 +592,15 @@ async function monitorarLive() {
     const hoje    = dataHoje();
     const idsLive = new Set(jogosLive.map(j => j.mandante + '_' + j.visitante));
 
-    // Detectar jogos encerrados (saíram do live)
     for (const [jogoId, estado] of Object.entries(estadoLive)) {
       if (!idsLive.has(jogoId) && !estado.encerrado) {
         const minSemDados = (agora - estado.ultimaVez) / 60000;
         const ultimoMin = estado.ultimoMinuto || 0;
-        // Se sumiu do live há 3+ min e já estava nos acréscimos/fim de jogo
         if (minSemDados >= 3 && ultimoMin >= 90) {
           estado.encerrado = true;
           console.log(`[FIM AUTO] ${jogoId} · último min: ${ultimoMin} · sem dados há ${minSemDados.toFixed(1)}min`);
           await processarFimDeJogo(jogoId, estado, hoje);
         }
-        // Se sumiu há mais de 10 min independente do minuto → forçar encerramento
         else if (minSemDados >= 10) {
           estado.encerrado = true;
           console.log(`[FIM FORÇADO] ${jogoId} · sem dados há ${minSemDados.toFixed(1)}min`);
@@ -718,7 +615,6 @@ async function monitorarLive() {
         estadoLive[jogoId] = {
           jogo, momentum: [], eventos: [], ultimoMinuto: 0,
           ultimaVez: agora, encerrado: false,
-          // msgIds: { stratKey: { ids: [...], placarAlerta, tempoAlerta } }
           msgIds: {},
           ultimoPlacar: null,
         };
@@ -736,10 +632,6 @@ async function monitorarLive() {
         );
         if (!jaExiste) estado.eventos.push(ev);
       }
-      // CORREÇÃO: o array momentum vem pré-preenchido com ~92 entradas (1 a 90.5)
-      // desde o INÍCIO do jogo, com os minutos futuros zerados — NÃO é incremental.
-      // Por isso não podemos usar Math.max(momentum.minuto) para saber o minuto
-      // atual do jogo; usamos o campo jogo.tempo diretamente.
       const tempoAtualNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
       if (jogo.tempo !== 'Intervalo' && tempoAtualNum > 0) {
         estado.ultimoMinuto = tempoAtualNum;
@@ -751,30 +643,21 @@ async function monitorarLive() {
         continue;
       }
 
-      // Detectar mudança de placar e editar mensagens ativas
       const placarAtual = `${parseInt(jogo.gols_casa)||0}x${parseInt(jogo.gols_fora)||0}`;
       if (estado.ultimoPlacar && estado.ultimoPlacar !== placarAtual) {
         await atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje);
       }
       estado.ultimoPlacar = placarAtual;
 
-      // Salvar placar HT — usa os campos diretos da API (gols_casa_ht/gols_fora_ht).
-      // Esses campos existem desde o início do jogo (zerados), então só os fixamos
-      // quando o jogo já estiver de fato no intervalo ou depois dele.
       if (jogo.tempo === 'Intervalo' && !estado.htPlacar) {
         const htCasaApi = parseInt(jogo.gols_casa_ht);
         const htForaApi = parseInt(jogo.gols_fora_ht);
         estado.htPlacar = (!isNaN(htCasaApi) && !isNaN(htForaApi))
           ? `${htCasaApi}x${htForaApi}`
-          : placarAtual; // fallback caso a API não envie os campos _ht nesse jogo
+          : placarAtual;
         estado.passouHT = true;
         console.log(`[HT] ${jogoId} → HT: ${estado.htPlacar}`);
       }
-      // Se por algum motivo a API NUNCA reportar 'Intervalo' para esse jogo
-      // (caso raro, ex: falha pontual de dados), usamos um threshold bem alto
-      // (60min) como rede de segurança — isso nunca vai capturar acréscimos
-      // normais do 1T (que ficam tipicamente entre 45-50min), evitando o bug
-      // antigo de contar acréscimos como 2T.
       if (!estado.passouHT && (parseInt(jogo.tempo) || 0) > 60) {
         estado.passouHT = true;
         console.log(`[HT-FORÇADO] ${jogoId} → API nunca reportou Intervalo, forçando passouHT no minuto ${jogo.tempo}`);
@@ -787,18 +670,11 @@ async function monitorarLive() {
         }
       }
 
-      // Marca o minuto exato em que o 2T começou de verdade (primeiro tick
-      // numérico após o intervalo) — usado pelos indicadores próprios
-      // (Pressão Gonza) pra saber quando usar resumo_pressao['2_tempo']
-      // (primeiros 10min do 2T) vs ult_10min (depois disso).
       if (estado.passouHT && estado.minutoInicio2T == null && jogo.tempo !== 'Intervalo') {
         const tNumInicio2T = parseInt(jogo.tempo) || 0;
         if (tNumInicio2T > 0) estado.minutoInicio2T = tNumInicio2T;
       }
 
-      // ── Detectar pênaltis/prorrogação e congelar placar do tempo normal ──
-      // NOTA: o campo 'periodo' não existe na API real — detecção feita só por
-      // texto em 'tempo' (ex: pode vir como 'Penaltis', 'Prorrogação' em alguns casos).
       const tempoStr    = String(jogo.tempo   || '').toLowerCase();
       const ehPenaltisOuProrrogacao =
         tempoStr.includes('penalt') || tempoStr.includes('prorrog');
@@ -806,8 +682,6 @@ async function monitorarLive() {
         estado.placarTempoNormal = estado.ultimoPlacarTempoNormalCandidato || placarAtual;
         console.log(`[PRORROGAÇÃO/PÊNALTIS] ${jogoId} → congelando placar do tempo normal: ${estado.placarTempoNormal}`);
       }
-      // Enquanto ainda não entrou em prorrogação/pênaltis, guarda o último placar visto
-      // (cobre o caso de a API já pular direto pro placar de pênaltis sem avisar)
       if (!ehPenaltisOuProrrogacao && !estado.placarTempoNormal) {
         estado.ultimoPlacarTempoNormalCandidato = placarAtual;
       }
@@ -818,16 +692,12 @@ async function monitorarLive() {
       await processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje);
     }
 
-    // Persiste o estado live a cada ciclo — é o que permite sobreviver a um
-    // restart do Railway sem perder mensagens ativas, placar do HT, etc.
     salvarArquivo(ESTADO_FILE, estadoLive);
   } catch(e) {
     console.error('[LIVE] Erro:', e.message);
   }
 }
 
-// ── Montar mensagem de alerta ─────────────────────────────────
-// Linha fixa = disparo. Linha editável = placar atual / resultado.
 function montarMsgAlerta(display, jogo, tempo, placarAlerta, placarAtual, links, statusLinha = null) {
   const fixo    = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempo}' · 📊 ${placarAlerta}`;
   const sep     = '\n─────────────────';
@@ -837,7 +707,6 @@ function montarMsgAlerta(display, jogo, tempo, placarAlerta, placarAtual, links,
   return fixo + sep + editavel + links;
 }
 
-// ── Atualizar placar nas mensagens ativas ─────────────────────
 async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
   const tempo = jogo.tempo === 'Intervalo' ? 'HT' : (parseInt(jogo.tempo) || 0);
   const links = linksExchanges(estado.jogo?.urls_exchanges || {});
@@ -845,14 +714,9 @@ async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
 
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
-    // Estratégias do Grupo 1 têm sua própria máquina de estados — não
-    // sobrescrever aqui, ela é tratada em processarEstadoGrupo1.
     if (info.grupo1Status) continue;
 
     if (info.indicadorTipo) {
-      // Mensagens dos indicadores próprios (Pressão Gonza/Jogo Aberto):
-      // mantém a linha do indicador (ou o último status, se já evoluiu —
-      // ex: "oponente reagiu") e só atualiza o placar/minuto ao redor dela.
       const extras = (info.linhasExtras || []).join('\n');
       const conteudo = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '');
       const novoTexto = info.formatoSimplificado
@@ -877,15 +741,10 @@ async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
   }
 }
 
-// ── INDICADOR DO GONZA — universal, em qualquer jogo monitorado ──
-// Sempre que a condição bater (raio dos dois times APÓS o último gol, índice
-// >=15 ambos, eficiência um>=0.20 outro>0.10), adiciona uma linha extra em
-// TODAS as mensagens ativas daquele jogo — sem nunca remover o que já tinha.
 async function processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje) {
   if (jogo.tempo === 'Intervalo') return;
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
-  // Só faz sentido em jogo empatado (qualquer placar X-X)
   if (golsCasa !== golsFora) return;
 
   const jaPassouHT = !!estado.passouHT;
@@ -894,7 +753,6 @@ async function processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje) {
 
   if (!checaIndicadorGonza(jogo, estado, periodoAtual)) return;
 
-  // Já marcamos esse período pra esse jogo? Não repete.
   const chaveIndicador = `indicadorGonza_${periodoAtual}`;
   if (estado[chaveIndicador]) return;
   estado[chaveIndicador] = true;
@@ -912,15 +770,6 @@ async function processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje) {
   }
 }
 
-
-// ════════════════════════════════════════════════════════════════
-// ── ORQUESTRADOR — PRESSÃO GONZA & JOGO ABERTO ──────────────────
-// ════════════════════════════════════════════════════════════════
-
-// Estratégias de LADO (precisam que um time específico marque e o outro
-// não) onde os indicadores próprios se aplicam. Ficam de fora: corr_lay_fav
-// e corr_lay_zebra (janela de só 5min do próprio jogo, lógica legada
-// diferente — não dá pra formar uma janela de momentum de 5min ali).
 const LADO_STRATS_PROPRIOS = [
   'favorito_ht_gonza', 'lay_away_manu', 'lay_manu4', 'back_gonza_xg',
   'lay_xg',
@@ -928,33 +777,21 @@ const LADO_STRATS_PROPRIOS = [
   'lay_gol_visit', 'lay_gol_mand',
 ];
 
-// Estas 6 só existem (pela definição original, raio antigo) até o minuto 20
-// — entrada por momento de fragilidade bem no início do jogo. O indicador
-// próprio respeita o mesmo limite: não abre entrada nova depois do min 20,
-// e também não participa da conversão pra Gol Limite no 2T (não faz sentido
-// pra uma estratégia que é, por definição, só sobre os primeiros 20min).
 const LADO_STRATS_LIMITE_MIN20 = [
   'lay_0x1_ia', 'lay_1x0_ia', 'lay_gol_visit', 'lay_gol_mand',
 ];
 
-// Estratégias de GOLS — Pressão Gonza aplicado a favor do favorito do jogo
-// + Jogo Aberto como gatilho extra, somado ao que já existe (raio antigo).
 const GOLS_STRATS_PROPRIOS = [
   'over05', 'over15_ia', 'ambas_marcam', 'ambas_marcam_xg',
   'am_xg', 'felipe_over15', 'gol_no_final', 'over05_ht',
 ];
 
-// over05_ht só existe no 1T (por definição — é "HT", antes do intervalo).
-// gol_no_final só existe no 2T, até o min 80 (mesma janela do raio antigo).
-// As demais (over05, Grupo 5/6) valem nos dois períodos.
 function periodoValidoParaGols(stratKey, is1T, is2T, tempoNum) {
   if (stratKey === 'over05_ht')   return is1T;
   if (stratKey === 'gol_no_final') return is2T && tempoNum <= 80;
   return true;
 }
 
-// Resolve qual lado é o "nosso" pra cada estratégia de lado (mesma lógica
-// já usada em processarAlertasLive/processarEstadoGrupo1 pra cada uma).
 function getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo) {
   switch (stratKey) {
     case 'favorito_ht_gonza':
@@ -976,10 +813,6 @@ function getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo) {
   }
 }
 
-// Dispara um alerta novo usando os indicadores próprios (não duplica se já
-// existir alerta dessa estratégia por qualquer caminho — raio antigo ou
-// indicador novo). registrarComoEntradaReal=false → só observação, ainda
-// não conta no resultado final (caso do "Pressão Gonza sem eficiência").
 async function dispararIndicadorProprio(jogo, estado, stratKey, linhaIndicador, indicadorTipo, registrarComoEntradaReal, formatoSimplificado = false) {
   if (estado.msgIds[stratKey]) return false;
 
@@ -997,9 +830,6 @@ async function dispararIndicadorProprio(jogo, estado, stratKey, linhaIndicador, 
 
   const ids = await sendTelegram(textoCompleto);
 
-  // Marca de uma vez o "slot" do período em que essa entrada aconteceu,
-  // pra reconfirmação (checarReconfirmacao) não duplicar a mesma janela
-  // como se fosse uma reconfirmação nova no mesmo período.
   const slotEntrada = estado.passouHT ? '2T' : '1T';
   const notados = { pg1T: false, pg2T: false, ja1T: false, ja2T: false };
   if (indicadorTipo === 'pressao_completo' || indicadorTipo === 'pressao_sem_eficiencia') notados['pg' + slotEntrada] = true;
@@ -1019,14 +849,10 @@ async function dispararIndicadorProprio(jogo, estado, stratKey, linhaIndicador, 
   return true;
 }
 
-// Monitora uma estratégia de LADO já alertada (por qualquer caminho):
-// 1) upgrade de "sem eficiência" pra "completo" (registra a entrada real
-//    só nesse momento); 2) reação do oponente (aviso de saída/proteção);
-// 3) cartão vermelho nosso (saída imediata).
 async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
   const info = estado.msgIds[stratKey];
   if (!info || !info.ids?.length) return;
-  if (jogo.tempo === 'Intervalo') return; // não recalcula janela de momentum no intervalo
+  if (jogo.tempo === 'Intervalo') return;
   if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
       info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') return;
 
@@ -1034,7 +860,6 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
   const links    = linksExchanges(jogo.urls_exchanges || {});
   const fixo     = `${STRAT_DISPLAY[stratKey] || stratKey}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
 
-  // 1) Upgrade "sem eficiência" → "completo" (só se foi nosso indicador que disparou)
   if (info.indicadorTipo === 'pressao_sem_eficiencia' && !info.pressaoConfirmada) {
     const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
     if (pg && pg.tipo === 'completo') {
@@ -1047,12 +872,11 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
       info.ultimoStatusTexto = statusTexto;
       await editTelegram(info.ids, `${fixo}\n${statusTexto}${links}`);
     }
-    return; // não checa saída no mesmo ciclo em que acabou de confirmar (ou ainda não confirmou)
+    return;
   }
 
-  if (!ladoAlvo) return; // estratégia de gols não tem "saída" pra monitorar aqui
+  if (!ladoAlvo) return;
 
-  // 2) Reação do oponente — aviso de saída/proteção (só 1x por jogo)
   if (!info.saidaAvisada) {
     const ladoOp  = ladoOposto(ladoAlvo);
     const reacao  = checaReacaoOponente(jogo, ladoOp, tempoNum);
@@ -1074,7 +898,6 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
     }
   }
 
-  // 3) Cartão vermelho do nosso lado — saída imediata, sempre
   if (!info.cartaoVermelhoAvisado) {
     const vermelho = (jogo.eventos || []).find(e => e.tipo_evento === 'cartao_vermelho' && e.lado === ladoAlvo);
     if (vermelho) {
@@ -1086,16 +909,11 @@ async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
   }
 }
 
-// Reconfirmação dos indicadores — vale pra QUALQUER estratégia já alertada
-// (lado ou gols, por raio antigo ou pelos nossos indicadores). No máximo
-// 1 nota por indicador (Pressão Gonza / Jogo Aberto) POR PERÍODO (1T/2T) —
-// ou seja, no máximo 2 notas de cada um no jogo inteiro. Nunca duplica
-// alerta nem re-registra pendente — só acrescenta uma linha na mensagem.
 async function checarReconfirmacao(jogo, estado, stratKey, ladoOuFavorito, hoje) {
   const info = estado.msgIds[stratKey];
   if (!info?.ids?.length) return;
   if (jogo.tempo === 'Intervalo') return;
-  if (info.golLimiteConversao) return; // mensagem terminal/simplificada, sem reconfirmação
+  if (info.golLimiteConversao) return;
   if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
       info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') return;
 
@@ -1150,7 +968,6 @@ async function checarReconfirmacao(jogo, estado, stratKey, ladoOuFavorito, hoje)
   }
 }
 
-// Orquestrador principal — chamado a cada ciclo (90s) pra todo jogo live.
 async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
   if (jogo.tempo === 'Intervalo' || jogo.tempo === 'Encerrado') return;
   const tempoNum   = parseInt(jogo.tempo) || 0;
@@ -1164,17 +981,14 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
-  // ── ESTRATÉGIAS DE LADO ──────────────────────────────────────
   for (const stratKey of LADO_STRATS_PROPRIOS) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     const ladoAlvo = getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo);
-    if (!ladoAlvo) continue; // ex: lay_xg sem lay_team definido ainda
+    if (!ladoAlvo) continue;
 
     if (!estado.msgIds[stratKey]) {
       const limitadaMin20 = LADO_STRATS_LIMITE_MIN20.includes(stratKey);
       if (is1T && (!limitadaMin20 || tempoNum <= 20)) {
-        // 1º Tempo: dispara normal (Pressão Gonza). Jogo Aberto aqui é só
-        // sinal de atenção pra quem JÁ entrou — não dispara entrada nova.
         const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
         if (pg) {
           if (pg.tipo === 'completo') {
@@ -1188,10 +1002,6 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
           }
         }
       } else if (is2T && !limitadaMin20) {
-        // 2º Tempo: se qualquer um dos dois indicadores bater, não entra
-        // mais em lado — converte direto pra Gol Limite (mensagem simples).
-        // (As 6 estratégias "até min 20" ficam de fora dessa conversão —
-        // são definidas só pelos primeiros 20min, não tem Gol Limite pra elas.)
         const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
         const ja = checaJogoAberto(jogo, tempoNum);
         if (pg && pg.tipo === 'completo') {
@@ -1219,29 +1029,20 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
         }
       }
     } else {
-      // Já alertado (por qualquer caminho) — monitora upgrade/saída/cartão
-      // + reconfirmação por período (máx 1 por indicador por tempo).
       await atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo);
       await checarReconfirmacao(jogo, estado, stratKey, ladoAlvo, hoje);
     }
   }
 
-  // ── ESTRATÉGIAS DE GOLS ───────────────────────────────────────
   for (const stratKey of GOLS_STRATS_PROPRIOS) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     if (!periodoValidoParaGols(stratKey, is1T, is2T, tempoNum)) continue;
 
     if (estado.msgIds[stratKey]) {
-      // Já alertado (raio antigo ou nosso indicador) — reconfirmação por
-      // período (máx 1 por indicador por tempo), igual ao lado.
       await checarReconfirmacao(jogo, estado, stratKey, favorito, hoje);
       continue;
     }
 
-    // Gol no Final é simétrico por definição (índice dos dois lados,
-    // eficiência de QUALQUER um deles) — então o Pressão Gonza também
-    // checa os dois lados aqui, não só no favorito. As outras estratégias
-    // de gols continuam só a favor do favorito, como definido.
     const ladoZebra  = ladoOposto(favorito);
     const pgFavorito = checaPressaoGonza(jogo, estado, favorito, tempoNum);
     const pgZebra    = (stratKey === 'gol_no_final') ? checaPressaoGonza(jogo, estado, ladoZebra, tempoNum) : null;
@@ -1272,14 +1073,6 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
   }
 }
 
-// Estados possíveis (info.grupo1Status):
-//   null/undefined → ainda não tomou gol, monitorando normalmente
-//   'green'        → mandante marcou primeiro, encerrado
-//   'atencao'      → visitante na frente, avaliando reação até o min 60
-//   'reacao'       → reação confirmada, considerar lay contra visitante
-//   'red'          → chegou no min 60 sem reação, encerrado em RED
-//   'red_reacao'   → depois do RED, reação ainda confirmou (Gol Limite)
-//   'red_gonza'    → depois do RED, Indicador do Gonza apareceu (Gol Limite)
 const GRUPO1_STRATS = ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg','lay_xg'];
 
 async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
@@ -1294,9 +1087,8 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
   for (const stratKey of GRUPO1_STRATS) {
     const info = estado.msgIds[stratKey];
     if (!info || !info.ids?.length) continue;
-    if (info.grupo1Status === 'green' || info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') continue; // já fechado
+    if (info.grupo1Status === 'green' || info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') continue;
 
-    // Determina o lado alvo (mandante fixo, ou lay_team manual)
     let alvo = 'casa';
     if (stratKey === 'lay_xg') {
       const pendLayXg = pendentes.find(p => p.condicao === 'lay_xg' && p.data === hoje &&
@@ -1309,14 +1101,11 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     const display = STRAT_DISPLAY[stratKey] || stratKey;
     const fixo = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
 
-    // Estado inicial: ainda sem gol decidido
     if (!info.grupo1Status) {
       if (alvoGols > contraGols) {
-        // Alvo marcou primeiro → GREEN, encerra
         info.grupo1Status = 'green';
         await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${links}`);
       } else if (contraGols > alvoGols) {
-        // Time contra marcou → modo atenção
         info.grupo1Status = 'atencao';
         info.minutoGolContra = tempo;
         await editTelegram(info.ids, `${fixo}\n⚠️ Time contra na frente (${golsCasa}x${golsFora}, min ${tempo}) — avaliar reação${links}`);
@@ -1324,7 +1113,6 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
       continue;
     }
 
-    // Estado "atenção" — monitora reação até o minuto 60
     if (info.grupo1Status === 'atencao') {
       if (alvoGols > contraGols) {
         info.grupo1Status = 'green';
@@ -1336,7 +1124,6 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
         await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60) — sem reação confirmada${links}`);
         continue;
       }
-      // Checa reação (últimos 10min)
       if (checaCondicaoReacao(jogo, alvo)) {
         const raioNovoAlvo = (jogo.eventos || []).some(e =>
           e.tipo_evento === 'raio' && e.lado === alvo && e.minuto > (info.minutoGolContra || 0)
@@ -1349,10 +1136,8 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
       continue;
     }
 
-    // Estado "reacao" — já confirmado, só falta o fim de jogo decidir (tratado em processarFimDeJogo)
     if (info.grupo1Status === 'reacao') continue;
 
-    // Estado "red" — depois do RED no min 60, monitora reação atrasada ou Indicador do Gonza
     if (info.grupo1Status === 'red') {
       const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
       if (checaCondicaoReacao(jogo, alvo)) {
@@ -1373,13 +1158,10 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
   }
 }
 
-// ── Alertas live ──────────────────────────────────────────────
 async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const tempoNum = parseInt(jogo.tempo) || 0;
   const ehIntervalo = jogo.tempo === 'Intervalo';
-  // tempo: usado nas condições numéricas (<=20, etc) — fica 0 no intervalo, igual antes
   const tempo    = tempoNum;
-  // tempoDisplay: usado só para exibição na mensagem — mostra "HT" no intervalo
   const tempoDisplay = ehIntervalo ? 'HT' : tempoNum;
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
@@ -1392,21 +1174,11 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const oddFora  = parseFloat(jogo.odd_atual_fora || 0);
 
   const isHT  = jogo.tempo === 'Intervalo';
-  // CORREÇÃO CRÍTICA: o campo 'periodo' NÃO EXISTE na API real (confirmado em
-  // teste ao vivo em 22/06/2026) — a lógica antiga dependia de um campo que
-  // nunca chegou a vir preenchido, causando bugs silenciosos (ex: Gol no Final
-  // nunca disparando). Agora usamos apenas o histórico do próprio jogo
-  // (estado.passouHT, setado quando detectamos 'Intervalo' ou tempo > 45min)
-  // como sinal confiável de que estamos no 2º tempo.
   const jaPassouHT = !!estado.passouHT;
   const is2T = !isHT && jaPassouHT;
   const is1T = !isHT && !jaPassouHT;
 
   const evNovos   = jogo.eventos || [];
-  // CORREÇÃO: antes contava QUALQUER raio do jogo inteiro (cumulativo), então
-  // um raio do 1T ficava "travado" como true pro resto do jogo todo, mesmo
-  // já estando no 2T há muito tempo. Agora só conta raio do período ATUAL
-  // (mesma lógica já usada com sucesso em raiosCasa2T/raiosFora2T abaixo).
   const periodoAtualRaio = jaPassouHT ? '2_tempo' : '1_tempo';
   const raiosCasa = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa' && e.periodo === periodoAtualRaio);
   const raiosFora = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'fora' && e.periodo === periodoAtualRaio);
@@ -1416,9 +1188,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   const raioVisit = raiosFora.length > 0;
   const temRaio   = raioMand || raioVisit;
 
-  // Raio confirmado no 2º tempo REAL — usa o campo 'periodo' de cada evento
-  // individual (existe e é confiável), em vez de inferir do estado geral do
-  // jogo. Isso garante precisão mesmo durante os acréscimos do 1T.
   const raiosCasa2T = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa' && e.periodo === '2_tempo');
   const raiosFora2T = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'fora' && e.periodo === '2_tempo');
   const temRaio2T    = raiosCasa2T.length > 0 || raiosFora2T.length > 0;
@@ -1436,10 +1205,7 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
-  // ── alertar: 1x por stratKey (lay ao placar: só 1 por jogo) ──
-  // Para lay ao placar, stratKey = stratBase (sem sufixo de condição)
   async function alertar(stratKey, dica, stratRegistrar = null) {
-    // Já alertou para essa strat nesse jogo? Não dispara de novo.
     if (estado.msgIds[stratKey]) return;
 
     const display = STRAT_DISPLAY[stratKey] || stratKey;
@@ -1467,11 +1233,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // ── SELEÇÕES IA ───────────────────────────────────────────
-
-  // 3. GOL NO FINAL — raio confirmado no 2T + índices (pressão/eficiência) do
-  // Indicador do Gonza nos últimos 10min. Vale na hora do raio ou depois dele
-  // (enquanto o gol não saiu), até no máximo o minuto 80.
   if (pendJogo.some(p => p.strat === 'gol_no_final')) {
     if (temRaio2T && tempo <= 80) {
       const ind = getIndicadores(jogo, 'ult_10min');
@@ -1482,7 +1243,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 4. OVER 0.5 HT
   if (pendJogo.some(p => p.strat === 'over05_ht')) {
     if (is1T && total === 0 && temRaio)
       await alertar('over05_ht', '0x0 + Raio no 1T!', 'over05_ht_live');
@@ -1492,25 +1252,17 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
       await alertar('over15_ht', '1 gol + Raio antes min 20!', 'over15_ht_live');
   }
 
-  // ── GRUPO 5/6 — OVER GOLS E AMBAS MARCAM (lógica unificada) ──
-  // 0x0 até min 60: usa o Indicador do Gonza completo (raio dos 2 + índices)
-  // 1x0/0x1: precisa do raio do time que está atrás + índices do Indicador do Gonza
   function processarGrupo5e6(stratKey, nomeDisplay) {
     return (async () => {
       if (!pendJogo.some(p => p.strat === stratKey)) return;
       if (isHT) return;
       const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
 
-      // 1º TEMPO + 0x0 → exige Indicador completo (2 raios, período inteiro do 1T).
-      // Isso confirma que o jogo está realmente aberto pelos dois lados antes de entrar.
       if (total === 0 && periodoAtual === '1_tempo' && checaIndicadorGonza(jogo, estado, periodoAtual)) {
         await alertar(stratKey, `Indicador do Gonza 🪗 (1T) — jogo aberto!`, `${stratKey}_live`);
         return;
       }
 
-      // QUALQUER OUTRA SITUAÇÃO (já saiu gol, OU 2T mesmo com 0x0) → só 1 raio
-      // (de qualquer time) + esse time precisa ter índice>=20 e eficiência>=0.20
-      // nos últimos 10min — sem importar o time da frente, pois qualquer gol qualifica.
       const raioCasaAgora = raioMand;
       const raioForaAgora = raioVisit;
       if (raioCasaAgora || raioForaAgora) {
@@ -1530,8 +1282,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   await processarGrupo5e6('am_xg', 'Ambos xG Pro');
   await processarGrupo5e6('felipe_over15', 'Felipe Over 1.5');
 
-  // 8. LAY 0x1 (IA) — 1 alerta por jogo, até min 20, lay contra visitante
-  // (condição espelhada do Grupo 1: mandante precisa estar dominando)
   if (pendJogo.some(p => p.strat === 'lay_0x1_ia')) {
     if (tempo <= 20 && !isHT) {
       const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
@@ -1542,8 +1292,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 9. LAY 1x0 (IA) — 1 alerta por jogo, até min 20, lay contra mandante
-  // (condição espelhada do Grupo 1: visitante precisa estar dominando)
   if (pendJogo.some(p => p.strat === 'lay_1x0_ia')) {
     if (tempo <= 20 && !isHT) {
       const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
@@ -1554,7 +1302,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 10. LAY GOLEADA VISITANTE — até min 20, lay contra visitante (mandante dominando)
   if (pendJogo.some(p => p.strat === 'lay_gol_visit')) {
     if (tempo <= 20 && !isHT) {
       const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
@@ -1563,7 +1310,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // 11. LAY GOLEADA MANDANTE — até min 20, lay contra mandante (visitante dominando)
   if (pendJogo.some(p => p.strat === 'lay_gol_mand')) {
     if (tempo <= 20 && !isHT) {
       const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
@@ -1572,9 +1318,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // ── FILTROS ───────────────────────────────────────────────
-
-  // ── GRUPO 1 — fixos no mandante: FAVORITO HT GONZA / LAY AWAY MANU / LAY MANU 4 / BACK GONZA xG
   for (const sf of ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg']) {
     if (!pendJogo.some(p => p.strat === sf)) continue;
     if (isHT) continue;
@@ -1590,13 +1333,10 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // LAY xG — usa o time indicado manualmente no index (lay_team: 'home' ou 'away')
-  // como o lado de MAIOR xG a ser layado (mesma lógica do Grupo 1, aplicada
-  // ao lado indicado, podendo ser casa ou fora dependendo do jogo)
   if (pendJogo.some(p => p.strat === 'lay_xg')) {
     const pendLayXg = pendJogo.find(p => p.strat === 'lay_xg');
     const layHome   = pendLayXg?.lay_team === 'home';
-    const ladoAlvo  = layHome ? 'casa' : 'fora'; // lado de maior xG, que será layado
+    const ladoAlvo  = layHome ? 'casa' : 'fora';
     const placarAlvoPerdendo = layHome ? (golsFora > golsCasa) : (golsCasa > golsFora);
     const raioAlvo  = layHome ? raioMand : raioVisit;
 
@@ -1612,9 +1352,6 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // ATOLADA MASTER — versão nova baseada no Indicador do Gonza, mas com
-  // exigência mais rígida: eficiência >= 0.20 em AMBOS os times (não só um),
-  // jogo 0x0. Só para jogos do nosso card (AM xG pendente).
   if (pendJogo.some(p => p.strat === 'am_xg')) {
     if (!isHT && total === 0) {
       const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
@@ -1626,19 +1363,14 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // ── OVER 0,5 GONZA — 7 cenários derivados de mercado ──────────
   if (pendJogo.some(p => p.strat === 'over05')) {
     if (isHT) {
-      // Intervalo: lembrete simples (mantido como estava)
       if (total === 0 && tevRaioMand)
         await alertar('over05', 'Intervalo 0x0 · Verificar CHUVA DE GOLS no 2º tempo', 'over05_live');
     } else if (!jaPassouHT) {
-      // ── 1º TEMPO, 0x0, até min 20 → exige Indicador completo (2 raios) ──
       if (tempo <= 20 && total === 0 && checaIndicadorGonza(jogo, estado, '1_tempo')) {
         await alertar('over05', 'Indicador do Gonza 🪗 (1T, até min 20) — entrar Over 1,5 HT!', 'over05_live');
       } else if (raioMand || raioVisit) {
-        // Já saiu gol (total>=1), OU passou do min 20 ainda 0x0 → só 1 raio +
-        // índice>=20/eficiência>=0.20 (últ. 10min) do time do raio
         const ind = getIndicadores(jogo, 'ult_10min');
         const ladoDoRaio = raioMand ? 'casa' : 'fora';
         const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
@@ -1647,17 +1379,12 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
           await alertar('over05', `${placar} + Raio (últ. 10min) — entrar Over 1,5 HT / Over 0,5 HT!`, 'over05_live');
       }
     } else {
-      // ── 2º TEMPO — só 1 raio + índice>=20/eficiência>=0.20 (últ. 10min) ──
-      // (mesmo com jogo ainda 0x0 no 2T, não exige mais o Indicador completo)
-      // Limite de minuto 80 — depois disso não há tempo hábil pra mercado de over.
       if (tempo <= 80 && (raioMand || raioVisit)) {
         const ind = getIndicadores(jogo, 'ult_10min');
         const ladoDoRaio = raioMand ? 'casa' : 'fora';
         const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
         const efRaio  = ladoDoRaio === 'casa' ? ind.efCasa  : ind.efFora;
         if (idxRaio >= 20 && efRaio >= 0.20) {
-          // Até o min 60: "over à frente" = total + 1,5 (antecipa +1 gol).
-          // Depois do min 60 (Gol Limite): só precisa de +1 gol = total + 0,5.
           const golLimite = tempo > 60;
           const mercado = `Over ${(total + (golLimite ? 0.5 : 1.5)).toFixed(1).replace('.', ',')}`;
           const limitTexto = golLimite ? ' (Gol Limite)' : '';
@@ -1668,16 +1395,11 @@ async function processarAlertasLive(jogo, estado, jogoId, hoje) {
   }
 }
 
-// ── FIM DE JOGO ───────────────────────────────────────────────
 async function processarFimDeJogo(jogoId, estado, hoje) {
   console.log(`[FIM] ${jogoId}`);
   const jogo = estado.jogo;
   if (!jogo) return;
 
-  // Evitar reprocessar/reenviar "FIM DE JOGO" para jogos que já foram resolvidos
-  // antes (ex: servidor reiniciou e a API ainda retorna o jogo por um tempo).
-  // Se já existe pelo menos um pendente desse jogo com resultado != 'pendente',
-  // significa que esse jogo já foi processado anteriormente.
   const jaResolvidoAntes = pendentes.some(p =>
     p.data === hoje &&
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`) &&
@@ -1688,8 +1410,6 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     return;
   }
 
-  // Se detectamos pênaltis/prorrogação, usar o placar do tempo normal congelado
-  // para o cálculo de resultado. O placar real (com pênaltis) ainda é exibido no FT.
   const golsCasaApi = parseInt(jogo.gols_casa) || 0;
   const golsForaApi = parseInt(jogo.gols_fora) || 0;
   const placarFTApi = `${golsCasaApi}x${golsForaApi}`;
@@ -1705,9 +1425,8 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
       console.log(`[FIM] ${jogoId} → placar API: ${placarFTApi} (com pênaltis/prorrogação) · usando tempo normal: ${placarParaCalculo} para cálculo`);
     }
   }
-  const placarFT = placarFTApi; // exibido nas mensagens (placar real do jogo)
+  const placarFT = placarFTApi;
 
-  // Extrair placar do HT (necessário para estratégias como over05 que dependem do HT)
   let htH = 0, htA = 0;
   if (estado.htPlacar) {
     const [ph, pa] = estado.htPlacar.split('x').map(Number);
@@ -1721,13 +1440,9 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
-  // Resolver pendentes — usa placarParaCalculo (tempo normal) para acerto/erro,
-  // e htH/htA reais para estratégias que dependem do placar do intervalo
   for (const p of pendJogo) {
     p.final  = placarFT;
     p.ht     = estado.htPlacar || '';
-    // Conversão pra Gol Limite (indicadores próprios no 2T, estratégia de
-    // lado virou mercado de gols): qualquer gol a partir da conversão = green.
     if (p.golLimiteConversao) {
       const [pcConv, pfConv] = (p.placarNaConversao || '0x0').split('x').map(Number);
       const totalNaConversao = (pcConv||0) + (pfConv||0);
@@ -1739,12 +1454,9 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   }
   salvarArquivo(PEND_FILE, pendentes);
 
-  // Editar todas as mensagens ativas com resultado
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
 
-    // Estratégias do Grupo 1 com estado já fechado pela própria máquina de
-    // estados (green/red/red_reacao/red_gonza) não devem ser sobrescritas aqui.
     if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
         info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') continue;
 
@@ -1755,9 +1467,6 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     });
 
     let res;
-    // Pressão Gonza "sem eficiência" que NUNCA confirmou (sem pendente
-    // registrado) — não conta como entrada de verdade, sempre "não entrou",
-    // independente do que a estratégia normal diria.
     if (info.indicadorTipo === 'pressao_sem_eficiencia' && !info.pressaoConfirmada) {
       res = 'nao_entra';
     } else {
@@ -1770,15 +1479,31 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     else                        emoji = '⏳ AVALIAR MANUALMENTE';
     const display = STRAT_DISPLAY[stratKey] || stratKey;
 
-    // Linha fixa mantém tempo e placar do alerta
-    const textoFinal = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────\n${emoji} · FT: ${placarFT}${links}`;
+    // 20/07 — preserva todo o histórico já acumulado na mensagem (Pressão
+    // Gonza, reconfirmações, Jogo Aberto, avisos de reação/cartão) em vez de
+    // reescrever do zero. Assim dá pra ver depois, no jogo já encerrado, se o
+    // green/red veio de um indicador próprio ou só do raio comum do futats.
+    // Alertas que nunca tiveram nada acumulado (só raio puro) ficam iguais a
+    // antes — não tem nada extra pra preservar.
+    let corpoAcumulado = '';
+    if (info.indicadorTipo) {
+      const extras = (info.linhasExtras || []).join('\n');
+      corpoAcumulado = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '');
+    } else if (info.ultimoStatusTexto) {
+      corpoAcumulado = info.ultimoStatusTexto;
+    }
+
+    const htTexto = estado.htPlacar || '-';
+    const linhaResultado = `${emoji} · HT: ${htTexto} · FT: ${placarFT}`;
+    const corpo = corpoAcumulado ? `${corpoAcumulado}\n\n${linhaResultado}` : linhaResultado;
+
+    const textoFinal = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────\n${corpo}${links}`;
     await editTelegram(info.ids, textoFinal);
   }
 
   await sendTelegram(`🏁 <b>FIM DE JOGO</b>\n⚽ ${jogo.mandante} x ${jogo.visitante}\n📊 FT: ${placarFT}`);
 }
 
-// ── AGENDADOR BRT ─────────────────────────────────────────────
 function agendarHoraBRT(hora, minuto, callback) {
   function proximaExecucao() {
     const agora  = agoraBRT();
@@ -1795,7 +1520,6 @@ function agendarHoraBRT(hora, minuto, callback) {
   proximaExecucao();
 }
 
-// ── ROUTES ────────────────────────────────────────────────────
 app.get('/', (req, res) => res.json({
   status: 'ok', version: 'server_45',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
@@ -1815,10 +1539,6 @@ app.post('/pendentes', (req, res) => {
   res.json({ ok: true, total: pendentes.length });
 });
 
-// ── /momentum-status — consulta visual (não altera nada, só lê) ─
-// Mostra, pra cada jogo live que tenha alguma estratégia nossa pendente,
-// as sequências de momentum (min/valores/média/eventos) e a contagem de
-// chutes por tipo, separado por 1º e 2º tempo, dos dois lados.
 const TIPO_EVENTO_LABEL_MS = {
   chute_no_gol: 'chute no gol', chute_para_fora: 'chute pra fora',
   chute_bloqueado: 'bloqueado', chute_na_trave: 'na trave',
@@ -1832,11 +1552,6 @@ function msEventosDaJanela(jogo, lado, minutos) {
   return evs.map(e => `${e.minuto}' ${TIPO_EVENTO_LABEL_MS[e.tipo_evento] || e.tipo_evento}`).join(', ');
 }
 
-// Dentro de uma sequência (já "limpa" por definição), varre todas as
-// janelas de 5min-calendário possíveis e marca as que batem o piso do
-// Pressão Gonza (média >=136) — é a mesma régua usada nos alertas,
-// só que aqui é puramente visual (não confere chute no gol/eficiência,
-// só o tamanho do momentum, pra dar uma visão rápida de onde "bateria").
 function msJanelasDestaque5min(jogo, lado, minutos) {
   if (minutos.length < 5) return [];
   const campo  = lado === 'casa' ? 'valor_casa' : 'valor_fora';
@@ -1999,7 +1714,6 @@ app.get('/momentum-status', async (req, res) => {
 
     let jogosRelevantes;
     if (filtroJogo) {
-      // Filtro manual por nome de time (qualquer jogo da live, com ou sem estratégia)
       jogosRelevantes = jogosLive.filter(jogo =>
         jogo.mandante.toLowerCase().includes(filtroJogo) || jogo.visitante.toLowerCase().includes(filtroJogo)
       );
@@ -2007,13 +1721,11 @@ app.get('/momentum-status', async (req, res) => {
         return res.send(msPaginaHTML(`<p class="ms-empty">Nenhum jogo na live agora com "${req.query.jogo}" no nome.</p>`));
       }
     } else if (filtroTodos) {
-      // Todos os jogos da live, com ou sem estratégia pendente
       jogosRelevantes = jogosLive;
       if (!jogosRelevantes.length) {
         return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo na live agora.</p>'));
       }
     } else {
-      // Padrão: só jogos com alguma das nossas estratégias pendente
       const stratsRelevantes = new Set([...LADO_STRATS_PROPRIOS, ...GOLS_STRATS_PROPRIOS]);
       const pendRelevantes = pendentes.filter(p =>
         p.data === hoje && p.result === 'pendente' && stratsRelevantes.has(p.strat)
@@ -2073,9 +1785,6 @@ app.post('/card-agora', async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── /buscar-agora — força a busca das 3 APIs de pré-jogo na hora ──
-// Pra usar depois de marcar uma bolinha nova no futats.com, sem precisar
-// esperar os horários fixos (08:00/12:30/19:00). Só clicar o link no Chrome.
 app.get('/buscar-agora', async (req, res) => {
   try {
     const hoje = dataHoje();
@@ -2103,30 +1812,21 @@ app.get('/buscar-agora', async (req, res) => {
   }
 });
 
-// ── START ─────────────────────────────────────────────────────
 app.listen(PORT, async () => {
   console.log(`FUTATS Server v45b na porta ${PORT}`);
 
-  // Buscar jogos pré-jogo imediatamente ao subir
   await buscarPreJogo();
 
-  // Agendar buscarPreJogo nos horários recomendados pela documentação das APIs:
-  // IA: 7:30-8:30, 12:00-13:00, 18:30-19:30
-  // Filtros: 7:45-8:45, 12:15-13:15, 18:45-19:45
-  // Estratégias: sem horário fixo (a critério) — reaproveitamos os mesmos horários
   agendarHoraBRT(8,  0, buscarPreJogo);
   agendarHoraBRT(12, 30, buscarPreJogo);
   agendarHoraBRT(19, 0, buscarPreJogo);
 
-  // Monitoramento live (recomendação: 1-2 minutos)
   setInterval(monitorarLive, 60 * 1000);
 
-  // Agendar: 08h card matinal · 18h resumo parcial · 00h resumo do dia anterior + card novo dia
   agendarHoraBRT(8,  0, enviarCardMatinal);
   agendarHoraBRT(18, 0, enviarResumoDia);
   agendarHoraBRT(0,  0, enviarResumoECard);
 
-  // Avisos de inicio
   await sendTelegram(
     '🚀 <b>FUTATS Server v45b iniciado!</b>\n' +
     '✅ Horários das APIs ajustados conforme documentação\n' +
@@ -2144,6 +1844,5 @@ app.listen(PORT, async () => {
     '🆕 Reconfirmação por período: qualquer estratégia (lado ou gols) já alertada agora anota até 1x por tempo (1T/2T) quando Pressão Gonza ou Jogo Aberto bate de novo, sem duplicar alerta'
   );
 
-  // Enviar card do dia imediatamente ao subir (apenas o card, não o resumo)
   await enviarCardMatinal();
 });
