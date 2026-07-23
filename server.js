@@ -62,6 +62,7 @@ function formatarBlocoConfiabilidade(conf) {
 // já, sem precisar esperar o próximo evento de placar.
 async function garantirConfiabilidade(jogoId, estado, jogo) {
   if (estado.confiabilidadeBloco) return;
+  if (estado.encerrado) return; // jogo já acabou, mensagens já fechadas — não vale mais a pena buscar
   const agora = Date.now();
   if (estado.confiabilidadeUltimaTentativa && (agora - estado.confiabilidadeUltimaTentativa) < CONFIABILIDADE_RETRY_MS) return;
   estado.confiabilidadeUltimaTentativa = agora;
@@ -70,8 +71,18 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   if (!conf || !conf.encontrado) return;
 
   estado.confiabilidadeBloco = formatarBlocoConfiabilidade(conf);
-  console.log(`[confiabilidade] ${jogoId} → bloco carregado, re-renderizando alertas ativos.`);
+  console.log(`[confiabilidade] ${jogoId} → bloco carregado.`);
 
+  // Se o jogo JÁ terminou (processarFimDeJogo já rodou), as mensagens já
+  // têm o resultado final escrito (GREEN/RED · HT/FT) — não voltar a editar
+  // como se o jogo ainda estivesse rolando, senão apagaria esse resultado.
+  // Nesse caso o bloco só fica guardado (não é usado nesse jogo, já é tarde).
+  if (estado.encerrado) {
+    console.log(`[confiabilidade] ${jogoId} → jogo já encerrado, não re-renderiza (evita sobrescrever o resultado final).`);
+    return;
+  }
+
+  console.log(`[confiabilidade] ${jogoId} → re-renderizando alertas ativos.`);
   const tempo = jogo.tempo === 'Intervalo' ? 'HT' : (parseInt(jogo.tempo) || estado.ultimoMinuto || 0);
   const placarAtual = estado.ultimoPlacar || `${parseInt(jogo.gols_casa) || 0}x${parseInt(jogo.gols_fora) || 0}`;
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
@@ -1565,24 +1576,12 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     else                        emoji = '⏳ AVALIAR MANUALMENTE';
     const display = STRAT_DISPLAY[stratKey] || stratKey;
 
-    // 20/07 — preserva todo o histórico já acumulado na mensagem (Pressão
-    // Gonza, reconfirmações, Jogo Aberto, avisos de reação/cartão) em vez de
-    // reescrever do zero. Assim dá pra ver depois, no jogo já encerrado, se o
-    // green/red veio de um indicador próprio ou só do raio comum do futats.
-    // Alertas que nunca tiveram nada acumulado (só raio puro) ficam iguais a
-    // antes — não tem nada extra pra preservar.
     let corpoAcumulado = '';
     if (info.indicadorTipo) {
-      // Indicadores próprios: a confiabilidade nunca fica "gravada" dentro de
-      // ultimoStatusTexto (é sempre recalculada na hora de renderizar), então
-      // precisa ser anexada aqui explicitamente.
       const extras = (info.linhasExtras || []).join('\n');
       const confExtraFinal = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
       corpoAcumulado = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '') + confExtraFinal;
     } else if (info.ultimoStatusTexto) {
-      // Raio puro: se a confiabilidade já chegou antes do fim do jogo, ela já
-      // está embutida em ultimoStatusTexto (renderizarAlertaAtual/checarReconfirmacao
-      // gravam ela ali) — não precisa (nem deve) ser anexada de novo aqui.
       corpoAcumulado = info.ultimoStatusTexto;
     }
 
