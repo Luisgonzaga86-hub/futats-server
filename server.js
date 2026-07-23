@@ -21,7 +21,7 @@ const FUTATS_BASE  = 'https://gz.futats.com/opta';
 // — cobre o caso de o Luis analisar o jogo manualmente pelo site depois que
 // o alerta live já disparou.
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN;
-const FUTATS_PRELIVE_INTERNAL_URL = process.env.FUTATS_PRELIVE_INTERNAL_URL || 'http://futats-server.railway.internal';
+const FUTATS_PRELIVE_INTERNAL_URL = process.env.FUTATS_PRELIVE_INTERNAL_URL || 'http://futats-server.railway.internal:8080';
 const CONFIABILIDADE_RETRY_MS = 5 * 60 * 1000;
 
 async function buscarConfiabilidadePreLive(jogo) {
