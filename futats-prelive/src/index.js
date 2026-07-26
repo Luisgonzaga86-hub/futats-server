@@ -166,16 +166,27 @@ function extrairTop3Placares(analiseTexto) {
 }
 
 // GET /interno/confiabilidade?mandante=X&visitante=Y
+// Normaliza nome de time antes de comparar — evita falso negativo quando um
+// endpoint da Futats usa apóstrofo reto (') e outro usa tipográfico (' ou ‘),
+// ou quando sobra espaço duplo/nas pontas. Achado em 24/07 (St. Patrick's Ath
+// batendo visualmente igual mas não casando na comparação exata).
+function normalizarNomeTime(nome) {
+  return (nome || '')
+    .replace(/[\u2018\u2019\u02BC`]/g, "'") // aspas tipográficas → apóstrofo reto
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 app.get('/interno/confiabilidade', checarTokenInterno, (req, res) => {
-  const mandante = (req.query.mandante || '').trim();
-  const visitante = (req.query.visitante || '').trim();
+  const mandante = normalizarNomeTime(req.query.mandante);
+  const visitante = normalizarNomeTime(req.query.visitante);
   if (!mandante || !visitante) {
     return res.status(400).json({ error: 'mandante e visitante são obrigatórios' });
   }
 
   const jogo = store
     .getAllGames()
-    .find((j) => j.mandante === mandante && j.visitante === visitante && j.analisado);
+    .find((j) => normalizarNomeTime(j.mandante) === mandante && normalizarNomeTime(j.visitante) === visitante && j.analisado);
 
   if (!jogo) {
     return res.json({ encontrado: false });
