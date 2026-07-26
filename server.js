@@ -68,7 +68,10 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   estado.confiabilidadeUltimaTentativa = agora;
 
   const conf = await buscarConfiabilidadePreLive(jogo);
-  if (!conf || !conf.encontrado) return;
+  if (!conf || !conf.encontrado) {
+    console.log(`[confiabilidade] ${jogoId} → não encontrado ainda (tenta de novo em até ${CONFIABILIDADE_RETRY_MS / 60000}min).`);
+    return;
+  }
 
   estado.confiabilidadeBloco = formatarBlocoConfiabilidade(conf);
   console.log(`[confiabilidade] ${jogoId} → bloco carregado.`);
@@ -83,12 +86,10 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   }
 
   console.log(`[confiabilidade] ${jogoId} → re-renderizando alertas ativos.`);
-  const tempo = jogo.tempo === 'Intervalo' ? 'HT' : (parseInt(jogo.tempo) || estado.ultimoMinuto || 0);
-  const placarAtual = estado.ultimoPlacar || `${parseInt(jogo.gols_casa) || 0}x${parseInt(jogo.gols_fora) || 0}`;
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
     if (info.grupo1Status) continue; // Grupo 1 recebe o bloco na próxima transição de estado
-    await renderizarAlertaAtual(jogo, estado, stratKey, info, placarAtual, tempo);
+    await rerenderizarAlerta(jogo, estado, stratKey, info);
   }
 }
 
@@ -230,49 +231,6 @@ function getIndicadores(jogo, periodo) {
   };
 }
 
-function checaCondicaoGrupo1(jogo, periodo, alvo) {
-  const ind = getIndicadores(jogo, periodo);
-  if (alvo === 'casa') {
-    return ind.pctCasa >= 65 && ind.idxCasa >= 20 && ind.idxFora <= 9 &&
-           ind.efCasa >= 0.17 && ind.efFora <= 0.09;
-  } else {
-    return ind.pctFora >= 65 && ind.idxFora >= 20 && ind.idxCasa <= 9 &&
-           ind.efFora >= 0.17 && ind.efCasa <= 0.09;
-  }
-}
-
-function checaCondicaoReacao(jogo, alvo) {
-  const ind = getIndicadores(jogo, 'ult_10min');
-  if (alvo === 'casa') {
-    return ind.pctCasa >= 70 && ind.idxCasa >= 20 && ind.idxFora <= 7 &&
-           ind.efCasa >= 0.20 && ind.efFora <= 0.07;
-  } else {
-    return ind.pctFora >= 70 && ind.idxFora >= 20 && ind.idxCasa <= 7 &&
-           ind.efFora >= 0.20 && ind.efCasa <= 0.07;
-  }
-}
-
-function checaIndicadorGonza(jogo, estado, periodo) {
-  const ind = getIndicadores(jogo, periodo);
-  const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
-  const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
-  if (!idxOk || !efOk) return false;
-
-  const golsEventos = (jogo.eventos || []).filter(e => e.tipo_evento === 'gol');
-  const minutoUltimoGol = golsEventos.length ? Math.max(...golsEventos.map(e => e.minuto)) : 0;
-
-  const periodoFiltro = periodo === '1_tempo' ? '1_tempo' : periodo === '2_tempo' ? '2_tempo' : null;
-  const raiosValidos = (jogo.eventos || []).filter(e =>
-    e.tipo_evento === 'raio' &&
-    e.minuto > minutoUltimoGol &&
-    (!periodoFiltro || e.periodo === periodoFiltro)
-  );
-  const temRaioCasaAposGol = raiosValidos.some(e => e.lado === 'casa');
-  const temRaioForaAposGol = raiosValidos.some(e => e.lado === 'fora');
-
-  return temRaioCasaAposGol && temRaioForaAposGol;
-}
-
 function round2(n) { return Math.round(n * 100) / 100; }
 
 function ladoOposto(lado) { return lado === 'casa' ? 'fora' : 'casa'; }
@@ -317,12 +275,18 @@ function checaPressaoGonza(jogo, estado, ladoAlvo, minutoAtual) {
     e.lado === ladoAlvo && minutos.includes(e.minuto) && e.tipo_evento.startsWith('chute')
   );
   const chuteGol = chutes.find(c => c.tipo_evento === 'chute_no_gol');
+  const chuteQualquer = chutes[0];
 
   if (media >= 136 && chuteGol) {
     const efNosso = getEficienciaPeriodoAtual(jogo, estado, ladoAlvo);
     if (efNosso >= 0.17) {
       return { tipo: 'completo', media: round2(media), minutoChute: chuteGol.minuto, eficiencia: round2(efNosso) };
     }
+  }
+  // Pressão Gonza 2 (26/07) — mesma janela/média do completo, mas aceita
+  // QUALQUER tipo de chute (não só no gol) e não exige eficiência mínima.
+  if (media >= 136 && chuteQualquer) {
+    return { tipo: 'gonza2', media: round2(media), minutoChute: chuteQualquer.minuto };
   }
   if (media >= 180) {
     return { tipo: 'sem_eficiencia', media: round2(media) };
@@ -454,7 +418,6 @@ const STRAT_DISPLAY = {
   lay_xg:               '🟣 Lay xG',
   am_xg:                '🟤 AM xG',
   over05:               '🟢 Over 0,5 Gonza',
-  atolada_master:       '⚡ Atolada Master',
   ambas_marcam_xg:       '🟤 Ambas Marcam xG',
 };
 
@@ -772,7 +735,6 @@ async function monitorarLive() {
       await processarAlertasLive(jogo, estado, jogoId, hoje);
       await processarIndicadoresProprios(jogo, estado, jogoId, hoje);
       await processarEstadoGrupo1(jogo, estado, jogoId, hoje);
-      await processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje);
     }
 
     salvarArquivo(ESTADO_FILE, estadoLive);
@@ -790,74 +752,152 @@ function montarMsgAlerta(display, jogo, tempo, placarAlerta, placarAtual, links,
   return fixo + sep + editavel + links;
 }
 
-// Monta e envia a edição atual de UM alerta — extraído de
-// atualizarPlacarNasMensagens pra também ser chamado quando a confiabilidade
-// pré-live chega (sem esperar o próximo evento de placar).
-async function renderizarAlertaAtual(jogo, estado, stratKey, info, placarAtual, tempo) {
-  const links = linksExchanges(jogo.urls_exchanges || {});
-  const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
+// ════════════════════════════════════════════════════════════════
+// ── MOTOR ÚNICO DE INDICADORES (26/07) ───────────────────────────
+// ════════════════════════════════════════════════════════════════
+// A partir de 26/07, TODA estratégia (Seleção IA, Filtros, Estratégias-
+// bolinha, Grupo 1) dispara SÓ por estes 4 indicadores próprios — raio
+// do futats.com e os índices de resumo_pressao deixaram de ser gatilho
+// de entrada (continuam existindo só como dado bruto em getIndicadores,
+// usado apenas pela checagem de eficiência do Pressão Gonza "completo").
+//
+//   • Pressão Gonza    — janela limpa, média≥136, chute NO GOL, eficiência≥0.17
+//   • Pressão Gonza 2  — mesma janela/média, QUALQUER chute, sem exigir eficiência
+//   • Pressão sem ef.  — janela limpa, média≥180 (observação, não conta como entrada)
+//   • Jogo Aberto      — pico≥150 dos dois lados + chute, perto no tempo
+//
+// Cada alerta guarda os minutos de cada indicador por tempo (1T/2T) em
+// info.indicadores — 1 linha por indicador por tempo, acumulando minutos
+// na mesma linha se bater de novo (nunca duplica, nunca perde histórico).
+// ════════════════════════════════════════════════════════════════
 
-  if (info.indicadorTipo) {
-    const extras = (info.linhasExtras || []).join('\n');
-    const conteudo = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '') + confExtra;
-    const novoTexto = info.formatoSimplificado
-      ? `${conteudo}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempo}' · 📊 ${placarAtual}`
-      : montarMsgAlerta(
-          `${STRAT_DISPLAY[stratKey] || stratKey}\n${conteudo}`, jogo,
-          info.tempoAlerta, info.placarAlerta, `${placarAtual} · ${tempo}'`, links
-        );
-    await editTelegram(info.ids, novoTexto);
-    return;
-  }
+const INDICADOR_LABEL = {
+  gonza:  '🟣 Pressão Gonza',
+  gonza2: '🟣 Pressão Gonza 2',
+  semEf:  '🟣 Pressão sem eficiência',
+  aberto: '🟠 Jogo Aberto',
+};
+const ORDEM_INDICADORES = ['gonza', 'gonza2', 'semEf', 'aberto'];
 
-  const display = STRAT_DISPLAY[stratKey] || stratKey;
-  const extras = (info.linhasExtras || []).join('\n');
-  const statusLinha = `📊 Placar atual: ${placarAtual} · ${tempo}'` + (extras ? `\n${extras}` : '') + confExtra;
-  info.ultimoStatusTexto = statusLinha;
-  const novoTexto = montarMsgAlerta(
-    display, jogo, info.tempoAlerta, info.placarAlerta,
-    `${placarAtual} · ${tempo}'`, links, statusLinha
-  );
-  await editTelegram(info.ids, novoTexto);
+function novoRegistroIndicadores() {
+  const r = {};
+  for (const tipo of ORDEM_INDICADORES) r[tipo] = { '1T': [], '2T': [] };
+  return r;
 }
 
-async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
-  const tempo = jogo.tempo === 'Intervalo' ? 'HT' : (parseInt(jogo.tempo) || 0);
+// Registra uma ocorrência (minuto, ou "min-min" no caso de Jogo Aberto)
+// na linha certa — nunca duplica o mesmo valor. Devolve true se era nova
+// (útil pra saber se precisa re-renderizar a mensagem).
+function registrarIndicador(info, tipo, periodoLabel, valor) {
+  info.indicadores = info.indicadores || novoRegistroIndicadores();
+  const lista = info.indicadores[tipo][periodoLabel];
+  if (!lista.includes(valor)) { lista.push(valor); return true; }
+  return false;
+}
 
+function montarLinhasIndicadores(info) {
+  if (!info.indicadores) return [];
+  const linhas = [];
+  for (const tipo of ORDEM_INDICADORES) {
+    for (const periodo of ['1T', '2T']) {
+      const vals = info.indicadores[tipo][periodo];
+      if (vals && vals.length) {
+        linhas.push(`${INDICADOR_LABEL[tipo]} (${periodo}) — min ${vals.join(', ')}`);
+      }
+    }
+  }
+  return linhas;
+}
+
+// Filtro de placar — evita disparar mercado que já não faz mais sentido
+// dado o placar atual (ex: Over 1.5 quando já saíram 2+ gols).
+function placarValidoParaGols(stratKey, golsCasa, golsFora) {
+  const total = golsCasa + golsFora;
+  switch (stratKey) {
+    case 'over15_ia':
+    case 'felipe_over15':
+      return total <= 1;
+    case 'ambas_marcam':
+    case 'ambas_marcam_xg':
+    case 'am_xg':
+      return !(golsCasa > 0 && golsFora > 0); // Ambas Marcam ainda não ocorreu
+    case 'over05':
+      return total <= 3;
+    default:
+      return true; // gol_no_final, over05_ht — sem filtro extra de placar
+  }
+}
+
+// Monta o corpo completo (indicadores + aviso de saída + placar atual +
+// confiabilidade) — usado tanto no disparo inicial quanto em toda edição
+// posterior, pra nunca haver dois formatos diferentes de montagem.
+function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay) {
+  const partes = [...montarLinhasIndicadores(info)];
+  if (info.avisoSaida) partes.push(info.avisoSaida);
+  partes.push(`📊 Placar atual: ${placarAtual} · ${tempoDisplay}'`);
+  if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
+  return partes.join('\n');
+}
+
+// Dispara o alerta inicial de uma estratégia (só se ainda não tiver sido
+// alertada). tipoIndicador/periodo/valor = o indicador que disparou.
+async function dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, periodo, valor, opcoes = {}) {
+  if (estado.msgIds[stratKey]) return false;
+
+  const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
+  const tempoDisplay = jogo.tempo === 'Intervalo' ? 'HT' : tempoNum;
+  const golsCasa = parseInt(jogo.gols_casa) || 0, golsFora = parseInt(jogo.gols_fora) || 0;
+  const placar = `${golsCasa}x${golsFora}`;
+  const links = linksExchanges(jogo.urls_exchanges || {});
+  const display = STRAT_DISPLAY[stratKey] || stratKey;
+
+  const indicadores = novoRegistroIndicadores();
+  indicadores[tipoIndicador][periodo].push(valor);
+  const infoTemp = { indicadores, avisoSaida: null };
+
+  const corpo = montarCorpoAlerta(infoTemp, estado, placar, tempoDisplay);
+  const texto = montarMsgAlerta(display, jogo, tempoDisplay, placar, placar, links, corpo);
+  const ids = await sendTelegram(texto);
+
+  estado.msgIds[stratKey] = {
+    ids, placarAlerta: placar, tempoAlerta: tempoDisplay, stratKey,
+    indicadores, semEfAtivoPeriodo: {},
+    ladoAlvo: opcoes.ladoAlvo || null,
+    entradaConfirmada: !!opcoes.entradaReal,
+  };
+
+  if (opcoes.entradaReal) {
+    const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
+    pendLive.condicao = tipoIndicador;
+    pendLive.msgIds = ids;
+    salvarArquivo(PEND_FILE, pendentes);
+  }
+  return true;
+}
+
+// Reconstrói e reedita a mensagem de um alerta JÁ ativo — chamado sempre
+// que algo novo entra (indicador, placar, confiabilidade, aviso de saída).
+async function rerenderizarAlerta(jogo, estado, stratKey, info) {
+  const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
+  const tempoDisplay = jogo.tempo === 'Intervalo' ? 'HT' : tempoNum;
+  const golsCasa = parseInt(jogo.gols_casa) || 0, golsFora = parseInt(jogo.gols_fora) || 0;
+  const placarAtual = `${golsCasa}x${golsFora}`;
+  const links = linksExchanges(jogo.urls_exchanges || {});
+  const display = STRAT_DISPLAY[stratKey] || stratKey;
+
+  const corpo = montarCorpoAlerta(info, estado, placarAtual, tempoDisplay);
+  const texto = montarMsgAlerta(display, jogo, info.tempoAlerta, info.placarAlerta, `${placarAtual} · ${tempoDisplay}'`, links, corpo);
+  await editTelegram(info.ids, texto);
+}
+
+// Re-renderiza todo alerta ativo de um jogo quando o placar muda (chamado
+// pelo monitorarLive) — pula os do Grupo 1, que têm sua própria máquina de
+// estados e já incluem os indicadores nas próprias mensagens.
+async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
     if (info.grupo1Status) continue;
-    await renderizarAlertaAtual(jogo, estado, stratKey, info, placarAtual, tempo);
-  }
-}
-
-async function processarIndicadorGonzaUniversal(jogo, estado, jogoId, hoje) {
-  if (jogo.tempo === 'Intervalo') return;
-  const golsCasa = parseInt(jogo.gols_casa) || 0;
-  const golsFora = parseInt(jogo.gols_fora) || 0;
-  if (golsCasa !== golsFora) return;
-
-  const jaPassouHT = !!estado.passouHT;
-  const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-  const tempo = parseInt(jogo.tempo) || 0;
-
-  if (!checaIndicadorGonza(jogo, estado, periodoAtual)) return;
-
-  const chaveIndicador = `indicadorGonza_${periodoAtual}`;
-  if (estado[chaveIndicador]) return;
-  estado[chaveIndicador] = true;
-
-  const links = linksExchanges(jogo.urls_exchanges || {});
-  const labelPeriodo = periodoAtual === '1_tempo' ? '1T' : '2T';
-
-  for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
-    if (!info?.ids?.length) continue;
-    const display = STRAT_DISPLAY[stratKey] || stratKey;
-    const linhaFixa = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
-    const statusAtual = info.ultimoStatusTexto || `📊 Placar atual: ${golsCasa}x${golsFora} · ${tempo}'`;
-    const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
-    const novoTexto = `${linhaFixa}\n${statusAtual}\n🪗 Indicador do Gonza (${labelPeriodo}, min ${tempo}) — jogo aberto!${confExtra}${links}`;
-    await editTelegram(info.ids, novoTexto);
+    await rerenderizarAlerta(jogo, estado, stratKey, info);
   }
 }
 
@@ -868,6 +908,9 @@ const LADO_STRATS_PROPRIOS = [
   'lay_gol_visit', 'lay_gol_mand',
 ];
 
+// Estas 6 só existem (por definição) até o minuto 20 — entrada por
+// fragilidade bem no início do jogo. Depois do min 20, não abre alerta
+// NOVO, mas se já foi aberto, continua reconhecendo indicador novo.
 const LADO_STRATS_LIMITE_MIN20 = [
   'lay_0x1_ia', 'lay_1x0_ia', 'lay_gol_visit', 'lay_gol_mand',
 ];
@@ -904,163 +947,64 @@ function getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo) {
   }
 }
 
-async function dispararIndicadorProprio(jogo, estado, stratKey, linhaIndicador, indicadorTipo, registrarComoEntradaReal, formatoSimplificado = false) {
-  if (estado.msgIds[stratKey]) return false;
-
-  const tempoNum     = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
-  const isHTAgora     = jogo.tempo === 'Intervalo';
-  const tempoDisplay = isHTAgora ? 'HT' : tempoNum;
-  const golsCasa = parseInt(jogo.gols_casa) || 0, golsFora = parseInt(jogo.gols_fora) || 0;
-  const placar   = `${golsCasa}x${golsFora}`;
-  const links    = linksExchanges(jogo.urls_exchanges || {});
-  const display  = STRAT_DISPLAY[stratKey] || stratKey;
-  const confExtraInicial = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
-
-  const textoCompleto = formatoSimplificado
-    ? `${linhaIndicador}${confExtraInicial}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempoDisplay}' · 📊 ${placar}`
-    : montarMsgAlerta(`${display}\n${linhaIndicador}${confExtraInicial}`, jogo, tempoDisplay, placar, placar, links);
-
-  const ids = await sendTelegram(textoCompleto);
-
-  const slotEntrada = estado.passouHT ? '2T' : '1T';
-  const notados = { pg1T: false, pg2T: false, ja1T: false, ja2T: false };
-  if (indicadorTipo === 'pressao_completo' || indicadorTipo === 'pressao_sem_eficiencia') notados['pg' + slotEntrada] = true;
-  else if (indicadorTipo === 'jogo_aberto') notados['ja' + slotEntrada] = true;
-
-  estado.msgIds[stratKey] = {
-    ids, placarAlerta: placar, tempoAlerta: tempoDisplay, stratKey,
-    indicadorTipo, formatoSimplificado, linhaIndicador, notados,
-  };
-
-  if (registrarComoEntradaReal) {
-    const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
-    pendLive.condicao = indicadorTipo;
-    pendLive.msgIds   = ids;
-    salvarArquivo(PEND_FILE, pendentes);
+// Checa aviso de saída (reação do oponente / cartão vermelho) — só faz
+// sentido pra quem tem lado definido, e só dispara 1x por jogo.
+function checarAvisoSaida(jogo, info, ladoAlvo, tempoNum) {
+  if (!ladoAlvo || info.avisoSaida) return false;
+  const ladoOp = ladoOposto(ladoAlvo);
+  const reacaoOp = checaReacaoOponente(jogo, ladoOp, tempoNum);
+  if (reacaoOp) {
+    let descricao;
+    if (reacaoOp.tipo === 'momentum_forte') descricao = `momentum ${reacaoOp.valor} + ${reacaoOp.chute === 'chute_no_gol' ? 'chute no gol' : 'chute pra fora'} (min ${reacaoOp.minuto})`;
+    else if (reacaoOp.tipo === 'media_sustentada') descricao = `média ${reacaoOp.media} sustentada nos últ. 5min`;
+    else descricao = `${reacaoOp.qtd} chutes nos últ. 5min`;
+    info.avisoSaida = `⚠️ Oponente reagiu — ${descricao}\n⚠️ Considerar proteção/saída`;
+    return true;
   }
-  return true;
+  const vermelho = (jogo.eventos || []).find(e => e.tipo_evento === 'cartao_vermelho' && e.lado === ladoAlvo);
+  if (vermelho) {
+    info.avisoSaida = `🔴 Cartão vermelho nosso (min ${vermelho.minuto})\n⚠️ Saída recomendada`;
+    return true;
+  }
+  return false;
 }
 
-async function atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo) {
-  const info = estado.msgIds[stratKey];
-  if (!info || !info.ids?.length) return;
-  if (jogo.tempo === 'Intervalo') return;
-  if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
-      info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') return;
-
-  const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
-  const links    = linksExchanges(jogo.urls_exchanges || {});
-  const fixo     = `${STRAT_DISPLAY[stratKey] || stratKey}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
-  const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
-
-  if (info.indicadorTipo === 'pressao_sem_eficiencia' && !info.pressaoConfirmada) {
-    const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
-    if (pg && pg.tipo === 'completo') {
-      info.pressaoConfirmada = true;
-      const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
-      pendLive.condicao = 'pressao_gonza_confirmada';
-      pendLive.msgIds   = info.ids;
-      salvarArquivo(PEND_FILE, pendentes);
-      const statusTexto = `🟣 Pressão Gonza confirmada — chute no gol min ${pg.minutoChute}\n✅ Entrada confirmada`;
-      info.ultimoStatusTexto = statusTexto;
-      await editTelegram(info.ids, `${fixo}\n${statusTexto}${confExtra}${links}`);
-    }
-    return;
+// Registra na estrutura info um resultado de checaPressaoGonza (se veio
+// completo/gonza2, conta como entrada real; sem_eficiencia é só observação
+// até que apareça completo/gonza2/aberto de verdade). Devolve true se algo
+// mudou (precisa re-renderizar).
+function registrarPressaoGonza(info, pg, periodo, stratKey) {
+  if (!pg) {
+    info.semEfAtivoPeriodo = info.semEfAtivoPeriodo || {};
+    info.semEfAtivoPeriodo[periodo] = false;
+    return false;
   }
-
-  if (!ladoAlvo) return;
-
-  if (!info.saidaAvisada) {
-    const ladoOp  = ladoOposto(ladoAlvo);
-    const reacao  = checaReacaoOponente(jogo, ladoOp, tempoNum);
-    if (reacao) {
-      info.saidaAvisada = true;
-      let descricao;
-      if (reacao.tipo === 'momentum_forte') {
-        descricao = `momentum ${reacao.valor} + ${reacao.chute === 'chute_no_gol' ? 'chute no gol' : 'chute pra fora'} (min ${reacao.minuto})`;
-      } else if (reacao.tipo === 'media_sustentada') {
-        descricao = `média ${reacao.media} sustentada nos últ. 5min`;
-      } else {
-        descricao = `${reacao.qtd} chutes nos últ. 5min`;
+  let mudou = false;
+  if (pg.tipo === 'completo' || pg.tipo === 'gonza2') {
+    if (registrarIndicador(info, pg.tipo, periodo, pg.minutoChute)) {
+      mudou = true;
+      if (!info.entradaConfirmada) {
+        info.entradaConfirmada = true;
+        confirmarEntradaReal(info, stratKey, pg.tipo);
       }
-      const statusBase = info.ultimoStatusTexto || `📊 Placar atual: ${jogo.gols_casa}x${jogo.gols_fora}`;
-      const statusTexto = `${statusBase}\n⚠️ Oponente reagiu — ${descricao}\n⚠️ Considerar proteção/saída`;
-      info.ultimoStatusTexto = statusTexto;
-      await editTelegram(info.ids, `${fixo}\n${statusTexto}${confExtra}${links}`);
-      return;
+    }
+    info.semEfAtivoPeriodo = info.semEfAtivoPeriodo || {};
+    info.semEfAtivoPeriodo[periodo] = false;
+  } else if (pg.tipo === 'sem_eficiencia') {
+    info.semEfAtivoPeriodo = info.semEfAtivoPeriodo || {};
+    if (!info.semEfAtivoPeriodo[periodo]) {
+      if (registrarIndicador(info, 'semEf', periodo, info.__tempoAtualParaSemEf)) mudou = true;
+      info.semEfAtivoPeriodo[periodo] = true;
     }
   }
-
-  if (!info.cartaoVermelhoAvisado) {
-    const vermelho = (jogo.eventos || []).find(e => e.tipo_evento === 'cartao_vermelho' && e.lado === ladoAlvo);
-    if (vermelho) {
-      info.cartaoVermelhoAvisado = true;
-      const statusTexto = `🔴 Cartão vermelho nosso (min ${vermelho.minuto})\n⚠️ Saída recomendada`;
-      info.ultimoStatusTexto = statusTexto;
-      await editTelegram(info.ids, `${fixo}\n${statusTexto}${confExtra}${links}`);
-    }
-  }
+  return mudou;
 }
 
-async function checarReconfirmacao(jogo, estado, stratKey, ladoOuFavorito, hoje) {
-  const info = estado.msgIds[stratKey];
-  if (!info?.ids?.length) return;
-  if (jogo.tempo === 'Intervalo') return;
-  if (info.golLimiteConversao) return;
-  if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
-      info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') return;
-
-  const tempoNum = parseInt(jogo.tempo) || 0;
-  const slot     = estado.passouHT ? '2T' : '1T';
-  info.notados = info.notados || { pg1T: false, pg2T: false, ja1T: false, ja2T: false };
-
-  let linhaNova = null;
-
-  if (!info.notados['pg' + slot]) {
-    let pg = checaPressaoGonza(jogo, estado, ladoOuFavorito, tempoNum);
-    let rotuloLado = '';
-    if (stratKey === 'gol_no_final') {
-      const pgZebra = checaPressaoGonza(jogo, estado, ladoOposto(ladoOuFavorito), tempoNum);
-      if (pg?.tipo !== 'completo' && pgZebra?.tipo === 'completo') { pg = pgZebra; rotuloLado = ' (zebra)'; }
-    }
-    if (pg) {
-      info.notados['pg' + slot] = true;
-      linhaNova = pg.tipo === 'completo'
-        ? `🟣 Pressão Gonza${rotuloLado} reconfirmou (${slot}) — média ${pg.media}, chute no gol min ${pg.minutoChute}`
-        : `🟣 Pressão Gonza sem eficiência${rotuloLado} reconfirmou (${slot}) — média ${pg.media}`;
-    }
-  }
-
-  if (!linhaNova && !info.notados['ja' + slot]) {
-    const ja = checaJogoAberto(jogo, tempoNum);
-    if (ja) {
-      info.notados['ja' + slot] = true;
-      linhaNova = `🟠 Jogo Aberto reconfirmou (${slot}) — os dois lados reagindo (min ${ja.minCasa}-${ja.minFora})`;
-    }
-  }
-  if (!linhaNova) return;
-
-  info.linhasExtras = info.linhasExtras || [];
-  info.linhasExtras.push(linhaNova);
-
-  const links   = linksExchanges(jogo.urls_exchanges || {});
-  const placar  = `${jogo.gols_casa}x${jogo.gols_fora}`;
-  const extras  = info.linhasExtras.join('\n');
-
-  if (info.indicadorTipo) {
-    const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
-    const conteudo = (info.ultimoStatusTexto || info.linhaIndicador || '') + `\n${extras}` + confExtra;
-    const novoTexto = info.formatoSimplificado
-      ? `${conteudo}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${tempoNum}' · 📊 ${placar}`
-      : montarMsgAlerta(`${STRAT_DISPLAY[stratKey] || stratKey}\n${conteudo}`, jogo, info.tempoAlerta, info.placarAlerta, `${placar} · ${tempoNum}'`, links);
-    await editTelegram(info.ids, novoTexto);
-  } else {
-    const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
-    const statusLinha = `📊 Placar atual: ${placar} · ${tempoNum}'\n${extras}` + confExtra;
-    info.ultimoStatusTexto = statusLinha;
-    const novoTexto = montarMsgAlerta(STRAT_DISPLAY[stratKey] || stratKey, jogo, info.tempoAlerta, info.placarAlerta, `${placar} · ${tempoNum}'`, links, statusLinha);
-    await editTelegram(info.ids, novoTexto);
-  }
+function confirmarEntradaReal(info, stratKey, condicao) {
+  const pendLive = registrarPendente({ ...info.__jogoParaRegistro }, `${stratKey}_live`, 'live');
+  pendLive.condicao = condicao;
+  pendLive.msgIds = info.ids;
+  salvarArquivo(PEND_FILE, pendentes);
 }
 
 async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
@@ -1069,121 +1013,141 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
   const jaPassouHT = !!estado.passouHT;
   const is1T       = !jaPassouHT;
   const is2T       = jaPassouHT;
+  const periodoAtual = is1T ? '1T' : '2T';
   const favorito   = getFavorito(jogo);
+  const golsCasa   = parseInt(jogo.gols_casa) || 0;
+  const golsFora   = parseInt(jogo.gols_fora) || 0;
 
   const pendJogo = pendentes.filter(p =>
     p.data === hoje && p.result === 'pendente' &&
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
+  // ── ESTRATÉGIAS DE LADO ──────────────────────────────────────
   for (const stratKey of LADO_STRATS_PROPRIOS) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     const ladoAlvo = getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo);
     if (!ladoAlvo) continue;
 
+    const limitadaMin20 = LADO_STRATS_LIMITE_MIN20.includes(stratKey);
+
     if (!estado.msgIds[stratKey]) {
-      const limitadaMin20 = LADO_STRATS_LIMITE_MIN20.includes(stratKey);
-      if (is1T && (!limitadaMin20 || tempoNum <= 20)) {
-        const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
-        if (pg) {
-          if (pg.tipo === 'completo') {
-            await dispararIndicadorProprio(jogo, estado, stratKey,
-              `🟣 Pressão Gonza — média ${pg.media}, chute no gol min ${pg.minutoChute}`,
-              'pressao_completo', true);
-          } else {
-            await dispararIndicadorProprio(jogo, estado, stratKey,
-              `🟣 Pressão Gonza sem eficiência — média ${pg.media} (aguardando chute no gol)`,
-              'pressao_sem_eficiencia', false);
-          }
-        }
-      } else if (is2T && !limitadaMin20) {
-        const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
-        const ja = checaJogoAberto(jogo, tempoNum);
-        if (pg && pg.tipo === 'completo') {
-          if (await dispararIndicadorProprio(jogo, estado, stratKey,
-              '🟢 Indicador Pressão Gonza Confirmado', 'gol_limite_pressao', false, true)) {
-            const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
-            pendLive.condicao = 'gol_limite_pressao';
-            pendLive.golLimiteConversao = true;
-            pendLive.placarNaConversao  = `${jogo.gols_casa}x${jogo.gols_fora}`;
-            pendLive.msgIds = estado.msgIds[stratKey].ids;
-            salvarArquivo(PEND_FILE, pendentes);
-            estado.msgIds[stratKey].golLimiteConversao = true;
-          }
-        } else if (ja) {
-          if (await dispararIndicadorProprio(jogo, estado, stratKey,
-              '🟡 Indicador Jogo Aberto Confirmado', 'gol_limite_jogo_aberto', false, true)) {
-            const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
-            pendLive.condicao = 'gol_limite_jogo_aberto';
-            pendLive.golLimiteConversao = true;
-            pendLive.placarNaConversao  = `${jogo.gols_casa}x${jogo.gols_fora}`;
-            pendLive.msgIds = estado.msgIds[stratKey].ids;
-            salvarArquivo(PEND_FILE, pendentes);
-            estado.msgIds[stratKey].golLimiteConversao = true;
+      if (limitadaMin20 && tempoNum > 20) continue; // janela de entrada já fechou
+
+      const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
+      const ja = checaJogoAberto(jogo, tempoNum);
+
+      if (pg && pg.tipo === 'completo') {
+        await dispararAlertaIndicador(jogo, estado, stratKey, 'gonza', periodoAtual, pg.minutoChute, { ladoAlvo, entradaReal: true });
+      } else if (pg && pg.tipo === 'gonza2') {
+        await dispararAlertaIndicador(jogo, estado, stratKey, 'gonza2', periodoAtual, pg.minutoChute, { ladoAlvo, entradaReal: true });
+      } else if (ja) {
+        await dispararAlertaIndicador(jogo, estado, stratKey, 'aberto', periodoAtual, `${ja.minCasa}-${ja.minFora}`, { ladoAlvo, entradaReal: true });
+      } else if (pg && pg.tipo === 'sem_eficiencia') {
+        await dispararAlertaIndicador(jogo, estado, stratKey, 'semEf', periodoAtual, tempoNum, { ladoAlvo, entradaReal: false });
+      }
+    } else {
+      const info = estado.msgIds[stratKey];
+      let mudou = false;
+
+      const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
+      info.__tempoAtualParaSemEf = tempoNum;
+      info.__jogoParaRegistro = jogo;
+      if (registrarPressaoGonza(info, pg, periodoAtual, stratKey)) mudou = true;
+
+      const ja = checaJogoAberto(jogo, tempoNum);
+      if (ja) {
+        const val = `${ja.minCasa}-${ja.minFora}`;
+        if (registrarIndicador(info, 'aberto', periodoAtual, val)) {
+          mudou = true;
+          if (!info.entradaConfirmada) {
+            info.entradaConfirmada = true;
+            confirmarEntradaReal(info, stratKey, 'aberto');
           }
         }
       }
-    } else {
-      await atualizarIndicadorProprio(jogo, estado, stratKey, ladoAlvo);
-      await checarReconfirmacao(jogo, estado, stratKey, ladoAlvo, hoje);
+
+      if (checarAvisoSaida(jogo, info, ladoAlvo, tempoNum)) mudou = true;
+
+      if (mudou && !info.grupo1Status) {
+        await rerenderizarAlerta(jogo, estado, stratKey, info);
+      }
     }
   }
 
+  // ── ESTRATÉGIAS DE GOLS ───────────────────────────────────────
   for (const stratKey of GOLS_STRATS_PROPRIOS) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     if (!periodoValidoParaGols(stratKey, is1T, is2T, tempoNum)) continue;
+    if (!placarValidoParaGols(stratKey, golsCasa, golsFora)) continue;
 
-    if (estado.msgIds[stratKey]) {
-      await checarReconfirmacao(jogo, estado, stratKey, favorito, hoje);
-      continue;
-    }
-
-    const ladoZebra  = ladoOposto(favorito);
-    const pgFavorito = checaPressaoGonza(jogo, estado, favorito, tempoNum);
-    const pgZebra    = (stratKey === 'gol_no_final') ? checaPressaoGonza(jogo, estado, ladoZebra, tempoNum) : null;
-
-    let pg = pgFavorito, rotuloLado = '(favorito)';
-    if (pgFavorito?.tipo !== 'completo' && pgZebra?.tipo === 'completo') {
-      pg = pgZebra; rotuloLado = '(zebra)';
-    } else if (!pgFavorito && pgZebra) {
-      pg = pgZebra; rotuloLado = '(zebra)';
-    }
-
+    const ladoZebra = ladoOposto(favorito);
+    const pgFav = checaPressaoGonza(jogo, estado, favorito, tempoNum);
+    const pgZebra = (stratKey === 'gol_no_final') ? checaPressaoGonza(jogo, estado, ladoZebra, tempoNum) : null;
     const ja = checaJogoAberto(jogo, tempoNum);
-    const golLimiteTxt = is2T ? ' (Gol Limite)' : '';
 
-    if (pg && pg.tipo === 'completo') {
-      await dispararIndicadorProprio(jogo, estado, stratKey,
-        `🟣 Pressão Gonza ${rotuloLado} — média ${pg.media}, chute no gol min ${pg.minutoChute}${golLimiteTxt}`,
-        'pressao_completo', true);
-    } else if (ja) {
-      await dispararIndicadorProprio(jogo, estado, stratKey,
-        `🟠 Jogo Aberto — os dois lados reagindo (min ${ja.minCasa}-${ja.minFora})${golLimiteTxt}`,
-        'jogo_aberto', true);
-    } else if (pg && pg.tipo === 'sem_eficiencia') {
-      await dispararIndicadorProprio(jogo, estado, stratKey,
-        `🟣 Pressão Gonza ${rotuloLado} sem eficiência — média ${pg.media} (aguardando chute no gol)${golLimiteTxt}`,
-        'pressao_sem_eficiencia', false);
+    if (!estado.msgIds[stratKey]) {
+      let pg = pgFav;
+      if ((!pgFav || pgFav.tipo !== 'completo') && pgZebra?.tipo === 'completo') pg = pgZebra;
+      else if (!pgFav && pgZebra) pg = pgZebra;
+
+      if (pg && pg.tipo === 'completo') {
+        await dispararAlertaIndicador(jogo, estado, stratKey, 'gonza', periodoAtual, pg.minutoChute, { entradaReal: true });
+      } else if (pg && pg.tipo === 'gonza2') {
+        await dispararAlertaIndicador(jogo, estado, stratKey, 'gonza2', periodoAtual, pg.minutoChute, { entradaReal: true });
+      } else if (ja) {
+        await dispararAlertaIndicador(jogo, estado, stratKey, 'aberto', periodoAtual, `${ja.minCasa}-${ja.minFora}`, { entradaReal: true });
+      } else if (pg && pg.tipo === 'sem_eficiencia') {
+        await dispararAlertaIndicador(jogo, estado, stratKey, 'semEf', periodoAtual, tempoNum, { entradaReal: false });
+      }
+    } else {
+      const info = estado.msgIds[stratKey];
+      let mudou = false;
+      info.__tempoAtualParaSemEf = tempoNum;
+      info.__jogoParaRegistro = jogo;
+
+      for (const pg of [pgFav, pgZebra]) {
+        if (registrarPressaoGonza(info, pg, periodoAtual, stratKey)) mudou = true;
+      }
+      if (ja) {
+        const val = `${ja.minCasa}-${ja.minFora}`;
+        if (registrarIndicador(info, 'aberto', periodoAtual, val)) {
+          mudou = true;
+          if (!info.entradaConfirmada) {
+            info.entradaConfirmada = true;
+            confirmarEntradaReal(info, stratKey, 'aberto');
+          }
+        }
+      }
+
+      if (mudou) await rerenderizarAlerta(jogo, estado, stratKey, info);
     }
   }
 }
 
 const GRUPO1_STRATS = ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg','lay_xg'];
 
+// Grupo 1 tem sua própria máquina de estados (quem marca primeiro decide o
+// resultado), mas as transições de "reação" agora usam os indicadores
+// próprios em vez de raio+índices. O conceito de "Gol Limite" (conversão
+// via raio no 2T) deixou de existir — o estado "red" agora é terminal.
 async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
   const tempo     = jogo.tempo === 'Intervalo' ? (estado.ultimoMinuto || 45) : (parseInt(jogo.tempo) || 0);
   const isHT      = jogo.tempo === 'Intervalo';
-  const jaPassouHT = !!estado.passouHT;
   const links     = linksExchanges(jogo.urls_exchanges || {});
-  const favorito  = getFavorito(jogo);
-  const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
 
   for (const stratKey of GRUPO1_STRATS) {
     const info = estado.msgIds[stratKey];
     if (!info || !info.ids?.length) continue;
-    if (info.grupo1Status === 'green' || info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') continue;
+    if (info.grupo1Status === 'green') continue; // já fechado, nada mais a fazer
+
+    const extras = montarLinhasIndicadores(info).join('\n');
+    const extrasTxt = extras ? `\n${extras}` : '';
+    const avisoTxt = info.avisoSaida ? `\n${info.avisoSaida}` : '';
+    const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
+    const corpoExtra = `${extrasTxt}${avisoTxt}${confExtra}`;
 
     let alvo = 'casa';
     if (stratKey === 'lay_xg') {
@@ -1200,11 +1164,11 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     if (!info.grupo1Status) {
       if (alvoGols > contraGols) {
         info.grupo1Status = 'green';
-        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${confExtra}${links}`);
+        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${corpoExtra}${links}`);
       } else if (contraGols > alvoGols) {
         info.grupo1Status = 'atencao';
         info.minutoGolContra = tempo;
-        await editTelegram(info.ids, `${fixo}\n⚠️ Time contra na frente (${golsCasa}x${golsFora}, min ${tempo}) — avaliar reação${confExtra}${links}`);
+        await editTelegram(info.ids, `${fixo}\n⚠️ Time contra na frente (${golsCasa}x${golsFora}, min ${tempo}) — avaliar reação${corpoExtra}${links}`);
       }
       continue;
     }
@@ -1212,286 +1176,66 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     if (info.grupo1Status === 'atencao') {
       if (alvoGols > contraGols) {
         info.grupo1Status = 'green';
-        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${confExtra}${links}`);
+        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${corpoExtra}${links}`);
         continue;
       }
       if (tempo > 60 && !isHT) {
         info.grupo1Status = 'red';
-        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60) — sem reação confirmada${confExtra}${links}`);
+        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60) — sem reação confirmada${corpoExtra}${links}`);
         continue;
       }
-      if (checaCondicaoReacao(jogo, alvo)) {
-        const raioNovoAlvo = (jogo.eventos || []).some(e =>
-          e.tipo_evento === 'raio' && e.lado === alvo && e.minuto > (info.minutoGolContra || 0)
-        );
-        if (raioNovoAlvo) {
-          info.grupo1Status = 'reacao';
-          await editTelegram(info.ids, `${fixo}\n🔄 Reação confirmada (min ${tempo}) — considerar Lay contra o time da frente até o fim do 1T${confExtra}${links}`);
-        }
+      // Reação = qualquer um dos indicadores próprios do lado que precisa
+      // reagir bate DEPOIS do minuto em que o time contra marcou.
+      const pgReacao = checaPressaoGonza(jogo, estado, alvo, tempo);
+      const jaReacao = checaJogoAberto(jogo, tempo);
+      const temReacao = (pgReacao && (pgReacao.tipo === 'completo' || pgReacao.tipo === 'gonza2')) || !!jaReacao;
+      if (temReacao && tempo > (info.minutoGolContra || 0)) {
+        info.grupo1Status = 'reacao';
+        await editTelegram(info.ids, `${fixo}\n🔄 Reação confirmada (min ${tempo}) — considerar Lay contra o time da frente até o fim do 1T${corpoExtra}${links}`);
       }
       continue;
     }
 
-    if (info.grupo1Status === 'reacao') continue;
-
-    if (info.grupo1Status === 'red') {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      if (checaCondicaoReacao(jogo, alvo)) {
-        const raioNovoAlvo = (jogo.eventos || []).some(e =>
-          e.tipo_evento === 'raio' && e.lado === alvo && e.minuto > 60
-        );
-        if (raioNovoAlvo) {
-          info.grupo1Status = 'red_reacao';
-          await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60)\n🔄 Reação confirmada (${tempo}') — avaliar Gol Limite${confExtra}${links}`);
-          continue;
-        }
-      }
-      if (checaIndicadorGonza(jogo, estado, periodoAtual)) {
-        info.grupo1Status = 'red_gonza';
-        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60)\n🪗 Indicador do Gonza (${tempo}') — avaliar Gol Limite${confExtra}${links}`);
-      }
-    }
+    // 'reacao' e 'red' são terminais — nada mais a editar (o resultado
+    // final é decidido em processarFimDeJogo, exceto pra 'red' que já é a
+    // palavra final do Grupo 1 e não deve ser sobrescrito).
   }
 }
 
 async function processarAlertasLive(jogo, estado, jogoId, hoje) {
+  // 26/07 — toda a lógica antiga baseada em raio/índices (resumo_pressao)
+  // foi removida daqui. Praticamente tudo migrou pra dentro de
+  // processarIndicadoresProprios. Só sobra aqui o caso especial do
+  // Over 1.5 HT (upgrade do Over 0.5 HT quando já tem exatamente 1 gol).
   const tempoNum = parseInt(jogo.tempo) || 0;
-  const ehIntervalo = jogo.tempo === 'Intervalo';
-  const tempo    = tempoNum;
-  const tempoDisplay = ehIntervalo ? 'HT' : tempoNum;
+  const isHT = jogo.tempo === 'Intervalo';
+  const is1T = !isHT && !estado.passouHT;
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
-  const total    = golsCasa + golsFora;
-  const placar   = `${golsCasa}x${golsFora}`;
-  const urls     = jogo.urls_exchanges || {};
-  const links    = linksExchanges(urls);
-  const favorito = getFavorito(jogo);
-  const oddCasa  = parseFloat(jogo.odd_atual_casa || 0);
-  const oddFora  = parseFloat(jogo.odd_atual_fora || 0);
-
-  const isHT  = jogo.tempo === 'Intervalo';
-  const jaPassouHT = !!estado.passouHT;
-  const is2T = !isHT && jaPassouHT;
-  const is1T = !isHT && !jaPassouHT;
-
-  const evNovos   = jogo.eventos || [];
-  const periodoAtualRaio = jaPassouHT ? '2_tempo' : '1_tempo';
-  const raiosCasa = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa' && e.periodo === periodoAtualRaio);
-  const raiosFora = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'fora' && e.periodo === periodoAtualRaio);
-  const raioFav   = favorito === 'casa' ? raiosCasa.length > 0 : raiosFora.length > 0;
-  const raioZebra = favorito === 'casa' ? raiosFora.length > 0 : raiosCasa.length > 0;
-  const raioMand  = raiosCasa.length > 0;
-  const raioVisit = raiosFora.length > 0;
-  const temRaio   = raioMand || raioVisit;
-
-  const raiosCasa2T = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa' && e.periodo === '2_tempo');
-  const raiosFora2T = evNovos.filter(e => e.tipo_evento === 'raio' && e.lado === 'fora' && e.periodo === '2_tempo');
-  const temRaio2T    = raiosCasa2T.length > 0 || raiosFora2T.length > 0;
-
-  const chutesGolCasa = evNovos.filter(e => e.tipo_evento === 'chute_no_gol' && e.lado === 'casa').length;
-  const chutesGolFora = evNovos.filter(e => e.tipo_evento === 'chute_no_gol' && e.lado === 'fora').length;
-
-  const todosRaiosCasa = estado.eventos.filter(e => e.tipo_evento === 'raio' && e.lado === 'casa');
-  const todosRaiosFora = estado.eventos.filter(e => e.tipo_evento === 'raio' && e.lado === 'fora');
-  const tevRaioFav     = favorito === 'casa' ? todosRaiosCasa.length > 0 : todosRaiosFora.length > 0;
-  const tevRaioMand    = todosRaiosCasa.length > 0;
+  const total = golsCasa + golsFora;
 
   const pendJogo = pendentes.filter(p =>
     p.data === hoje && p.result === 'pendente' &&
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
-  async function alertar(stratKey, dica, stratRegistrar = null) {
-    if (estado.msgIds[stratKey]) return;
-
-    const display = STRAT_DISPLAY[stratKey] || stratKey;
-    const linhaInfo = dica ? `\n💡 ${dica}` : '';
-    const confExtraInicial = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
-    const textoCompleto = montarMsgAlerta(
-      display + linhaInfo + confExtraInicial, jogo, tempoDisplay, placar, placar, links
-    );
-
-    const ids = await sendTelegram(textoCompleto);
-
-    estado.msgIds[stratKey] = {
-      ids,
-      placarAlerta: placar,
-      tempoAlerta:  tempoDisplay,
-      stratKey,
-    };
-
-    if (stratRegistrar) {
-      const pendLive = registrarPendente({
-        ...jogo, fixture_id: pendJogo[0]?.fixture_id || null
-      }, stratRegistrar, 'live');
-      pendLive.condicao = stratKey;
-      pendLive.msgIds   = ids;
-      salvarArquivo(PEND_FILE, pendentes);
-    }
-  }
-
-  if (pendJogo.some(p => p.strat === 'gol_no_final')) {
-    if (temRaio2T && tempo <= 80) {
-      const ind = getIndicadores(jogo, 'ult_10min');
-      const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
-      const efOk  = (ind.efCasa >= 0.20 && ind.efFora > 0.10) || (ind.efFora >= 0.20 && ind.efCasa > 0.10);
-      if (idxOk && efOk)
-        await alertar('gol_no_final', 'Raio no 2T + índices do Indicador do Gonza (últ. 10min)!', 'gol_no_final_live');
-    }
-  }
-
-  if (pendJogo.some(p => p.strat === 'over05_ht')) {
-    if (is1T && total === 0 && temRaio)
-      await alertar('over05_ht', '0x0 + Raio no 1T!', 'over05_ht_live');
-    if (is1T && total === 0 && tempo <= 20 && chutesGolCasa >= 1 && chutesGolFora >= 1)
-      await alertar('over05_ht', '0x0 + Chute no gol dos dois!', 'over05_ht_live');
-    if (is1T && total === 1 && tempo < 20 && temRaio)
-      await alertar('over15_ht', '1 gol + Raio antes min 20!', 'over15_ht_live');
-  }
-
-  function processarGrupo5e6(stratKey, nomeDisplay) {
-    return (async () => {
-      if (!pendJogo.some(p => p.strat === stratKey)) return;
-      if (isHT) return;
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-
-      if (total === 0 && periodoAtual === '1_tempo' && checaIndicadorGonza(jogo, estado, periodoAtual)) {
-        await alertar(stratKey, `Indicador do Gonza 🪗 (1T) — jogo aberto!`, `${stratKey}_live`);
-        return;
-      }
-
-      const raioCasaAgora = raioMand;
-      const raioForaAgora = raioVisit;
-      if (raioCasaAgora || raioForaAgora) {
-        const ind = getIndicadores(jogo, 'ult_10min');
-        const ladoDoRaio = raioCasaAgora ? 'casa' : 'fora';
-        const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
-        const efRaio  = ladoDoRaio === 'casa' ? ind.efCasa  : ind.efFora;
-        if (idxRaio >= 20 && efRaio >= 0.20)
-          await alertar(stratKey, `${placar} + Raio (últ. 10min, índice≥20/eficiência≥0.20) — Gol Limite!`, `${stratKey}_live`);
-      }
-    })();
-  }
-
-  await processarGrupo5e6('over15_ia', 'Over 1.5');
-  await processarGrupo5e6('ambas_marcam', 'Ambas Marcam');
-  await processarGrupo5e6('ambas_marcam_xg', 'Ambas Marcam xG');
-  await processarGrupo5e6('am_xg', 'Ambos xG Pro');
-  await processarGrupo5e6('felipe_over15', 'Felipe Over 1.5');
-
-  if (pendJogo.some(p => p.strat === 'lay_0x1_ia')) {
-    if (tempo <= 20 && !isHT) {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      if (raioMand && total === 0 && checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
-        await alertar('lay_0x1_ia', '0x0 + Raio do Mandante (até min 20)!', 'lay_0x1_ia_live');
-      else if (raioMand && golsCasa === 0 && golsFora === 1)
-        await alertar('lay_0x1_ia', '⚠️ Placar 0x1! Raio Mandante — feche e aguarde!', 'lay_0x1_ia_live');
-    }
-  }
-
-  if (pendJogo.some(p => p.strat === 'lay_1x0_ia')) {
-    if (tempo <= 20 && !isHT) {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      if (raioVisit && total === 0 && checaCondicaoGrupo1(jogo, periodoAtual, 'fora'))
-        await alertar('lay_1x0_ia', '0x0 + Raio do Visitante (até min 20)!', 'lay_1x0_ia_live');
-      else if (raioVisit && golsCasa === 1 && golsFora === 0)
-        await alertar('lay_1x0_ia', '⚠️ Placar 1x0! Raio Visitante — feche e aguarde!', 'lay_1x0_ia_live');
-    }
-  }
-
-  if (pendJogo.some(p => p.strat === 'lay_gol_visit')) {
-    if (tempo <= 20 && !isHT) {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      if (raioMand && checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
-        await alertar('lay_gol_visit', 'Raio do Mandante (até min 20)!', 'lay_gol_visit_live');
-    }
-  }
-
-  if (pendJogo.some(p => p.strat === 'lay_gol_mand')) {
-    if (tempo <= 20 && !isHT) {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      if (raioVisit && checaCondicaoGrupo1(jogo, periodoAtual, 'fora'))
-        await alertar('lay_gol_mand', 'Raio do Visitante (até min 20)!', 'lay_gol_mand_live');
-    }
-  }
-
-  for (const sf of ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg']) {
-    if (!pendJogo.some(p => p.strat === sf)) continue;
-    if (isHT) continue;
-    const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-    const mandantePerdendo = golsFora > golsCasa;
-
-    if (total === 0 && raioMand && checaCondicaoGrupo1(jogo, periodoAtual, 'casa'))
-      await alertar(sf, `0x0 + Raio do Mandante! (${periodoAtual==='1_tempo'?'1T':'2T'}) · Lay Visitante · Odd: ${oddFora.toFixed(2)}`, `${sf}_live`);
-    else if (mandantePerdendo && raioMand && checaCondicaoReacao(jogo, 'casa')) {
-      const limiteMin = periodoAtual === '1_tempo' ? 999 : 60;
-      if (tempo <= limiteMin)
-        await alertar(sf, `Mandante perdendo + Reação confirmada (Raio)! · Lay Visitante · Odd: ${oddFora.toFixed(2)}`, `${sf}_live`);
-    }
-  }
-
-  if (pendJogo.some(p => p.strat === 'lay_xg')) {
-    const pendLayXg = pendJogo.find(p => p.strat === 'lay_xg');
-    const layHome   = pendLayXg?.lay_team === 'home';
-    const ladoAlvo  = layHome ? 'casa' : 'fora';
-    const placarAlvoPerdendo = layHome ? (golsFora > golsCasa) : (golsCasa > golsFora);
-    const raioAlvo  = layHome ? raioMand : raioVisit;
-
-    if (!isHT && pendLayXg?.lay_team) {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      if (total === 0 && raioAlvo && checaCondicaoGrupo1(jogo, periodoAtual, ladoAlvo))
-        await alertar('lay_xg', `0x0 + Raio do time de maior xG! (${periodoAtual==='1_tempo'?'1T':'2T'})`, 'lay_xg_live');
-      else if (placarAlvoPerdendo && raioAlvo && checaCondicaoReacao(jogo, ladoAlvo)) {
-        const limiteMin = periodoAtual === '1_tempo' ? 999 : 60;
-        if (tempo <= limiteMin)
-          await alertar('lay_xg', 'Time de maior xG perdendo + Reação confirmada (Raio)!', 'lay_xg_live');
-      }
-    }
-  }
-
-  if (pendJogo.some(p => p.strat === 'am_xg')) {
-    if (!isHT && total === 0) {
-      const periodoAtual = jaPassouHT ? '2_tempo' : '1_tempo';
-      const ind = getIndicadores(jogo, periodoAtual);
-      const idxOk = ind.idxCasa >= 15 && ind.idxFora >= 15;
-      const efAmbosOk = ind.efCasa >= 0.20 && ind.efFora >= 0.20;
-      if (idxOk && efAmbosOk && checaIndicadorGonza(jogo, estado, periodoAtual))
-        await alertar('atolada_master', `Atolada Master do Gonza 🪗 (${periodoAtual==='1_tempo'?'1T':'2T'}) — 0x0 + eficiência alta dos dois!`, 'atolada_master_live');
-    }
-  }
-
-  if (pendJogo.some(p => p.strat === 'over05')) {
-    if (isHT) {
-      if (total === 0 && tevRaioMand)
-        await alertar('over05', 'Intervalo 0x0 · Verificar CHUVA DE GOLS no 2º tempo', 'over05_live');
-    } else if (!jaPassouHT) {
-      if (tempo <= 20 && total === 0 && checaIndicadorGonza(jogo, estado, '1_tempo')) {
-        await alertar('over05', 'Indicador do Gonza 🪗 (1T, até min 20) — entrar Over 1,5 HT!', 'over05_live');
-      } else if (raioMand || raioVisit) {
-        const ind = getIndicadores(jogo, 'ult_10min');
-        const ladoDoRaio = raioMand ? 'casa' : 'fora';
-        const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
-        const efRaio  = ladoDoRaio === 'casa' ? ind.efCasa  : ind.efFora;
-        if (idxRaio >= 20 && efRaio >= 0.20)
-          await alertar('over05', `${placar} + Raio (últ. 10min) — entrar Over 1,5 HT / Over 0,5 HT!`, 'over05_live');
-      }
-    } else {
-      if (tempo <= 80 && (raioMand || raioVisit)) {
-        const ind = getIndicadores(jogo, 'ult_10min');
-        const ladoDoRaio = raioMand ? 'casa' : 'fora';
-        const idxRaio = ladoDoRaio === 'casa' ? ind.idxCasa : ind.idxFora;
-        const efRaio  = ladoDoRaio === 'casa' ? ind.efCasa  : ind.efFora;
-        if (idxRaio >= 20 && efRaio >= 0.20) {
-          const golLimite = tempo > 60;
-          const mercado = `Over ${(total + (golLimite ? 0.5 : 1.5)).toFixed(1).replace('.', ',')}`;
-          const limitTexto = golLimite ? ' (Gol Limite)' : '';
-          await alertar('over05', `${placar} + Raio (últ. 10min) — entrar ${mercado}${limitTexto}!`, 'over05_live');
-        }
+  if (pendJogo.some(p => p.strat === 'over05_ht') && !estado.msgIds['over15_ht']) {
+    if (is1T && total === 1 && tempoNum <= 20) {
+      const favorito = getFavorito(jogo);
+      const pg = checaPressaoGonza(jogo, estado, favorito, tempoNum) || checaPressaoGonza(jogo, estado, ladoOposto(favorito), tempoNum);
+      const ja = checaJogoAberto(jogo, tempoNum);
+      if (pg && pg.tipo === 'completo') {
+        await dispararAlertaIndicador(jogo, estado, 'over15_ht', 'gonza', '1T', pg.minutoChute, { entradaReal: true });
+      } else if (pg && pg.tipo === 'gonza2') {
+        await dispararAlertaIndicador(jogo, estado, 'over15_ht', 'gonza2', '1T', pg.minutoChute, { entradaReal: true });
+      } else if (ja) {
+        await dispararAlertaIndicador(jogo, estado, 'over15_ht', 'aberto', '1T', `${ja.minCasa}-${ja.minFora}`, { entradaReal: true });
+      } else if (pg && pg.tipo === 'sem_eficiencia') {
+        await dispararAlertaIndicador(jogo, estado, 'over15_ht', 'semEf', '1T', tempoNum, { entradaReal: false });
       }
     }
   }
 }
-
 async function processarFimDeJogo(jogoId, estado, hoje) {
   console.log(`[FIM] ${jogoId}`);
   const jogo = estado.jogo;
@@ -1540,12 +1284,6 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   for (const p of pendJogo) {
     p.final  = placarFT;
     p.ht     = estado.htPlacar || '';
-    if (p.golLimiteConversao) {
-      const [pcConv, pfConv] = (p.placarNaConversao || '0x0').split('x').map(Number);
-      const totalNaConversao = (pcConv||0) + (pfConv||0);
-      p.result = (golsCasa + golsFora) > totalNaConversao ? 'green' : 'red';
-      continue;
-    }
     const res = calcularResultado(p.strat, golsCasa, golsFora, htH, htA);
     p.result  = res || 'resolvido';
   }
@@ -1554,8 +1292,7 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
 
-    if (info.grupo1Status === 'green' || info.grupo1Status === 'red' ||
-        info.grupo1Status === 'red_reacao' || info.grupo1Status === 'red_gonza') continue;
+    if (info.grupo1Status === 'green' || info.grupo1Status === 'red') continue;
 
     const stratBase = stratKey.replace(/_live$/, '');
     const pLive = pendJogo.find(p => {
@@ -1564,8 +1301,8 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     });
 
     let res;
-    if (info.indicadorTipo === 'pressao_sem_eficiencia' && !info.pressaoConfirmada) {
-      res = 'nao_entra';
+    if (!info.entradaConfirmada) {
+      res = 'nao_entra'; // só teve Pressão sem eficiência, nunca virou entrada real
     } else {
       res = pLive?.result || calcularResultado(stratBase, golsCasa, golsFora, htH, htA);
     }
@@ -1576,18 +1313,14 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     else                        emoji = '⏳ AVALIAR MANUALMENTE';
     const display = STRAT_DISPLAY[stratKey] || stratKey;
 
-    let corpoAcumulado = '';
-    if (info.indicadorTipo) {
-      const extras = (info.linhasExtras || []).join('\n');
-      const confExtraFinal = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
-      corpoAcumulado = (info.ultimoStatusTexto || info.linhaIndicador || '') + (extras ? `\n${extras}` : '') + confExtraFinal;
-    } else if (info.ultimoStatusTexto) {
-      corpoAcumulado = info.ultimoStatusTexto;
-    }
-
+    // Preserva todo o histórico acumulado (indicadores + aviso de saída +
+    // confiabilidade) — nunca reescreve do zero, só acrescenta o resultado.
+    const partes = [...montarLinhasIndicadores(info)];
+    if (info.avisoSaida) partes.push(info.avisoSaida);
+    if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
     const htTexto = estado.htPlacar || '-';
-    const linhaResultado = `${emoji} · HT: ${htTexto} · FT: ${placarFT}`;
-    const corpo = corpoAcumulado ? `${corpoAcumulado}\n\n${linhaResultado}` : linhaResultado;
+    partes.push(`${emoji} · HT: ${htTexto} · FT: ${placarFT}`);
+    const corpo = partes.join('\n');
 
     const textoFinal = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────\n${corpo}${links}`;
     await editTelegram(info.ids, textoFinal);
