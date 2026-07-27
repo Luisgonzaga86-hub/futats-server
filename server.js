@@ -96,6 +96,12 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
 const DATA_FILE   = path.join(__dirname, 'dados.json');
 const PEND_FILE   = path.join(__dirname, 'pendentes.json');
 const ESTADO_FILE = path.join(__dirname, 'estado_live.json');
+const MOMENTUM_HISTORICO_FILE = path.join(__dirname, 'momentum_historico.json');
+// Depois de encerrado, o jogo fica esse tempo no estado_live.json (pra
+// garantir que nenhum ciclo atrasado ainda vá editar mensagem dele) antes
+// de ser movido pro arquivo de histórico e removido do arquivo "quente"
+// (que é reescrito por inteiro a cada ciclo — sem isso, ele só cresce).
+const ARQUIVAR_APOS_MS = 60 * 60 * 1000; // 1h
 
 function lerArquivo(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -107,6 +113,7 @@ function salvarArquivo(file, data) {
 
 let dadosHist = lerArquivo(DATA_FILE, []);
 let pendentes = lerArquivo(PEND_FILE, []);
+let momentumHistorico = lerArquivo(MOMENTUM_HISTORICO_FILE, {});
 
 let estadoLive = lerArquivo(ESTADO_FILE, {});
 for (const k of Object.keys(estadoLive)) {
@@ -638,11 +645,13 @@ async function monitorarLive() {
         const ultimoMin = estado.ultimoMinuto || 0;
         if (minSemDados >= 3 && ultimoMin >= 90) {
           estado.encerrado = true;
+          estado.encerradoEm = agora;
           console.log(`[FIM AUTO] ${jogoId} · último min: ${ultimoMin} · sem dados há ${minSemDados.toFixed(1)}min`);
           await processarFimDeJogo(jogoId, estado, hoje);
         }
         else if (minSemDados >= 10) {
           estado.encerrado = true;
+          estado.encerradoEm = agora;
           console.log(`[FIM FORÇADO] ${jogoId} · sem dados há ${minSemDados.toFixed(1)}min`);
           await processarFimDeJogo(jogoId, estado, hoje);
         }
@@ -685,6 +694,7 @@ async function monitorarLive() {
 
       if (jogo.tempo === 'Encerrado' && !estado.encerrado) {
         estado.encerrado = true;
+        estado.encerradoEm = agora;
         await processarFimDeJogo(jogoId, estado, hoje);
         continue;
       }
@@ -737,9 +747,43 @@ async function monitorarLive() {
       await processarEstadoGrupo1(jogo, estado, jogoId, hoje);
     }
 
+    arquivarJogosEncerrados();
     salvarArquivo(ESTADO_FILE, estadoLive);
   } catch(e) {
     console.error('[LIVE] Erro:', e.message);
+  }
+}
+
+// Move pro arquivo de histórico (e remove do estado_live.json) qualquer
+// jogo encerrado há mais de ARQUIVAR_APOS_MS — assim o arquivo "quente"
+// (reescrito por inteiro a cada ciclo) não fica acumulando pra sempre.
+// Os dados brutos (momentum/eventos) ficam preservados no histórico, só
+// pra dar de reabrir o gráfico depois.
+function arquivarJogosEncerrados() {
+  const agora = Date.now();
+  let arquivados = 0;
+  for (const [jogoId, estado] of Object.entries(estadoLive)) {
+    if (!estado.encerrado) continue;
+    const encerradoEm = estado.encerradoEm || estado.ultimaVez || 0;
+    if ((agora - encerradoEm) < ARQUIVAR_APOS_MS) continue;
+
+    momentumHistorico[jogoId] = momentumHistorico[jogoId] || [];
+    // Guarda como lista (não sobrescreve) — cobre o caso raro de dois jogos
+    // diferentes do mesmo confronto (ida/volta, edições diferentes do ano).
+    momentumHistorico[jogoId].push({
+      jogo: estado.jogo,
+      momentum: estado.momentum,
+      eventos: estado.eventos,
+      htPlacar: estado.htPlacar || null,
+      ultimoPlacar: estado.ultimoPlacar || null,
+      encerradoEm,
+    });
+    delete estadoLive[jogoId];
+    arquivados++;
+  }
+  if (arquivados > 0) {
+    salvarArquivo(MOMENTUM_HISTORICO_FILE, momentumHistorico);
+    console.log(`[ARQUIVO] ${arquivados} jogo(s) movido(s) pro histórico (estado_live.json aliviado).`);
   }
 }
 
@@ -1567,10 +1611,67 @@ app.get('/momentum-status', async (req, res) => {
     }
 
     const corpo = jogosRelevantes.map(msHTMLJogo).join('');
-    res.send(msPaginaHTML(corpo));
+    res.send(msPaginaHTML(`<p><a href="/momentum-status/historico">📜 Ver histórico de jogos encerrados</a></p>${corpo}`));
   } catch (e) {
     res.status(500).send('Erro ao gerar status: ' + e.message);
   }
+});
+
+// ── Histórico do momentum — jogos já encerrados e arquivados ──────
+// Lista todos os jogos arquivados (com filtro opcional por data/time),
+// cada um linkando pra reabrir o gráfico completo dele.
+app.get('/momentum-status/historico', (req, res) => {
+  const filtroData = (req.query.data || '').trim();
+  const filtroJogo  = (req.query.jogo || '').trim().toLowerCase();
+
+  const linhas = [];
+  for (const [jogoId, registros] of Object.entries(momentumHistorico)) {
+    registros.forEach((reg, idx) => {
+      const jogo = reg.jogo || {};
+      const dataJogo = (jogo.data || '').slice(0, 10);
+      if (filtroData && dataJogo !== filtroData) return;
+      if (filtroJogo &&
+          !(jogo.mandante || '').toLowerCase().includes(filtroJogo) &&
+          !(jogo.visitante || '').toLowerCase().includes(filtroJogo)) return;
+      linhas.push({ jogoId, idx, dataJogo, jogo, reg });
+    });
+  }
+  linhas.sort((a, b) => (b.reg.encerradoEm || 0) - (a.reg.encerradoEm || 0));
+
+  if (!linhas.length) {
+    return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo arquivado ainda (ou nenhum bate com o filtro). Jogos só são arquivados 1h depois de encerrados.</p>'));
+  }
+
+  const corpoLinhas = linhas.map(({ jogoId, idx, dataJogo, jogo, reg }) => `
+    <div class="ms-jogo">
+      <div class="ms-jogo-header">
+        <p class="ms-jogo-nome">${jogo.mandante} x ${jogo.visitante}</p>
+        <p class="ms-muted ms-small">${dataJogo} &middot; placar final ${reg.ultimoPlacar || '-'} (HT: ${reg.htPlacar || '-'})</p>
+      </div>
+      <a href="/momentum-status/historico/${encodeURIComponent(jogoId)}?idx=${idx}">Ver gráfico completo</a>
+    </div>`).join('');
+
+  res.send(msPaginaHTML(`<p class="ms-muted" style="margin-bottom:12px;">${linhas.length} jogo(s) arquivado(s)</p>${corpoLinhas}`));
+});
+
+// Reabre o gráfico completo de UM jogo já encerrado, reaproveitando a
+// mesma função de desenho usada nos jogos ao vivo (msHTMLJogo).
+app.get('/momentum-status/historico/:jogoId', (req, res) => {
+  const jogoId = req.params.jogoId;
+  const idx = parseInt(req.query.idx) || 0;
+  const registros = momentumHistorico[jogoId];
+  if (!registros || !registros[idx]) {
+    return res.status(404).send(msPaginaHTML('<p class="ms-empty">Jogo não encontrado no histórico.</p>'));
+  }
+  const reg = registros[idx];
+  const jogoParaDesenho = {
+    ...reg.jogo,
+    momentum: reg.momentum,
+    eventos: reg.eventos,
+    tempo: 'Encerrado',
+  };
+  const corpo = `<p><a href="/momentum-status/historico">← Voltar pro histórico</a></p>${msHTMLJogo(jogoParaDesenho)}`;
+  res.send(msPaginaHTML(corpo));
 });
 
 app.get('/dados',  (req, res) => res.json(dadosHist));
