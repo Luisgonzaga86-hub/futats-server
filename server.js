@@ -93,10 +93,17 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   }
 }
 
-const DATA_FILE   = path.join(__dirname, 'dados.json');
-const PEND_FILE   = path.join(__dirname, 'pendentes.json');
-const ESTADO_FILE = path.join(__dirname, 'estado_live.json');
-const MOMENTUM_HISTORICO_FILE = path.join(__dirname, 'momentum_historico.json');
+// Todos os arquivos de dados ficam dentro de data/ — assim o Volume do
+// Railway pode ser montado só nessa pasta (montar direto na raiz do app
+// apagaria o node_modules na primeira vez, comportamento conhecido do
+// Railway com volumes vazios sobrepondo o path de montagem).
+const DATA_DIR = path.join(__dirname, 'data');
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const DATA_FILE   = path.join(DATA_DIR, 'dados.json');
+const PEND_FILE   = path.join(DATA_DIR, 'pendentes.json');
+const ESTADO_FILE = path.join(DATA_DIR, 'estado_live.json');
+const MOMENTUM_HISTORICO_FILE = path.join(DATA_DIR, 'momentum_historico.json');
 // Depois de encerrado, o jogo fica esse tempo no estado_live.json (pra
 // garantir que nenhum ciclo atrasado ainda vá editar mensagem dele) antes
 // de ser movido pro arquivo de histórico e removido do arquivo "quente"
@@ -1025,7 +1032,8 @@ function registrarPressaoGonza(info, pg, periodo, stratKey) {
   }
   let mudou = false;
   if (pg.tipo === 'completo' || pg.tipo === 'gonza2') {
-    if (registrarIndicador(info, pg.tipo, periodo, pg.minutoChute)) {
+    const chave = pg.tipo === 'completo' ? 'gonza' : 'gonza2';
+    if (registrarIndicador(info, chave, periodo, pg.minutoChute)) {
       mudou = true;
       if (!info.entradaConfirmada) {
         info.entradaConfirmada = true;
