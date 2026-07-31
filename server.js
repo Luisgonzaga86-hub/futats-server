@@ -1378,7 +1378,13 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     await editTelegram(info.ids, textoFinal);
   }
 
-  await sendTelegram(`🏁 <b>FIM DE JOGO</b>\n⚽ ${jogo.mandante} x ${jogo.visitante}\n📊 FT: ${placarFT}`);
+  // Só manda o aviso solto de "FIM DE JOGO" se o jogo teve pelo menos 1
+  // alerta de estratégia de verdade — evita poluir o chat com jogos que o
+  // servidor só estava monitorando (Seleção IA/Filtro/Estratégia registrada
+  // no pré-jogo) mas nenhum indicador bateu durante a partida.
+  if (Object.keys(estado.msgIds || {}).length > 0) {
+    await sendTelegram(`🏁 <b>FIM DE JOGO</b>\n⚽ ${jogo.mandante} x ${jogo.visitante}\n📊 FT: ${placarFT}`);
+  }
 }
 
 function agendarHoraBRT(hora, minuto, callback) {
