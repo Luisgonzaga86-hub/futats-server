@@ -62,7 +62,18 @@ async function checarEExecutarPull(janela, horaInicio, horaFim) {
 // do kickoff, já que não custa nada e os baldes já ajudam a ver na tabela
 // do site assim que o jogo é registrado.
 function calcularJogosPendentes() {
-  const pendentes = store.getPendingCalculo();
+  let pendentes;
+  try {
+    pendentes = store.getPendingCalculo();
+  } catch (err) {
+    // Protege contra qualquer falha de leitura do arquivo (ex: JSON pego no
+    // meio de uma escrita) — sem isso, uma exceção aqui dentro de um cron
+    // async sem try/catch vira unhandled rejection e derruba o processo
+    // inteiro (visto na prática em 04/08, app caiu com "upstream error").
+    console.error('[scheduler] Falha ao buscar jogos pendentes de cálculo, pulando esse ciclo:', err.message);
+    return;
+  }
+
   for (const jogo of pendentes) {
     try {
       const resultado = calcularBaldes(jogo.stats_pre_raw);
@@ -151,13 +162,20 @@ async function checarJogosProntosParaAnalise() {
 function iniciar() {
   // Roda a cada 5 minutos: checa pulls e checa jogos prontos pra análise
   cron.schedule('*/5 * * * *', async () => {
-    await checarEExecutarPull('manha', 7.5, 8.5);
-    await checarEExecutarPull('meio_dia', 12, 13);
-    await checarEExecutarPull('noite', 18.5, 19.5);
-    await checarEExecutarPull('madrugada', 0, 1);
+    try {
+      await checarEExecutarPull('manha', 7.5, 8.5);
+      await checarEExecutarPull('meio_dia', 12, 13);
+      await checarEExecutarPull('noite', 18.5, 19.5);
+      await checarEExecutarPull('madrugada', 0, 1);
 
-    calcularJogosPendentes();
-    await checarJogosProntosParaAnalise();
+      calcularJogosPendentes();
+      await checarJogosProntosParaAnalise();
+    } catch (err) {
+      // Rede de segurança final — qualquer exceção não prevista aqui dentro
+      // (async, sem isso vira unhandled rejection e derruba o processo
+      // inteiro) só pula esse ciclo de 5min. O próximo ciclo tenta de novo.
+      console.error('[scheduler] Erro inesperado no ciclo do cron, pulando esse ciclo:', err.message);
+    }
   });
 
   console.log('[scheduler] Agendador iniciado — checando a cada 5 minutos.');

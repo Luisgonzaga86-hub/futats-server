@@ -16,11 +16,28 @@ function ensureFile() {
 
 function readAll() {
   ensureFile();
-  return JSON.parse(fs.readFileSync(FILE, 'utf-8'));
+  try {
+    return JSON.parse(fs.readFileSync(FILE, 'utf-8'));
+  } catch (err) {
+    // Rede de segurança pra qualquer resquício de leitura no meio de uma
+    // escrita não-atômica antiga — com writeAll já atômico (rename), isso
+    // não deve mais acontecer daqui pra frente, mas não custa ter a defesa.
+    console.error('[store] JSON inválido na primeira tentativa, tentando ler de novo:', err.message);
+    const buf = fs.readFileSync(FILE, 'utf-8');
+    return JSON.parse(buf);
+  }
 }
 
+// Escrita atômica: grava num arquivo temporário e só troca pelo definitivo
+// no final (fs.renameSync é atômico no sistema de arquivos). Sem isso, uma
+// leitura feita bem no meio de um writeFileSync grande (o arquivo já passa
+// de 1500 jogos) podia pegar o JSON pela metade e quebrar com "Unexpected
+// end of JSON input" — visto na prática em 04/08, com a calculadora nova
+// gravando com muito mais frequência que antes.
 function writeAll(data) {
-  fs.writeFileSync(FILE, JSON.stringify(data, null, 2));
+  const tmpFile = `${FILE}.tmp`;
+  fs.writeFileSync(tmpFile, JSON.stringify(data, null, 2));
+  fs.renameSync(tmpFile, FILE);
 }
 
 // Salva ou atualiza um jogo (usa o "id" do jogo como chave única pra nunca duplicar)
