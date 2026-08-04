@@ -34,6 +34,13 @@ function hojeBrasilia() {
   return brasilia.toISOString().slice(0, 10);
 }
 
+// Mapeia o nível calculado (Alta/Média/Baixa) pro emoji correspondente
+function emojiNivel(nivel) {
+  if (nivel === 'Alta') return '🟢';
+  if (nivel === 'Baixa') return '🔴';
+  return '🟡';
+}
+
 // Página principal: lista só os jogos de HOJE
 app.get('/', checarSenha, (req, res) => {
   const hoje = hojeBrasilia();
@@ -47,12 +54,15 @@ app.get('/', checarSenha, (req, res) => {
       let status;
       if (j.analisado) status = '✅ analisado';
       else if (j.processando) status = '⏳ processando...';
+      else if (j.calculado) status = '🧮 calculado';
       else status = '⏳ pendente';
 
       const conf = j.analise_estruturada;
       const confianca = j.analisado && conf
         ? `<br><small>🎯 ${conf.favorito} · ⚽ ${conf.gols} · 🔒 ${conf.lay}</small>`
-        : '';
+        : (j.calculado && j.calculo
+            ? `<br><small style="color:#999;">🎯 ${emojiNivel(j.calculo.favorito.nivel)} ${j.calculo.favorito.nivel} · ⚽ ${emojiNivel(j.calculo.gols.nivel)} ${j.calculo.gols.nivel} · 🔒 ${emojiNivel(j.calculo.placar.nivel)} ${j.calculo.placar.nivel} (cálculo local)</small>`
+            : '');
 
       const acao = j.analisado
         ? `<a href="/analise/${j.id}?senha=${req.query.senha}" style="color:#4fd1c5;">Ver análise</a>`

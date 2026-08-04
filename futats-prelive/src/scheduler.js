@@ -10,6 +10,7 @@ const filters = require('./filters');
 const futatsClient = require('./futatsClient');
 const { analisarJogo } = require('./claudeAnalyzer');
 const { enviarMensagem } = require('./telegram');
+const { calcularBaldes } = require('./calculadora');
 
 const MINUTOS_ANTES = 50;
 const JANELA_TOLERANCIA_MIN = 5; // roda o check a cada 5 min, então aceita uma folga de +-5min
@@ -55,6 +56,23 @@ async function checarEExecutarPull(janela, horaInicio, horaFim) {
   }
 }
 
+// -------- Parte 1.5: cálculo local (grátis, sem API) --------
+// Roda a calculadora.js (Manual V7, só as partes determinísticas) em todo
+// jogo que ainda não foi calculado — independente da janela de 50min antes
+// do kickoff, já que não custa nada e os baldes já ajudam a ver na tabela
+// do site assim que o jogo é registrado.
+function calcularJogosPendentes() {
+  const pendentes = store.getPendingCalculo();
+  for (const jogo of pendentes) {
+    try {
+      const resultado = calcularBaldes(jogo.stats_pre_raw);
+      if (resultado) store.markCalculado(jogo.id, resultado);
+    } catch (err) {
+      console.error(`[scheduler] Falha ao calcular ${jogo.mandante} x ${jogo.visitante}:`, err.message);
+    }
+  }
+}
+
 // -------- Parte 2: disparo de análise 50min antes do kickoff --------
 
 function minutosAteKickoff(jogo) {
@@ -74,7 +92,7 @@ function minutosAteKickoff(jogo) {
 async function processarAnaliseDoJogo(jogo, motivo) {
   console.log(`[scheduler] Analisando: ${jogo.mandante} x ${jogo.visitante} (${motivo})`);
   try {
-    const textoAnalise = await analisarJogo(jogo.stats_pre_raw);
+    const textoAnalise = await analisarJogo(jogo.stats_pre_raw, jogo.calculo);
     const confiancas = extrairConfiancas(textoAnalise);
     store.markAnalyzed(jogo.id, textoAnalise, confiancas);
 
@@ -107,6 +125,18 @@ async function checarJogosProntosParaAnalise() {
 
     if (!qualifica) continue;
 
+    // 04/08 — a análise completa (paga, via API) só dispara automaticamente
+    // se o cálculo local já mostrar os 3 baldes em pelo menos Média (nenhum
+    // Baixa). Jogos que o cálculo local já descarta ficam só com o resumo
+    // grátis na tabela — dá pra forçar a análise completa manualmente pelo
+    // botão a qualquer momento, isso não muda.
+    if (!jogo.calculo || !jogo.calculo.valeAPena) {
+      console.log(
+        `[scheduler] Pulando análise automática de ${jogo.mandante} x ${jogo.visitante} — cálculo local não vale a pena (${jogo.calculo ? JSON.stringify({ f: jogo.calculo.favorito.nivel, g: jogo.calculo.gols.nivel, p: jogo.calculo.placar.nivel }) : 'ainda não calculado'})`
+      );
+      continue;
+    }
+
     // Trava IMEDIATA antes de qualquer await — impede que o próximo ciclo do
     // cron (5 min depois) pegue o mesmo jogo ainda "pendente" e dispare de novo.
     const travou = store.markProcessing(jogo.id);
@@ -126,6 +156,7 @@ function iniciar() {
     await checarEExecutarPull('noite', 18.5, 19.5);
     await checarEExecutarPull('madrugada', 0, 1);
 
+    calcularJogosPendentes();
     await checarJogosProntosParaAnalise();
   });
 

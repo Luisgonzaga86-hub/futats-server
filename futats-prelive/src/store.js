@@ -35,7 +35,22 @@ function upsertGame(game) {
     analise: existing?.analise ?? null,
     conferido: existing?.conferido ?? false,
     resultado_real: existing?.resultado_real ?? null,
+    // cálculo local (grátis, via calculadora.js) — separado da análise
+    // completa (paga, via API). Um jogo pode ter calculado=true e
+    // analisado=false por muito tempo, se os baldes não valerem a pena.
+    calculado: existing?.calculado ?? false,
+    calculo: existing?.calculo ?? null,
   };
+  writeAll(data);
+}
+
+// Salva o resultado do cálculo local (calculadora.js) — não envolve API,
+// só marca os baldes de confiança calculados a partir do stats_pre.
+function markCalculado(id, calculoResultado) {
+  const data = readAll();
+  if (!data.jogos[id]) return;
+  data.jogos[id].calculado = true;
+  data.jogos[id].calculo = calculoResultado;
   writeAll(data);
 }
 
@@ -119,12 +134,20 @@ function marcarPullFeito(janela) {
   writeAll(data);
 }
 
+// Jogos de hoje que ainda não tiveram o cálculo local rodado (independente
+// de já estarem analisados ou não — o cálculo é sempre a base, grátis)
+function getPendingCalculo() {
+  return getAllGames().filter((g) => !g.calculado);
+}
+
 module.exports = {
   upsertGame,
   getGame,
   getAllGames,
   getPendingGames,
+  getPendingCalculo,
   markAnalyzed,
+  markCalculado,
   markProcessing,
   markProcessingFailed,
   markConferido,
