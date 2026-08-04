@@ -1,0 +1,184 @@
+// scheduler.js
+// Duas responsabilidades:
+// 1) Puxar a API da Futats nos 4 horários recomendados pelo manual (uma vez por janela/dia)
+// 2) A cada poucos minutos, checar se algum jogo qualificado está a ~50min do kickoff
+//    e ainda não foi analisado — se sim, dispara a análise e manda pro Telegram
+
+const cron = require('node-cron');
+const store = require('./store');
+const filters = require('./filters');
+const futatsClient = require('./futatsClient');
+const { analisarJogo } = require('./claudeAnalyzer');
+const { enviarMensagem } = require('./telegram');
+const { calcularBaldes } = require('./calculadora');
+
+const MINUTOS_ANTES = 50;
+const JANELA_TOLERANCIA_MIN = 5; // roda o check a cada 5 min, então aceita uma folga de +-5min
+const TIMEOUT_PROCESSAMENTO_MIN = 10; // se travar processando por mais que isso, libera pra tentar de novo
+
+// Lê o texto final da análise e extrai os 3 níveis de confiança (Favorito/Gols/Placar)
+// pra mostrar como badge na tabela da página web, sem precisar abrir o texto inteiro.
+function extrairConfiancas(texto) {
+  const pegar = (rotulo) => {
+    const regex = new RegExp(`${rotulo}[^:]*:\\s*(🟢|🟡|🔴)\\s*(Alta|Média|Baixa)`, 'i');
+    const m = texto.match(regex);
+    return m ? `${m[1]} ${m[2]}` : '-';
+  };
+  return {
+    favorito: pegar('FAVORITO'),
+    gols: pegar('GOLS'),
+    lay: pegar('PLACAR'),
+  };
+}
+
+// Brasília é sempre UTC-3 (sem horário de verão desde 2019). Isso funciona
+// independente do fuso horário configurado no servidor (Railway roda em UTC).
+function horaBrasiliaAtual() {
+  const agora = new Date();
+  let h = agora.getUTCHours() + agora.getUTCMinutes() / 60 - 3;
+  if (h < 0) h += 24;
+  return h;
+}
+
+// -------- Parte 1: pulls automáticos nos 4 horários --------
+
+async function checarEExecutarPull(janela, horaInicio, horaFim) {
+  const horaAtual = horaBrasiliaAtual();
+
+  if (horaAtual >= horaInicio && horaAtual <= horaFim && !store.jaPuxouHoje(janela)) {
+    console.log(`[scheduler] Executando pull da janela ${janela}... (hora Brasília: ${horaAtual.toFixed(2)})`);
+    try {
+      await futatsClient.buscarJogosDoDia();
+      store.marcarPullFeito(janela);
+    } catch (err) {
+      console.error(`[scheduler] Falha no pull ${janela}:`, err.message);
+    }
+  }
+}
+
+// -------- Parte 1.5: cálculo local (grátis, sem API) --------
+// Roda a calculadora.js (Manual V7, só as partes determinísticas) em todo
+// jogo que ainda não foi calculado — independente da janela de 50min antes
+// do kickoff, já que não custa nada e os baldes já ajudam a ver na tabela
+// do site assim que o jogo é registrado.
+function calcularJogosPendentes() {
+  let pendentes;
+  try {
+    pendentes = store.getPendingCalculo();
+  } catch (err) {
+    // Protege contra qualquer falha de leitura do arquivo (ex: JSON pego no
+    // meio de uma escrita) — sem isso, uma exceção aqui dentro de um cron
+    // async sem try/catch vira unhandled rejection e derruba o processo
+    // inteiro (visto na prática em 04/08, app caiu com "upstream error").
+    console.error('[scheduler] Falha ao buscar jogos pendentes de cálculo, pulando esse ciclo:', err.message);
+    return;
+  }
+
+  for (const jogo of pendentes) {
+    try {
+      const resultado = calcularBaldes(jogo.stats_pre_raw);
+      if (resultado) store.markCalculado(jogo.id, resultado);
+    } catch (err) {
+      console.error(`[scheduler] Falha ao calcular ${jogo.mandante} x ${jogo.visitante}:`, err.message);
+    }
+  }
+}
+
+// -------- Parte 2: disparo de análise 50min antes do kickoff --------
+
+function minutosAteKickoff(jogo) {
+  const dataJogo = new Date(jogo.data); // vem em formato ISO (ex: 2026-07-05T00:00:00.000Z), meia-noite UTC do dia
+  const [h, m] = jogo.hora.split(':').map(Number);
+
+  // A Futats informa "hora" em horário de Brasília (UTC-3). Convertendo pra UTC
+  // somando 3h — Date.UTC() normaliza sozinho se passar de 24h (vira o dia seguinte).
+  const kickoffUTC = new Date(
+    Date.UTC(dataJogo.getUTCFullYear(), dataJogo.getUTCMonth(), dataJogo.getUTCDate(), h + 3, m, 0, 0)
+  );
+
+  const agora = new Date();
+  return (kickoffUTC - agora) / 60000; // diferença em minutos
+}
+
+async function processarAnaliseDoJogo(jogo, motivo) {
+  console.log(`[scheduler] Analisando: ${jogo.mandante} x ${jogo.visitante} (${motivo})`);
+  try {
+    const textoAnalise = await analisarJogo(jogo.stats_pre_raw, jogo.calculo);
+    const confiancas = extrairConfiancas(textoAnalise);
+    store.markAnalyzed(jogo.id, textoAnalise, confiancas);
+
+    await enviarMensagem(textoAnalise, 'pessoal');
+
+    console.log(`[scheduler] Análise enviada: ${jogo.mandante} x ${jogo.visitante}`);
+  } catch (err) {
+    console.error(`[scheduler] Erro ao analisar ${jogo.mandante} x ${jogo.visitante}:`, err.message);
+    store.markProcessingFailed(jogo.id); // libera o jogo pra tentar de novo no próximo ciclo
+  }
+}
+
+async function checarJogosProntosParaAnalise() {
+  const pendentes = store.getPendingGames();
+
+  for (const jogo of pendentes) {
+    const faltam = minutosAteKickoff(jogo);
+
+    // já passou muito do jogo — não faz mais sentido analisar
+    if (faltam < -10) continue;
+
+    const dentroDaJanela = faltam <= MINUTOS_ANTES + JANELA_TOLERANCIA_MIN && faltam >= MINUTOS_ANTES - JANELA_TOLERANCIA_MIN;
+
+    if (!dentroDaJanela) continue;
+
+    const qualifica = filters.qualificaParaAnalise(jogo);
+    console.log(
+      `[scheduler] Avaliando ${jogo.mandante} x ${jogo.visitante} | faltam ${faltam.toFixed(1)}min | qualifica: ${qualifica} | selecao_ia: "${jogo.selecao_ia || ''}"`
+    );
+
+    if (!qualifica) continue;
+
+    // 04/08 — a análise completa (paga, via API) só dispara automaticamente
+    // se o cálculo local já mostrar os 3 baldes em pelo menos Média (nenhum
+    // Baixa). Jogos que o cálculo local já descarta ficam só com o resumo
+    // grátis na tabela — dá pra forçar a análise completa manualmente pelo
+    // botão a qualquer momento, isso não muda.
+    if (!jogo.calculo || !jogo.calculo.valeAPena) {
+      console.log(
+        `[scheduler] Pulando análise automática de ${jogo.mandante} x ${jogo.visitante} — cálculo local não vale a pena (${jogo.calculo ? JSON.stringify({ f: jogo.calculo.favorito.nivel, g: jogo.calculo.gols.nivel, p: jogo.calculo.placar.nivel }) : 'ainda não calculado'})`
+      );
+      continue;
+    }
+
+    // Trava IMEDIATA antes de qualquer await — impede que o próximo ciclo do
+    // cron (5 min depois) pegue o mesmo jogo ainda "pendente" e dispare de novo.
+    const travou = store.markProcessing(jogo.id);
+    if (!travou) continue; // outro ciclo já pegou esse jogo primeiro
+
+    await processarAnaliseDoJogo(jogo, 'automático, 50min antes');
+  }
+}
+
+// -------- Inicialização dos crons --------
+
+function iniciar() {
+  // Roda a cada 5 minutos: checa pulls e checa jogos prontos pra análise
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await checarEExecutarPull('manha', 7.5, 8.5);
+      await checarEExecutarPull('meio_dia', 12, 13);
+      await checarEExecutarPull('noite', 18.5, 19.5);
+      await checarEExecutarPull('madrugada', 0, 1);
+
+      calcularJogosPendentes();
+      await checarJogosProntosParaAnalise();
+    } catch (err) {
+      // Rede de segurança final — qualquer exceção não prevista aqui dentro
+      // (async, sem isso vira unhandled rejection e derruba o processo
+      // inteiro) só pula esse ciclo de 5min. O próximo ciclo tenta de novo.
+      console.error('[scheduler] Erro inesperado no ciclo do cron, pulando esse ciclo:', err.message);
+    }
+  });
+
+  console.log('[scheduler] Agendador iniciado — checando a cada 5 minutos.');
+}
+
+module.exports = { iniciar, processarAnaliseDoJogo };
