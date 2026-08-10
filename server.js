@@ -1631,6 +1631,19 @@ app.get('/momentum-status', async (req, res) => {
   }
 });
 
+// ── Exportar histórico bruto de momentum (JSON completo) ──────────
+// Rota temporária pra baixar o arquivo direto do Volume e analisar fora.
+// Uso: /interno/exportar-momentum?token=SEU_INTERNAL_TOKEN
+app.get('/interno/exportar-momentum', (req, res) => {
+  if (!INTERNAL_TOKEN || req.query.token !== INTERNAL_TOKEN) {
+    return res.status(403).send('Token inválido.');
+  }
+  if (!fs.existsSync(MOMENTUM_HISTORICO_FILE)) {
+    return res.status(404).send('Arquivo momentum_historico.json não encontrado.');
+  }
+  res.download(MOMENTUM_HISTORICO_FILE, 'momentum_historico.json');
+});
+
 // ── Histórico do momentum — jogos já encerrados e arquivados ──────
 // Lista todos os jogos arquivados (com filtro opcional por data/time),
 // cada um linkando pra reabrir o gráfico completo dele.
