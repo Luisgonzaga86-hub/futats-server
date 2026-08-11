@@ -91,6 +91,9 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
     if (info.grupo1Status) continue; // Grupo 1 recebe o bloco na próxima transição de estado
     await rerenderizarAlerta(jogo, estado, stratKey, info);
   }
+  if (estado.msgConsolidada?.ids?.length && !estado.msgConsolidada.travado) {
+    await rerenderizarConsolidado(jogo, estado);
+  }
 }
 
 // Todos os arquivos de dados ficam dentro de data/ — assim o Volume do
@@ -434,6 +437,33 @@ const STRAT_DISPLAY = {
   over05:               '🟢 Over 0,5 Gonza',
   ambas_marcam_xg:       '🟤 Ambas Marcam xG',
 };
+
+// ════════════════════════════════════════════════════════════════
+// ── REGRAS_ENTRADA — tabela de decisão validada com dados reais ──
+// (10/08/2026, cruzando alertas do canal + odds pré-jogo + placar
+// final de centenas de jogos). Mexer aqui não muda a lógica que usa
+// essa tabela, só os números/cortes.
+// ════════════════════════════════════════════════════════════════
+const REGRAS_ENTRADA = {
+  favorito_ht_gonza: {
+    corte2T: 65,               // 45'-65' = Over Limite / depois = Lay+1 zebra
+    oddJustaOverLimite1T: 1.06,
+    oddJustaLay1Zebra2T: 1.17,
+  },
+  over05: {
+    oddJustaCombinado: 1.05,   // com qualquer outra estratégia junto → Over Limite
+    oddJustaOverHT: 1.06,
+    oddJustaOverLimiteIsolado: 1.05,
+  },
+  gol_no_final: {
+    limiteMinuto: 65,          // só dispara até aqui
+    oddJusta: 1.36,
+  },
+};
+
+// Estratégias de gol que agora só disparam a partir do 2º tempo
+// (min 45+) — decisão de 10/08, focando o sinal onde ele é mais forte.
+const GOLS_STRATS_SO_2T = ['felipe_over15', 'ambas_marcam', 'ambas_marcam_xg', 'over15_ia'];
 
 const IA_PARA_STRAT = {
   'Gol no Final':           'gol_no_final',
@@ -890,6 +920,258 @@ function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay) {
   return partes.join('\n');
 }
 
+// ════════════════════════════════════════════════════════════════
+// ── ALERTA CONSOLIDADO (10/08) — 1 mensagem por jogo, agrupando  ──
+// ── todas as estratégias próprias que dispararem juntas, com a   ──
+// ── entrada sugerida calculada a partir das regras validadas.    ──
+// ════════════════════════════════════════════════════════════════
+// gol_no_final NUNCA entra aqui — sempre mensagem própria (ver mais
+// abaixo, continua usando dispararAlertaIndicador/rerenderizarAlerta).
+const STRATS_FORA_DO_CONSOLIDADO = ['gol_no_final'];
+
+function golsDoEstado(estado) {
+  return (estado.eventos || [])
+    .filter(e => e.tipo_evento === 'gol')
+    .sort((a, b) => a.minuto - b.minuto);
+}
+
+function ladoZebra(jogo) { return ladoOposto(getFavorito(jogo)); }
+
+function calcularAlvoLayPlacar(placarBase, zebraLado, incremento) {
+  const [gc, gf] = placarBase.split('x').map(Number);
+  if (zebraLado === 'casa') return `${gc + incremento}x${gf}`;
+  return `${gc}x${gf + incremento}`;
+}
+
+// CASO1/2/3 do manual do Over 0,5 Gonza sozinho (sem nenhuma outra
+// estratégia confirmando junto).
+function determinarEntradaOver05Isolado(jogo, placarBase, tempoNum) {
+  const [gc, gf] = placarBase.split('x').map(Number);
+  const favorito = getFavorito(jogo);
+  const total = gc + gf;
+
+  if (total === 0) {
+    if (tempoNum < 20) {
+      return { tipo: 'over_ht_recuperacao', texto: 'Over HT (se não sair, Lay 1x0/0x1 zebra)', placarBase, oddJusta: REGRAS_ENTRADA.over05.oddJustaOverHT };
+    }
+    return { tipo: 'over_limite', texto: 'Over Limite', placarBase, oddJusta: REGRAS_ENTRADA.over05.oddJustaOverLimiteIsolado };
+  }
+
+  if (total === 1) {
+    const lider = gc === 1 ? 'casa' : 'fora';
+    const liderEhFavorito = lider === favorito;
+    if (!liderEhFavorito) {
+      if (lider === 'fora') return { tipo: 'lay_placar_fixo', texto: 'Lay 0x2', alvoLay: '0x2', placarBase };
+      return { tipo: 'over_limite', texto: 'Over Limite', placarBase };
+    }
+    if (lider === 'casa') return { tipo: 'lay_placar_fixo', texto: 'Lay 1x1', alvoLay: '1x1', placarBase };
+    return { tipo: 'over_limite', texto: 'Over Limite', placarBase };
+  }
+
+  return { tipo: 'over_limite', texto: 'Over Limite', placarBase };
+}
+
+// Estratégias de lado que seguem a mesma regra Lay[placar+N zebra]
+// que o Favorito ht Gonza (mesma família de mercado).
+const LADO_MESMA_REGRA_FAVORITO = ['lay_away_manu', 'lay_manu4', 'back_gonza_xg', 'lay_gol_mand', 'lay_gol_visit'];
+
+// Decide qual entrada sugerir dado o conjunto de estratégias ativas no
+// alerta consolidado. `estrategias` = [{stratKey, tempoNum, placarAlerta}].
+function determinarEntradaSugerida(jogo, estrategias) {
+  const keys = estrategias.map(e => e.stratKey);
+  const temFavorito = keys.includes('favorito_ht_gonza');
+  const temOver = keys.includes('over05');
+  const outrasLado = keys.some(k => LADO_MESMA_REGRA_FAVORITO.includes(k));
+
+  const maisTardio = estrategias.reduce((a, b) => (b.tempoNum > a.tempoNum ? b : a));
+  const tempoNum = maisTardio.tempoNum;
+  const placarBase = maisTardio.placarAlerta;
+  const is1T = tempoNum < 45;
+  const zebra = ladoZebra(jogo);
+
+  // Over 0,5 Gonza + qualquer outra estratégia junto → Over Limite
+  if (temOver && estrategias.length > 1) {
+    return { tipo: 'over_limite', texto: 'Over Limite', placarBase, oddJusta: REGRAS_ENTRADA.over05.oddJustaCombinado };
+  }
+
+  // Favorito ht Gonza (ou lado da mesma família), sem Over 0,5 Gonza junto
+  if (temFavorito || outrasLado) {
+    if (is1T) {
+      const alvoLay = calcularAlvoLayPlacar(placarBase, zebra, 2);
+      return {
+        tipo: 'duas_opcoes_1T', texto: `Lay ${alvoLay}  ou  Over Limite`,
+        alvoLay, placarBase, oddJusta: REGRAS_ENTRADA.favorito_ht_gonza.oddJustaOverLimite1T,
+      };
+    }
+    if (tempoNum <= REGRAS_ENTRADA.favorito_ht_gonza.corte2T) {
+      return { tipo: 'over_limite', texto: 'Over Limite', placarBase };
+    }
+    const alvoLay = calcularAlvoLayPlacar(placarBase, zebra, 1);
+    return {
+      tipo: 'lay_placar', texto: `Lay ${alvoLay}`, alvoLay, placarBase,
+      oddJusta: REGRAS_ENTRADA.favorito_ht_gonza.oddJustaLay1Zebra2T,
+    };
+  }
+
+  // Só Over 0,5 Gonza, sozinho
+  if (temOver) return determinarEntradaOver05Isolado(jogo, placarBase, tempoNum);
+
+  return null; // nenhuma estratégia com regra de entrada validada
+}
+
+// Verifica se a entrada sugerida já bateu green com os gols atuais do
+// jogo, e acha o minuto do gol específico que confirmou.
+function checarGreenConsolidado(jogo, estado, entradaSugerida) {
+  if (!entradaSugerida) return { green: false };
+  const golsCasa = parseInt(jogo.gols_casa) || 0;
+  const golsFora = parseInt(jogo.gols_fora) || 0;
+  const gols = golsDoEstado(estado);
+  const [baseCasa, baseFora] = (entradaSugerida.placarBase || '0x0').split('x').map(Number);
+
+  if (['over_limite', 'duas_opcoes_1T', 'over_ht_recuperacao'].includes(entradaSugerida.tipo)) {
+    const totalBase = baseCasa + baseFora;
+    if ((golsCasa + golsFora) > totalBase) {
+      const golQueDecide = gols[totalBase]; // (totalBase+1)-ésimo gol cronológico do jogo
+      return { green: true, minutoGreen: golQueDecide ? golQueDecide.minuto : null };
+    }
+    return { green: false };
+  }
+
+  if (['lay_placar', 'lay_placar_fixo'].includes(entradaSugerida.tipo)) {
+    const [alvoCasa, alvoFora] = entradaSugerida.alvoLay.split('x').map(Number);
+    if (golsCasa > alvoCasa || golsFora > alvoFora) {
+      const ladoQueEstourou = golsCasa > alvoCasa ? 'casa' : 'fora';
+      const alvoDesseLado = ladoQueEstourou === 'casa' ? alvoCasa : alvoFora;
+      const golsDesseLado = gols.filter(g => g.lado === ladoQueEstourou);
+      const golQueDecide = golsDesseLado[alvoDesseLado]; // gol nº (alvo+1) desse lado
+      return { green: true, minutoGreen: golQueDecide ? golQueDecide.minuto : null };
+    }
+    if (jogo.tempo === 'Encerrado' && !(golsCasa === alvoCasa && golsFora === alvoFora)) {
+      return { green: true, minutoGreen: null };
+    }
+    return { green: false };
+  }
+
+  return { green: false };
+}
+
+function montarLinhaEntradaSugerida(info) {
+  if (!info.entradaSugerida) return '';
+  let linha = `➜ ENTRAR: ${info.entradaSugerida.texto}`;
+  if (info.entradaGreen) {
+    linha += `\n✅ GREEN confirmado` + (info.entradaMinutoGreen ? ` — gol aos ${info.entradaMinutoGreen}'` : '');
+  }
+  return linha;
+}
+
+// Monta o texto completo do alerta consolidado (lista de estratégias
+// ativas + indicadores + entrada sugerida + placar).
+function montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay) {
+  const ROTULO_GRUPO1 = {
+    atencao: ' — ⚠️ atenção (contra na frente)',
+    reacao: ' — 🔄 reação confirmada',
+    red: ' — ❌ sem reação',
+  };
+  const linhasEstrategias = msgCons.estrategias.map(e => {
+    const display = STRAT_DISPLAY[e.stratKey] || e.stratKey;
+    const statusTxt = ROTULO_GRUPO1[e.grupo1Status] || '';
+    return `  ${display} (${e.tempoNum}' · ${e.placarAlerta})${statusTxt}`;
+  }).join('\n');
+
+  const fixo = `⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ Alertas ativos:\n${linhasEstrategias}`;
+  const sep = '\n─────────────────';
+
+  const partes = [...montarLinhasIndicadores(msgCons)];
+  if (msgCons.avisoSaida) partes.push(msgCons.avisoSaida);
+  const linhaEntrada = montarLinhaEntradaSugerida(msgCons);
+  if (linhaEntrada) partes.push(linhaEntrada);
+  partes.push(`📊 Placar atual: ${placarAtual} · ${tempoDisplay}'`);
+  if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
+
+  const links = linksExchanges(jogo.urls_exchanges || {});
+  return fixo + sep + '\n' + partes.join('\n') + links;
+}
+
+// Chamado sempre que uma estratégia própria dispara (nova, ou já com o
+// jogo tendo alerta consolidado ativo). Cria a mensagem se não existir;
+// se existir e ainda não travou (green), adiciona a estratégia e
+// recalcula a entrada sugerida; se já travou, devolve false (quem
+// chamou deve então abrir uma mensagem NOVA em vez desta).
+async function dispararOuAtualizarConsolidado(jogo, estado, stratKey, tempoNum, placarAlerta, opcoes = {}) {
+  estado.msgConsolidada = estado.msgConsolidada || null;
+  const cons = estado.msgConsolidada;
+
+  if (cons && cons.travado) return false; // já fechou — quem chamou abre mensagem nova
+
+  const tempoDisplay = jogo.tempo === 'Intervalo' ? 'HT' : tempoNum;
+  const placarAtual = `${parseInt(jogo.gols_casa)||0}x${parseInt(jogo.gols_fora)||0}`;
+  const periodoAtual = tempoNum < 45 ? '1T' : '2T';
+
+  if (!cons) {
+    estado.msgConsolidada = {
+      ids: null,
+      estrategias: [{ stratKey, tempoNum, placarAlerta }],
+      indicadores: novoRegistroIndicadores(),
+      avisoSaida: null,
+      semEfAtivoPeriodo: {},
+      travado: false,
+    };
+  } else {
+    if (!cons.estrategias.some(e => e.stratKey === stratKey)) {
+      cons.estrategias.push({ stratKey, tempoNum, placarAlerta });
+    }
+  }
+  const msgCons = estado.msgConsolidada;
+  msgCons.__tempoAtualParaSemEf = tempoNum;
+  msgCons.__jogoParaRegistro = jogo;
+  if (opcoes.tipoIndicador) {
+    registrarIndicador(msgCons, opcoes.tipoIndicador, periodoAtual, opcoes.valorIndicador);
+  }
+  if (opcoes.entradaReal) msgCons.entradaConfirmada = true;
+  msgCons.entradaSugerida = determinarEntradaSugerida(jogo, msgCons.estrategias);
+  const gr = checarGreenConsolidado(jogo, estado, msgCons.entradaSugerida);
+  msgCons.entradaGreen = gr.green;
+  msgCons.entradaMinutoGreen = gr.minutoGreen;
+  if (gr.green) msgCons.travado = true;
+
+  const texto = montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay);
+
+  if (!msgCons.ids) {
+    msgCons.ids = await sendTelegram(texto);
+  } else {
+    await editTelegram(msgCons.ids, texto);
+  }
+
+  if (opcoes.entradaReal) {
+    const pendLive = registrarPendente({ ...jogo }, `${stratKey}_live`, 'live');
+    pendLive.condicao = opcoes.tipoIndicador || null;
+    pendLive.msgIds = msgCons.ids;
+    salvarArquivo(PEND_FILE, pendentes);
+  }
+  return true;
+}
+
+// Re-renderiza o alerta consolidado quando algo muda (placar, indicador
+// novo) sem adicionar estratégia nova.
+async function rerenderizarConsolidado(jogo, estado) {
+  const msgCons = estado.msgConsolidada;
+  if (!msgCons || !msgCons.ids) return;
+  if (msgCons.travado) return; // já fechou, não mexe mais
+
+  const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
+  const tempoDisplay = jogo.tempo === 'Intervalo' ? 'HT' : tempoNum;
+  const placarAtual = `${parseInt(jogo.gols_casa)||0}x${parseInt(jogo.gols_fora)||0}`;
+
+  msgCons.entradaSugerida = determinarEntradaSugerida(jogo, msgCons.estrategias);
+  const gr = checarGreenConsolidado(jogo, estado, msgCons.entradaSugerida);
+  msgCons.entradaGreen = gr.green;
+  msgCons.entradaMinutoGreen = gr.minutoGreen;
+  if (gr.green) msgCons.travado = true;
+
+  const texto = montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay);
+  await editTelegram(msgCons.ids, texto);
+}
+
 // Dispara o alerta inicial de uma estratégia (só se ainda não tiver sido
 // alertada). tipoIndicador/periodo/valor = o indicador que disparou.
 async function dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, periodo, valor, opcoes = {}) {
@@ -950,6 +1232,9 @@ async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
     if (info.grupo1Status) continue;
     await rerenderizarAlerta(jogo, estado, stratKey, info);
   }
+  if (estado.msgConsolidada?.ids?.length && !estado.msgConsolidada.travado) {
+    await rerenderizarConsolidado(jogo, estado);
+  }
 }
 
 const LADO_STRATS_PROPRIOS = [
@@ -973,7 +1258,8 @@ const GOLS_STRATS_PROPRIOS = [
 
 function periodoValidoParaGols(stratKey, is1T, is2T, tempoNum) {
   if (stratKey === 'over05_ht')   return is1T;
-  if (stratKey === 'gol_no_final') return is2T && tempoNum <= 80;
+  if (stratKey === 'gol_no_final') return is2T && tempoNum <= REGRAS_ENTRADA.gol_no_final.limiteMinuto;
+  if (GOLS_STRATS_SO_2T.includes(stratKey)) return is2T; // só dispara a partir do 45' (10/08)
   return true;
 }
 
@@ -1075,6 +1361,8 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
+  estado.stratsDisparadas = estado.stratsDisparadas || {}; // stratKey -> true (já entrou em algum alerta, consolidado ou próprio)
+
   // ── ESTRATÉGIAS DE LADO ──────────────────────────────────────
   for (const stratKey of LADO_STRATS_PROPRIOS) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
@@ -1082,48 +1370,62 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     if (!ladoAlvo) continue;
 
     const limitadaMin20 = LADO_STRATS_LIMITE_MIN20.includes(stratKey);
+    const jaDisparou = estado.stratsDisparadas[stratKey];
 
-    if (!estado.msgIds[stratKey]) {
+    if (!jaDisparou) {
       if (limitadaMin20 && tempoNum > 20) continue; // janela de entrada já fechou
 
       const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
       const ja = checaJogoAberto(jogo, tempoNum);
+      let entradaReal = false, tipoIndicador = null, valor = null;
 
-      if (pg && pg.tipo === 'completo') {
-        await dispararAlertaIndicador(jogo, estado, stratKey, 'gonza', periodoAtual, pg.minutoChute, { ladoAlvo, entradaReal: true });
-      } else if (pg && pg.tipo === 'gonza2') {
-        await dispararAlertaIndicador(jogo, estado, stratKey, 'gonza2', periodoAtual, pg.minutoChute, { ladoAlvo, entradaReal: true });
-      } else if (ja) {
-        await dispararAlertaIndicador(jogo, estado, stratKey, 'aberto', periodoAtual, `${ja.minCasa}-${ja.minFora}`, { ladoAlvo, entradaReal: true });
-      } else if (pg && pg.tipo === 'sem_eficiencia') {
-        await dispararAlertaIndicador(jogo, estado, stratKey, 'semEf', periodoAtual, tempoNum, { ladoAlvo, entradaReal: false });
+      if (pg && pg.tipo === 'completo') { entradaReal = true; tipoIndicador = 'gonza'; valor = pg.minutoChute; }
+      else if (pg && pg.tipo === 'gonza2') { entradaReal = true; tipoIndicador = 'gonza2'; valor = pg.minutoChute; }
+      else if (ja) { entradaReal = true; tipoIndicador = 'aberto'; valor = `${ja.minCasa}-${ja.minFora}`; }
+      else if (pg && pg.tipo === 'sem_eficiencia') { entradaReal = false; tipoIndicador = 'semEf'; valor = tempoNum; }
+
+      if (tipoIndicador) {
+        estado.stratsDisparadas[stratKey] = true;
+        const placarAlerta = `${golsCasa}x${golsFora}`;
+        const abriu = await dispararOuAtualizarConsolidado(jogo, estado, stratKey, tempoNum, placarAlerta, { entradaReal, tipoIndicador, valorIndicador: valor });
+        if (!abriu) {
+          // consolidado já travado — abre mensagem própria pra essa estratégia
+          await dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, periodoAtual, valor, { ladoAlvo, entradaReal });
+        }
       }
-    } else {
+    } else if (estado.msgIds[stratKey]) {
+      // essa estratégia abriu mensagem PRÓPRIA (consolidado já tinha travado
+      // quando ela disparou) — segue o fluxo antigo pra ela.
       const info = estado.msgIds[stratKey];
       let mudou = false;
-
       const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
       info.__tempoAtualParaSemEf = tempoNum;
       info.__jogoParaRegistro = jogo;
       if (registrarPressaoGonza(info, pg, periodoAtual, stratKey)) mudou = true;
-
       const ja = checaJogoAberto(jogo, tempoNum);
       if (ja) {
         const val = `${ja.minCasa}-${ja.minFora}`;
         if (registrarIndicador(info, 'aberto', periodoAtual, val)) {
           mudou = true;
-          if (!info.entradaConfirmada) {
-            info.entradaConfirmada = true;
-            confirmarEntradaReal(info, stratKey, 'aberto');
-          }
+          if (!info.entradaConfirmada) { info.entradaConfirmada = true; confirmarEntradaReal(info, stratKey, 'aberto'); }
         }
       }
-
       if (checarAvisoSaida(jogo, info, ladoAlvo, tempoNum)) mudou = true;
-
-      if (mudou && !info.grupo1Status) {
-        await rerenderizarAlerta(jogo, estado, stratKey, info);
+      if (mudou && !info.grupo1Status) await rerenderizarAlerta(jogo, estado, stratKey, info);
+    } else if (estado.msgConsolidada && !estado.msgConsolidada.travado &&
+               estado.msgConsolidada.estrategias.some(e => e.stratKey === stratKey)) {
+      // estratégia já está no consolidado — só atualiza indicador/aviso dele
+      estado.msgConsolidada.__tempoAtualParaSemEf = tempoNum;
+      estado.msgConsolidada.__jogoParaRegistro = jogo;
+      const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
+      let mudou = registrarPressaoGonza(estado.msgConsolidada, pg, periodoAtual, stratKey);
+      const ja = checaJogoAberto(jogo, tempoNum);
+      if (ja) {
+        const val = `${ja.minCasa}-${ja.minFora}`;
+        if (registrarIndicador(estado.msgConsolidada, 'aberto', periodoAtual, val)) mudou = true;
       }
+      if (checarAvisoSaida(jogo, estado.msgConsolidada, ladoAlvo, tempoNum)) mudou = true;
+      if (mudou) await rerenderizarConsolidado(jogo, estado);
     }
   }
 
@@ -1133,31 +1435,41 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     if (!periodoValidoParaGols(stratKey, is1T, is2T, tempoNum)) continue;
     if (!placarValidoParaGols(stratKey, golsCasa, golsFora)) continue;
 
-    const ladoZebra = ladoOposto(favorito);
+    const ladoZebraLocal = ladoOposto(favorito);
     const pgFav = checaPressaoGonza(jogo, estado, favorito, tempoNum);
-    const pgZebra = (stratKey === 'gol_no_final') ? checaPressaoGonza(jogo, estado, ladoZebra, tempoNum) : null;
+    const pgZebra = (stratKey === 'gol_no_final') ? checaPressaoGonza(jogo, estado, ladoZebraLocal, tempoNum) : null;
     const ja = checaJogoAberto(jogo, tempoNum);
+    const foraDoConsolidado = STRATS_FORA_DO_CONSOLIDADO.includes(stratKey);
+    const jaDisparou = estado.stratsDisparadas[stratKey];
 
-    if (!estado.msgIds[stratKey]) {
+    if (!jaDisparou) {
       let pg = pgFav;
       if ((!pgFav || pgFav.tipo !== 'completo') && pgZebra?.tipo === 'completo') pg = pgZebra;
       else if (!pgFav && pgZebra) pg = pgZebra;
 
-      if (pg && pg.tipo === 'completo') {
-        await dispararAlertaIndicador(jogo, estado, stratKey, 'gonza', periodoAtual, pg.minutoChute, { entradaReal: true });
-      } else if (pg && pg.tipo === 'gonza2') {
-        await dispararAlertaIndicador(jogo, estado, stratKey, 'gonza2', periodoAtual, pg.minutoChute, { entradaReal: true });
-      } else if (ja) {
-        await dispararAlertaIndicador(jogo, estado, stratKey, 'aberto', periodoAtual, `${ja.minCasa}-${ja.minFora}`, { entradaReal: true });
-      } else if (pg && pg.tipo === 'sem_eficiencia') {
-        await dispararAlertaIndicador(jogo, estado, stratKey, 'semEf', periodoAtual, tempoNum, { entradaReal: false });
+      let entradaReal = false, tipoIndicador = null, valor = null;
+      if (pg && pg.tipo === 'completo') { entradaReal = true; tipoIndicador = 'gonza'; valor = pg.minutoChute; }
+      else if (pg && pg.tipo === 'gonza2') { entradaReal = true; tipoIndicador = 'gonza2'; valor = pg.minutoChute; }
+      else if (ja) { entradaReal = true; tipoIndicador = 'aberto'; valor = `${ja.minCasa}-${ja.minFora}`; }
+      else if (pg && pg.tipo === 'sem_eficiencia') { entradaReal = false; tipoIndicador = 'semEf'; valor = tempoNum; }
+
+      if (tipoIndicador) {
+        estado.stratsDisparadas[stratKey] = true;
+        if (foraDoConsolidado) {
+          await dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, periodoAtual, valor, { entradaReal });
+        } else {
+          const placarAlerta = `${golsCasa}x${golsFora}`;
+          const abriu = await dispararOuAtualizarConsolidado(jogo, estado, stratKey, tempoNum, placarAlerta, { entradaReal, tipoIndicador, valorIndicador: valor });
+          if (!abriu) {
+            await dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, periodoAtual, valor, { entradaReal });
+          }
+        }
       }
-    } else {
+    } else if (estado.msgIds[stratKey]) {
       const info = estado.msgIds[stratKey];
       let mudou = false;
       info.__tempoAtualParaSemEf = tempoNum;
       info.__jogoParaRegistro = jogo;
-
       for (const pg of [pgFav, pgZebra]) {
         if (registrarPressaoGonza(info, pg, periodoAtual, stratKey)) mudou = true;
       }
@@ -1165,14 +1477,23 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
         const val = `${ja.minCasa}-${ja.minFora}`;
         if (registrarIndicador(info, 'aberto', periodoAtual, val)) {
           mudou = true;
-          if (!info.entradaConfirmada) {
-            info.entradaConfirmada = true;
-            confirmarEntradaReal(info, stratKey, 'aberto');
-          }
+          if (!info.entradaConfirmada) { info.entradaConfirmada = true; confirmarEntradaReal(info, stratKey, 'aberto'); }
         }
       }
-
       if (mudou) await rerenderizarAlerta(jogo, estado, stratKey, info);
+    } else if (!foraDoConsolidado && estado.msgConsolidada && !estado.msgConsolidada.travado &&
+               estado.msgConsolidada.estrategias.some(e => e.stratKey === stratKey)) {
+      estado.msgConsolidada.__tempoAtualParaSemEf = tempoNum;
+      estado.msgConsolidada.__jogoParaRegistro = jogo;
+      let mudou = false;
+      for (const pg of [pgFav, pgZebra]) {
+        if (registrarPressaoGonza(estado.msgConsolidada, pg, periodoAtual, stratKey)) mudou = true;
+      }
+      if (ja) {
+        const val = `${ja.minCasa}-${ja.minFora}`;
+        if (registrarIndicador(estado.msgConsolidada, 'aberto', periodoAtual, val)) mudou = true;
+      }
+      if (mudou) await rerenderizarConsolidado(jogo, estado);
     }
   }
 }
@@ -1190,67 +1511,84 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
   const isHT      = jogo.tempo === 'Intervalo';
   const links     = linksExchanges(jogo.urls_exchanges || {});
 
+  // Transição de estado (green/atencao/reacao/red) — igual pros dois casos
+  // (mensagem própria ou dentro do consolidado). Devolve o novo status, ou
+  // null se nada mudou.
+  function calcularTransicao(statusAtual, minutoGolContraAtual, alvoGols, contraGols, alvo) {
+    if (!statusAtual) {
+      if (alvoGols > contraGols) return { status: 'green' };
+      if (contraGols > alvoGols) return { status: 'atencao', minutoGolContra: tempo };
+      return null;
+    }
+    if (statusAtual === 'atencao') {
+      if (alvoGols > contraGols) return { status: 'green' };
+      if (tempo > 60 && !isHT) return { status: 'red' };
+      const pgReacao = checaPressaoGonza(jogo, estado, alvo, tempo);
+      const jaReacao = checaJogoAberto(jogo, tempo);
+      const temReacao = (pgReacao && (pgReacao.tipo === 'completo' || pgReacao.tipo === 'gonza2')) || !!jaReacao;
+      if (temReacao && tempo > (minutoGolContraAtual || 0)) return { status: 'reacao' };
+      return null;
+    }
+    return null; // 'reacao' e 'red' são terminais
+  }
+
+  function alvoDaStrat(stratKey) {
+    if (stratKey === 'lay_xg') {
+      const pendLayXg = pendentes.find(p => p.condicao === 'lay_xg' && p.data === hoje &&
+        (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`));
+      return pendLayXg?.lay_team === 'home' ? 'casa' : 'fora';
+    }
+    return 'casa';
+  }
+
+  const rotuloStatus = {
+    atencao: '⚠️ time contra na frente — avaliar reação',
+    reacao: '🔄 reação confirmada — considerar Lay contra o time da frente',
+    red: '❌ sem reação confirmada',
+    green: '✅ green',
+  };
+
+  // ── Caso 1: estratégia com mensagem PRÓPRIA (fallback, consolidado já travado quando ela abriu) ──
   for (const stratKey of GRUPO1_STRATS) {
     const info = estado.msgIds[stratKey];
     if (!info || !info.ids?.length) continue;
-    if (info.grupo1Status === 'green') continue; // já fechado, nada mais a fazer
+    if (info.grupo1Status === 'green') continue;
+
+    const alvo = alvoDaStrat(stratKey);
+    const alvoGols = alvo === 'casa' ? golsCasa : golsFora;
+    const contraGols = alvo === 'casa' ? golsFora : golsCasa;
+    const t = calcularTransicao(info.grupo1Status, info.minutoGolContra, alvoGols, contraGols, alvo);
+    if (!t) continue;
+    info.grupo1Status = t.status;
+    if (t.minutoGolContra) info.minutoGolContra = t.minutoGolContra;
 
     const extras = montarLinhasIndicadores(info).join('\n');
     const extrasTxt = extras ? `\n${extras}` : '';
     const avisoTxt = info.avisoSaida ? `\n${info.avisoSaida}` : '';
     const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
     const corpoExtra = `${extrasTxt}${avisoTxt}${confExtra}`;
-
-    let alvo = 'casa';
-    if (stratKey === 'lay_xg') {
-      const pendLayXg = pendentes.find(p => p.condicao === 'lay_xg' && p.data === hoje &&
-        (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`));
-      alvo = pendLayXg?.lay_team === 'home' ? 'casa' : 'fora';
-    }
-    const alvoGols = alvo === 'casa' ? golsCasa : golsFora;
-    const contraGols = alvo === 'casa' ? golsFora : golsCasa;
-
     const display = STRAT_DISPLAY[stratKey] || stratKey;
     const fixo = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
+    await editTelegram(info.ids, `${fixo}\n${rotuloStatus[t.status]} · ${golsCasa}x${golsFora} (min ${tempo})${corpoExtra}${links}`);
+  }
 
-    if (!info.grupo1Status) {
-      if (alvoGols > contraGols) {
-        info.grupo1Status = 'green';
-        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${corpoExtra}${links}`);
-      } else if (contraGols > alvoGols) {
-        info.grupo1Status = 'atencao';
-        info.minutoGolContra = tempo;
-        await editTelegram(info.ids, `${fixo}\n⚠️ Time contra na frente (${golsCasa}x${golsFora}, min ${tempo}) — avaliar reação${corpoExtra}${links}`);
-      }
-      continue;
+  // ── Caso 2: estratégia dentro do alerta CONSOLIDADO ──────────────
+  if (estado.msgConsolidada?.ids?.length) {
+    let mudouAlgo = false;
+    for (const e of estado.msgConsolidada.estrategias) {
+      if (!GRUPO1_STRATS.includes(e.stratKey)) continue;
+      if (e.grupo1Status === 'green') continue;
+
+      const alvo = alvoDaStrat(e.stratKey);
+      const alvoGols = alvo === 'casa' ? golsCasa : golsFora;
+      const contraGols = alvo === 'casa' ? golsFora : golsCasa;
+      const t = calcularTransicao(e.grupo1Status, e.minutoGolContra, alvoGols, contraGols, alvo);
+      if (!t) continue;
+      e.grupo1Status = t.status;
+      if (t.minutoGolContra) e.minutoGolContra = t.minutoGolContra;
+      mudouAlgo = true;
     }
-
-    if (info.grupo1Status === 'atencao') {
-      if (alvoGols > contraGols) {
-        info.grupo1Status = 'green';
-        await editTelegram(info.ids, `${fixo}\n✅ GREEN · ${golsCasa}x${golsFora} (min ${tempo})${corpoExtra}${links}`);
-        continue;
-      }
-      if (tempo > 60 && !isHT) {
-        info.grupo1Status = 'red';
-        await editTelegram(info.ids, `${fixo}\n❌ RED · ${golsCasa}x${golsFora} (min 60) — sem reação confirmada${corpoExtra}${links}`);
-        continue;
-      }
-      // Reação = qualquer um dos indicadores próprios do lado que precisa
-      // reagir bate DEPOIS do minuto em que o time contra marcou.
-      const pgReacao = checaPressaoGonza(jogo, estado, alvo, tempo);
-      const jaReacao = checaJogoAberto(jogo, tempo);
-      const temReacao = (pgReacao && (pgReacao.tipo === 'completo' || pgReacao.tipo === 'gonza2')) || !!jaReacao;
-      if (temReacao && tempo > (info.minutoGolContra || 0)) {
-        info.grupo1Status = 'reacao';
-        await editTelegram(info.ids, `${fixo}\n🔄 Reação confirmada (min ${tempo}) — considerar Lay contra o time da frente até o fim do 1T${corpoExtra}${links}`);
-      }
-      continue;
-    }
-
-    // 'reacao' e 'red' são terminais — nada mais a editar (o resultado
-    // final é decidido em processarFimDeJogo, exceto pra 'red' que já é a
-    // palavra final do Grupo 1 e não deve ser sobrescrito).
+    if (mudouAlgo && !estado.msgConsolidada.travado) await rerenderizarConsolidado(jogo, estado);
   }
 }
 
@@ -1378,11 +1716,62 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     await editTelegram(info.ids, textoFinal);
   }
 
+  // ── Fecha o alerta CONSOLIDADO, se existir ─────────────────────
+  if (estado.msgConsolidada?.ids?.length) {
+    const msgCons = estado.msgConsolidada;
+
+    // Resultado original de cada estratégia ativa (Opção A — sempre
+    // preservado, independente do resultado da entrada sugerida).
+    const linhasEstrategias = msgCons.estrategias.map(e => {
+      const stratBase = e.stratKey.replace(/_live$/, '');
+      const pLive = pendJogo.find(p => {
+        const ps = p.strat.replace(/_live$/, '');
+        return ps === stratBase || ps === e.stratKey;
+      });
+      const res = pLive?.result || calcularResultado(stratBase, golsCasa, golsFora, htH, htA);
+      const emoji = res === 'green' ? '✅' : res === 'red' ? '❌' : '⚪';
+      const display = STRAT_DISPLAY[e.stratKey] || e.stratKey;
+      return `  ${emoji} ${display} (${e.tempoNum}' · ${e.placarAlerta})`;
+    }).join('\n');
+
+    // Fecha a entrada sugerida com o placar final, se ainda não tinha travado.
+    if (!msgCons.travado) {
+      const gr = checarGreenConsolidado(jogo, estado, msgCons.entradaSugerida);
+      msgCons.entradaGreen = gr.green || (msgCons.entradaSugerida ? true : false);
+      msgCons.entradaMinutoGreen = gr.minutoGreen;
+      if (!gr.green && msgCons.entradaSugerida) {
+        // jogo acabou e a entrada sugerida não bateu green ainda pelo
+        // critério ao vivo — resolve como RED aqui no fechamento.
+        msgCons.entradaGreen = false;
+        msgCons.entradaRed = true;
+      }
+    }
+
+    const partes = [...montarLinhasIndicadores(msgCons)];
+    if (msgCons.avisoSaida) partes.push(msgCons.avisoSaida);
+    if (msgCons.entradaSugerida) {
+      let linhaEntrada = `➜ ENTRADA: ${msgCons.entradaSugerida.texto}`;
+      if (msgCons.entradaGreen) {
+        linhaEntrada += `\n✅ GREEN` + (msgCons.entradaMinutoGreen ? ` — gol aos ${msgCons.entradaMinutoGreen}'` : '');
+      } else if (msgCons.entradaRed) {
+        linhaEntrada += `\n❌ RED`;
+      }
+      partes.push(linhaEntrada);
+    }
+    if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
+    const htTexto = estado.htPlacar || '-';
+    partes.push(`📊 HT: ${htTexto} · FT: ${placarFT}`);
+    const corpo = partes.join('\n');
+
+    const textoFinal = `⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ Alertas ativos:\n${linhasEstrategias}\n─────────────────\n${corpo}${links}`;
+    await editTelegram(msgCons.ids, textoFinal);
+  }
+
   // Só manda o aviso solto de "FIM DE JOGO" se o jogo teve pelo menos 1
   // alerta de estratégia de verdade — evita poluir o chat com jogos que o
   // servidor só estava monitorando (Seleção IA/Filtro/Estratégia registrada
   // no pré-jogo) mas nenhum indicador bateu durante a partida.
-  if (Object.keys(estado.msgIds || {}).length > 0) {
+  if (Object.keys(estado.msgIds || {}).length > 0 || estado.msgConsolidada?.ids?.length) {
     await sendTelegram(`🏁 <b>FIM DE JOGO</b>\n⚽ ${jogo.mandante} x ${jogo.visitante}\n📊 FT: ${placarFT}`);
   }
 }
