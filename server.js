@@ -1188,7 +1188,10 @@ async function dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, pe
   indicadores[tipoIndicador][periodo].push(valor);
   const infoTemp = { indicadores, avisoSaida: null };
 
-  const corpo = montarCorpoAlerta(infoTemp, estado, placar, tempoDisplay);
+  let corpo = montarCorpoAlerta(infoTemp, estado, placar, tempoDisplay);
+  if (opcoes.entradaEspecialTexto) {
+    corpo = `➜ ENTRAR: ${opcoes.entradaEspecialTexto}\n${corpo}`;
+  }
   const texto = montarMsgAlerta(display, jogo, tempoDisplay, placar, placar, links, corpo);
   const ids = await sendTelegram(texto);
 
@@ -1259,8 +1262,52 @@ const GOLS_STRATS_PROPRIOS = [
 function periodoValidoParaGols(stratKey, is1T, is2T, tempoNum) {
   if (stratKey === 'over05_ht')   return is1T;
   if (stratKey === 'gol_no_final') return is2T && tempoNum <= REGRAS_ENTRADA.gol_no_final.limiteMinuto;
-  if (GOLS_STRATS_SO_2T.includes(stratKey)) return is2T; // só dispara a partir do 45' (10/08)
+  if (GOLS_STRATS_SO_2T.includes(stratKey)) return false; // essas 4 têm fluxo próprio (ver processarGolsMin45)
   return true;
+}
+
+// ── GOLS_STRATS_SO_2T (Felipe Over1.5, Ambas Marcam, Ambas Marcam xG,
+// Over 1.5) — 11/08: o padrão de momentum pode ser detectado a qualquer
+// momento do 1T, mas o ALERTA só dispara exatamente quando o jogo chega
+// no minuto 45, olhando o placar naquele instante: 0x0 → sugere Over 0,5
+// (jogo todo); 1 gol no total → sugere Over 1,5 (jogo todo); 2+ gols →
+// descarta de vez, nunca dispara nesse jogo pra essa estratégia.
+async function processarGolsMin45(jogo, estado, pendJogo, tempoNum, golsCasa, golsFora) {
+  estado.padraoGols2T = estado.padraoGols2T || {};
+  estado.min45Avaliado = estado.min45Avaliado || {};
+  const favorito = getFavorito(jogo);
+
+  for (const stratKey of GOLS_STRATS_SO_2T) {
+    if (!pendJogo.some(p => p.strat === stratKey)) continue;
+    if (estado.min45Avaliado[stratKey]) continue; // já decidiu (disparou ou descartou)
+
+    // Detecta o padrão (pode acontecer em qualquer minuto do 1T)
+    if (!estado.padraoGols2T[stratKey] && tempoNum < 45) {
+      const pgFav = checaPressaoGonza(jogo, estado, favorito, tempoNum);
+      const ja = checaJogoAberto(jogo, tempoNum);
+      let tipoIndicador = null, valor = null;
+      if (pgFav && pgFav.tipo === 'completo') { tipoIndicador = 'gonza'; valor = pgFav.minutoChute; }
+      else if (pgFav && pgFav.tipo === 'gonza2') { tipoIndicador = 'gonza2'; valor = pgFav.minutoChute; }
+      else if (ja) { tipoIndicador = 'aberto'; valor = `${ja.minCasa}-${ja.minFora}`; }
+      if (tipoIndicador) estado.padraoGols2T[stratKey] = { tipoIndicador, valor };
+    }
+
+    // Chegou no minuto 45 (ou passou direto pro intervalo) → decide agora
+    if (tempoNum >= 45) {
+      estado.min45Avaliado[stratKey] = true;
+      const padrao = estado.padraoGols2T[stratKey];
+      const totalGols = golsCasa + golsFora;
+      if (padrao && totalGols <= 1) {
+        estado.stratsDisparadas = estado.stratsDisparadas || {};
+        estado.stratsDisparadas[stratKey] = true;
+        const entradaTexto = totalGols === 0 ? 'Over 0,5 (jogo todo)' : 'Over 1,5 (jogo todo)';
+        await dispararAlertaIndicador(jogo, estado, stratKey, padrao.tipoIndicador, '1T', padrao.valor, {
+          entradaReal: true, entradaEspecialTexto: entradaTexto,
+        });
+      }
+      // se não tinha padrão registrado, ou já tinha 2+ gols → descarta, sem disparar
+    }
+  }
 }
 
 function getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo) {
@@ -1430,6 +1477,8 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
   }
 
   // ── ESTRATÉGIAS DE GOLS ───────────────────────────────────────
+  await processarGolsMin45(jogo, estado, pendJogo, tempoNum, golsCasa, golsFora);
+
   for (const stratKey of GOLS_STRATS_PROPRIOS) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     if (!periodoValidoParaGols(stratKey, is1T, is2T, tempoNum)) continue;
