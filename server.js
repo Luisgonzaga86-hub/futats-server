@@ -1013,8 +1013,13 @@ function determinarEntradaSugerida(jogo, estrategias) {
     };
   }
 
-  // Só Over 0,5 Gonza, sozinho
-  if (temOver) return determinarEntradaOver05Isolado(jogo, placarBase, tempoNum);
+  // Só Over 0,5 Gonza, sozinho — CASO1/2/3 (com Lay) só valem no 1T;
+  // no 2T é sempre Over Limite (11/08, corrigindo bug: regra de Lay
+  // estava vazando pro 2T sem querer).
+  if (temOver) {
+    if (!is1T) return { tipo: 'over_limite', texto: 'Over Limite', placarBase, oddJusta: REGRAS_ENTRADA.over05.oddJustaOverLimiteIsolado };
+    return determinarEntradaOver05Isolado(jogo, placarBase, tempoNum);
+  }
 
   return null; // nenhuma estratégia com regra de entrada validada
 }
