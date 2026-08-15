@@ -716,7 +716,11 @@ async function monitorarLive() {
       );
 
       for (const m of (jogo.momentum || [])) {
-        if (!estado.momentum.find(x => x.minuto === m.minuto)) estado.momentum.push(m);
+        const idxMom = estado.momentum.findIndex(x => x.minuto === m.minuto);
+        if (idxMom === -1) estado.momentum.push(m);
+        else estado.momentum[idxMom] = m; // atualiza com o valor mais recente da API
+                                           // (evita ficar preso no valor 0 inicial de um
+                                           // minuto que a API ainda estava processando)
       }
       for (const ev of (jogo.eventos || [])) {
         const jaExiste = estado.eventos.find(x =>
