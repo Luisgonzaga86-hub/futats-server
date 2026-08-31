@@ -522,24 +522,36 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
   }
 
   // CASO B: bateu depois do min 10 → só dispara na janela 41-45,
-  // se o placar não mudou desde que bateu
+  // se o placar não mudou desde que bateu. Diferente do Caso A, aqui o
+  // mercado é "Over Limite" (JOGO TODO), não Over HT — faz pouco sentido
+  // entrar em Over HT quando só sobram 1-4 minutos de 1T. A confirmação
+  // green/red desse caso acontece no FIM DO JOGO (FT), não no HT.
   if (tempoNum >= 41 && tempoNum <= 45) {
     if (placarAtual !== ni.placarNoMomento) {
       ni.jaAlertado = true; // já resolveu sozinho, não alerta
       return;
     }
     ni.jaAlertado = true;
+
+    const mercadoLabelFT = {
+      '05': 'Over 0,5', '15': 'Over 1,5', '25': 'Over 2,5', '35': 'Over 3,5',
+    }[ni.bucketNoMomento] || 'Over';
+    const oddJogoFT = estado.overs ? estado.overs[`over${ni.bucketNoMomento}`] : null;
+    const linhaOddJogoFT = oddJogoFT != null
+      ? `📊 Odd justa do jogo (pré-live, ${mercadoLabelFT} Limite): ${pctParaOdd(oddJogoFT)?.toFixed(2) || '-'} (${oddJogoFT.toFixed(0)}%)`
+      : '';
+
     const registro = {
       jogoId, jogo: `${jogo.mandante} x ${jogo.visitante}`, data: hoje,
       tipo: ni.tipo, minutoBatido: ni.minutoBatido, placarNoMomento: ni.placarNoMomento,
-      bucket: ni.bucketNoMomento, mercado: mercadoLabel, caso: 'B_janela_41_45',
+      bucket: ni.bucketNoMomento, mercado: `${mercadoLabelFT} Limite (jogo todo)`, caso: 'B_janela_41_45',
       status: 'pendente',
     };
     validacaoNovosIndicadores.push(registro);
     salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
     estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
 
-    const texto = `${ni.label} (VALIDAÇÃO)\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${ni.minutoBatido}' · 📊 ${ni.placarNoMomento}\n─────────────────\n⏱ Placar segue igual até o ${tempoNum}'\n➜ ENTRAR: ${mercadoLabel} (fim do 1T)\n${linhaOddJogo}\n📊 Placar atual: ${placarAtual} · ${tempoNum}'${links}`;
+    const texto = `${ni.label} (VALIDAÇÃO)\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${ni.minutoBatido}' · 📊 ${ni.placarNoMomento}\n─────────────────\n⏱ Placar segue igual até o ${tempoNum}'\n➜ ENTRAR: ${mercadoLabelFT} Limite (jogo todo)\n${linhaOddJogoFT}\n📊 Placar atual: ${placarAtual} · ${tempoNum}'${links}`;
     const ids = await sendTelegramPessoal(texto);
     estado.validacaoMsgIds = ids;
     return;
@@ -547,12 +559,16 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
 }
 
 // Checa no HT (chamado de dentro do fluxo normal de monitorarLive, quando
-// jogo.tempo === 'Intervalo' pela primeira vez) se a validação pendente
+// jogo.tempo === 'Intervalo' pela primeira vez) se a validação PENDENTE
 // desse jogo bateu green ou red, e manda a confirmação pro chat pessoal.
+// SÓ trata o Caso A (até min 10, mercado Over HT) — o Caso B (janela
+// 41-45, mercado Over Limite/jogo todo) confirma no fim do jogo, não
+// aqui (ver confirmarValidacaoNoFim).
 async function confirmarValidacaoNoHT(jogo, estado) {
   if (estado.validacaoIndex == null) return;
   const registro = validacaoNovosIndicadores[estado.validacaoIndex];
   if (!registro || registro.status !== 'pendente') return;
+  if (registro.caso !== 'A_ate_min10') return; // Caso B confirma no FT, não no HT
 
   const [baseCasa, baseFora] = registro.placarNoMomento.split('x').map(Number);
   const golsCasaHT = parseInt(jogo.gols_casa_ht);
@@ -570,6 +586,29 @@ async function confirmarValidacaoNoHT(jogo, estado) {
   const emoji = green ? '✅ GREEN' : '❌ RED';
   const texto = `${emoji} — Validação ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'}\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → HT: ${registro.htFinal}\n➜ Mercado: ${registro.mercado}`;
   await sendTelegramPessoal(texto);
+}
+
+// Confirma a validação do Caso B (janela 41-45, mercado Over Limite/jogo
+// todo) no FIM do jogo, comparando o placar final com o placar que estava
+// quando o padrão bateu. Chamado de dentro de processarFimDeJogo.
+async function confirmarValidacaoNoFim(estado, golsCasaFT, golsForaFT, placarFT) {
+  if (estado.validacaoIndex == null) return;
+  const registro = validacaoNovosIndicadores[estado.validacaoIndex];
+  if (!registro || registro.status !== 'pendente') return;
+  if (registro.caso !== 'B_janela_41_45') return; // Caso A já confirmou no HT
+
+  const [baseCasa, baseFora] = registro.placarNoMomento.split('x').map(Number);
+  const totalBase = baseCasa + baseFora;
+  const totalFT = golsCasaFT + golsForaFT;
+  const green = totalFT > totalBase;
+
+  registro.status = green ? 'green' : 'red';
+  registro.ftFinal = placarFT;
+  salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+
+  const emoji = green ? '✅ GREEN' : '❌ RED';
+  const texto = `${emoji} — Validação ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'}\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → FT: ${registro.ftFinal}\n➜ Mercado: ${registro.mercado}`;
+  await sendTelegramPessoal(texto).catch(() => {});
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -2166,27 +2205,13 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   }
   salvarArquivo(PEND_FILE, pendentes);
 
-  // 25/08 — confirma validação de Trocação/Tempestade quando ela foi pro
-  // mercado de Limite (jogo todo) — o caso do Over HT já foi confirmado
-  // antes, no momento em que o jogo bateu Intervalo (confirmarValidacaoNoHT).
-  // Aqui só cobre o caso raro de a validação nunca ter sido confirmada no
-  // HT por algum motivo (ex: jogo terminou sem passar por "Intervalo" na
-  // API) — fallback de segurança.
-  if (estado.validacaoIndex != null) {
-    const registro = validacaoNovosIndicadores[estado.validacaoIndex];
-    if (registro && registro.status === 'pendente') {
-      const [baseCasa, baseFora] = registro.placarNoMomento.split('x').map(Number);
-      const totalBase = baseCasa + baseFora;
-      const totalFT = golsCasa + golsFora;
-      const green = totalFT > totalBase;
-      registro.status = green ? 'green' : 'red';
-      registro.ftFinal = placarFT;
-      salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
-      const emoji = green ? '✅ GREEN' : '❌ RED';
-      const texto = `${emoji} — Validação ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'} (fallback fim de jogo)\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → FT: ${registro.ftFinal}\n➜ Mercado: ${registro.mercado}`;
-      await sendTelegramPessoal(texto).catch(() => {});
-    }
-  }
+  // 25/08 — confirma validação do Caso B (Trocação/Tempestade que bateu
+  // na janela 41-45, mercado Over Limite/jogo todo) aqui no fim do jogo.
+  // O Caso A (até min 10, mercado Over HT) já foi confirmado antes, no
+  // momento em que o jogo bateu Intervalo (confirmarValidacaoNoHT) — essa
+  // função pula automaticamente se o registro já não estiver mais pendente
+  // ou não for do Caso B.
+  await confirmarValidacaoNoFim(estado, golsCasa, golsFora, placarFT).catch(() => {});
 
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
