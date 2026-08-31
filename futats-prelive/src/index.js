@@ -187,6 +187,16 @@ function normalizarNomeTime(nome) {
     .trim();
 }
 
+// 25/08 — endpoint atualizado:
+// 1) Agora aceita jogos que só têm o cálculo LOCAL (j.calculado), não só
+//    os que já passaram pela análise paga (j.analisado). Antes, um jogo
+//    sem análise completa nunca aparecia aqui, mesmo tendo os números
+//    locais prontos — isso deixava de fora a maioria dos jogos do dia,
+//    já que a análise paga só roda pros jogos com estratégia batida.
+// 2) Devolve também os percentuais de Over (over05/15/25/35/overHT/
+//    over15HT), vindos de j.calculo.gols (calculadora.js) — usado pelo
+//    server_45.js pra montar a "odd justa do jogo" nos alertas, inclusive
+//    nos jogos que não têm nenhuma das nossas estratégias batendo.
 app.get('/interno/confiabilidade', checarTokenInterno, (req, res) => {
   const mandante = normalizarNomeTime(req.query.mandante);
   const visitante = normalizarNomeTime(req.query.visitante);
@@ -196,20 +206,48 @@ app.get('/interno/confiabilidade', checarTokenInterno, (req, res) => {
 
   const jogo = store
     .getAllGames()
-    .find((j) => normalizarNomeTime(j.mandante) === mandante && normalizarNomeTime(j.visitante) === visitante && j.analisado);
+    .find((j) =>
+      normalizarNomeTime(j.mandante) === mandante &&
+      normalizarNomeTime(j.visitante) === visitante &&
+      (j.analisado || j.calculado)
+    );
 
   if (!jogo) {
     return res.json({ encontrado: false });
   }
 
-  const conf = jogo.analise_estruturada || {};
+  // Fonte dos 3 baldes: prioriza a análise paga (mais completa); cai pro
+  // cálculo local se a paga ainda não rodou nesse jogo.
+  const confPaga = jogo.analisado ? jogo.analise_estruturada || {} : null;
+  const confLocal = jogo.calculado ? jogo.calculo || {} : null;
+
+  const favorito = confPaga?.favorito || confLocal?.favorito?.nivel || '-';
+  const gols     = confPaga?.gols     || confLocal?.gols?.nivel     || '-';
+  const lay      = confPaga?.lay      || confLocal?.placar?.nivel  || '-';
+
+  // Os percentuais de Over só existem no cálculo local (calculadora.js) —
+  // a análise paga não devolve esses números brutos, só o balde final.
+  // Por isso sempre pega do confLocal quando existir, independente de
+  // qual fonte decidiu o nível Alta/Média/Baixa acima.
+  const overs = confLocal?.gols
+    ? {
+        over05: confLocal.gols.over05,
+        over15: confLocal.gols.over15,
+        over25: confLocal.gols.over25,
+        over35: confLocal.gols.over35,
+        overHT: confLocal.gols.overHT,     // = Over 0,5 HT combinado
+        over15HT: confLocal.gols.over15HT, // = Over 1,5 HT combinado
+      }
+    : null;
+
   res.json({
     encontrado: true,
-    favorito: conf.favorito || '-',
-    gols: conf.gols || '-',
-    lay: conf.lay || '-',
-    layImprovavelMantidos: extrairLayImprovavelMantidos(jogo.analise || ''),
-    top3Placares: extrairTop3Placares(jogo.analise || ''),
+    favorito,
+    gols,
+    lay,
+    overs, // { over05, over15, over25, over35, overHT, over15HT } em % (0-100), ou null
+    layImprovavelMantidos: jogo.analisado ? extrairLayImprovavelMantidos(jogo.analise || '') : [],
+    top3Placares: jogo.analisado ? extrairTop3Placares(jogo.analise || '') : [],
   });
 });
 
