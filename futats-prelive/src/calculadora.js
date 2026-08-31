@@ -60,21 +60,26 @@ function cruzarXG(xgAtaque, xgaDefesa) {
 }
 
 // ── 4. Overs / BTTS (§4) — cortes fixos ──────────────────────────
-const CORTES = { over15: 75, over25: 55, over35: 43, overHT: 75, btts: 60 };
+// 25/08: adicionado over05 (FT) e over15HT — antes só existiam over15/25/35
+// FT e over05HT. Necessários pro comparativo de odds justas nos alertas
+// (mercado dinâmico "Over total_atual+0,5", tanto FT quanto HT).
+const CORTES = { over05: 90, over15: 75, over25: 55, over35: 43, overHT: 75, over15HT: 40, btts: 60 };
 
 function calcularOvers(overs, home, away) {
   const ph = home.partidas || 0;
   const pa = away.partidas || 0;
   const pct = (o, key, p) => (p ? (o[key] || 0) / p * 100 : 0);
 
+  const over05 = (pct(overs.home, 'over05', ph) + pct(overs.away, 'over05', pa)) / 2;
   const over15 = (pct(overs.home, 'over15', ph) + pct(overs.away, 'over15', pa)) / 2;
   const over25 = (pct(overs.home, 'over25', ph) + pct(overs.away, 'over25', pa)) / 2;
   const over35 = (pct(overs.home, 'over35', ph) + pct(overs.away, 'over35', pa)) / 2;
   const overHT = (pct(overs.home, 'over05HT', ph) + pct(overs.away, 'over05HT', pa)) / 2;
+  const over15HT = (pct(overs.home, 'over15HT', ph) + pct(overs.away, 'over15HT', pa)) / 2;
   const btts = ((home.ambas_marcam || 0) / (ph || 1) * 100 + (away.ambas_marcam || 0) / (pa || 1) * 100) / 2;
 
   const cortesBatidos = [over15 >= CORTES.over15, over25 >= CORTES.over25, over35 >= CORTES.over35, overHT >= CORTES.overHT, btts >= CORTES.btts];
-  return { over15, over25, over35, overHT, btts, cortesBatidos: cortesBatidos.filter(Boolean).length };
+  return { over05, over15, over25, over35, overHT, over15HT, btts, cortesBatidos: cortesBatidos.filter(Boolean).length };
 }
 
 // ── 5. Zebra no Top 5 (§5, obrigatório) ──────────────────────────
