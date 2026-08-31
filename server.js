@@ -60,6 +60,8 @@ function formatarBlocoConfiabilidade(conf) {
 // Busca (com retry espaçado) e, assim que encontra pela 1ª vez, re-renderiza
 // TODOS os alertas já ativos desse jogo — assim o bloco fica "gravado" desde
 // já, sem precisar esperar o próximo evento de placar.
+// 25/08: agora também guarda estado.overs (percentuais de Over do jogo,
+// vindos do cálculo local do prelive) — usado nas linhas de odd justa.
 async function garantirConfiabilidade(jogoId, estado, jogo) {
   if (estado.confiabilidadeBloco) return;
   if (estado.encerrado) return; // jogo já acabou, mensagens já fechadas — não vale mais a pena buscar
@@ -74,7 +76,8 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   }
 
   estado.confiabilidadeBloco = formatarBlocoConfiabilidade(conf);
-  console.log(`[confiabilidade] ${jogoId} → bloco carregado.`);
+  estado.overs = conf.overs || null; // { over05, over15, over25, over35, overHT, over15HT } em %, ou null
+  console.log(`[confiabilidade] ${jogoId} → bloco carregado.${estado.overs ? ' (com overs)' : ''}`);
 
   // Se o jogo JÁ terminou (processarFimDeJogo já rodou), as mensagens já
   // têm o resultado final escrito (GREEN/RED · HT/FT) — não voltar a editar
@@ -107,6 +110,7 @@ const DATA_FILE   = path.join(DATA_DIR, 'dados.json');
 const PEND_FILE   = path.join(DATA_DIR, 'pendentes.json');
 const ESTADO_FILE = path.join(DATA_DIR, 'estado_live.json');
 const MOMENTUM_HISTORICO_FILE = path.join(DATA_DIR, 'momentum_historico.json');
+const VALIDACAO_FILE = path.join(DATA_DIR, 'validacao_novos_indicadores.json');
 // Depois de encerrado, o jogo fica esse tempo no estado_live.json (pra
 // garantir que nenhum ciclo atrasado ainda vá editar mensagem dele) antes
 // de ser movido pro arquivo de histórico e removido do arquivo "quente"
@@ -124,6 +128,7 @@ function salvarArquivo(file, data) {
 let dadosHist = lerArquivo(DATA_FILE, []);
 let pendentes = lerArquivo(PEND_FILE, []);
 let momentumHistorico = lerArquivo(MOMENTUM_HISTORICO_FILE, {});
+let validacaoNovosIndicadores = lerArquivo(VALIDACAO_FILE, []); // 25/08 — histórico de validação Trocação/Tempestade
 
 let estadoLive = lerArquivo(ESTADO_FILE, {});
 for (const k of Object.keys(estadoLive)) {
@@ -172,6 +177,23 @@ async function sendTelegram(msg, extra = {}) {
       if (d.ok) ids.push({ chatId, messageId: d.result.message_id });
     } catch(e) { console.error('TG send error:', e.message); }
   }
+  return ids;
+}
+
+// 25/08 — envio SÓ pro chat pessoal (não manda pro grupo Gonza Bot).
+// Usado nos novos indicadores (Trocação/Tempestade) enquanto estão em
+// modo validação.
+async function sendTelegramPessoal(msg, extra = {}) {
+  const ids = [];
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: 'HTML', disable_web_page_preview: true, ...extra })
+    });
+    const d = await r.json();
+    if (d.ok) ids.push({ chatId: TG_CHAT_ID, messageId: d.result.message_id });
+  } catch(e) { console.error('TG send (pessoal) error:', e.message); }
   return ids;
 }
 
@@ -356,6 +378,369 @@ function checaJogoAberto(jogo, minutoAtual) {
   if (minCasa == null || minFora == null) return null;
   if (Math.abs(minCasa - minFora) <= 2) return { minCasa, minFora };
   return null;
+}
+
+// ════════════════════════════════════════════════════════════════
+// ── NOVOS INDICADORES (25/08) — Trocação Gonza / Tempestade      ──
+// ── Cruzada Gonza. Detectam chute dos dois lados no MESMO minuto ──
+// ── (Trocação) ou em minutos CONSECUTIVOS (Tempestade). Rodam    ──
+// ── pra QUALQUER jogo ao vivo, independente de ter estratégia    ──
+// ── nossa nele — a diferença de taxa entre "com estratégia" e    ──
+// ── "sem estratégia" se mostrou mínima nos testes, então vale a  ──
+// ── pena captar em todos os jogos.                               ──
+// ════════════════════════════════════════════════════════════════
+
+const TIPOS_CHUTE = ['chute_no_gol', 'chute_para_fora', 'chute_bloqueado', 'chute_na_trave'];
+
+function checaTrocacaoGonza(jogo, minutoAtual) {
+  if (!minutoAtual || minutoAtual < 1) return null;
+  const eventos = jogo.eventos || [];
+  const casaPorMin = {};
+  const foraPorMin = {};
+  for (const e of eventos) {
+    if (!TIPOS_CHUTE.includes(e.tipo_evento)) continue;
+    if (e.minuto > minutoAtual || e.minuto > 45) continue;
+    const alvo = e.lado === 'casa' ? casaPorMin : foraPorMin;
+    (alvo[e.minuto] = alvo[e.minuto] || []).push(e.tipo_evento);
+  }
+  const comuns = Object.keys(casaPorMin)
+    .map(Number)
+    .filter(m => foraPorMin[m])
+    .sort((a, b) => a - b);
+  return comuns.length ? comuns[0] : null;
+}
+
+function checaTempestadeCruzadaGonza(jogo, minutoAtual) {
+  if (!minutoAtual || minutoAtual < 2) return null;
+  const eventos = jogo.eventos || [];
+  const casaPorMin = {};
+  const foraPorMin = {};
+  for (const e of eventos) {
+    if (!TIPOS_CHUTE.includes(e.tipo_evento)) continue;
+    if (e.minuto > minutoAtual || e.minuto > 45) continue;
+    const alvo = e.lado === 'casa' ? casaPorMin : foraPorMin;
+    (alvo[e.minuto] = alvo[e.minuto] || []).push(e.tipo_evento);
+  }
+  const todosMin = [...new Set([...Object.keys(casaPorMin), ...Object.keys(foraPorMin)].map(Number))].sort((a, b) => a - b);
+  for (const m of todosMin) {
+    if (casaPorMin[m] && foraPorMin[m + 1] && m + 1 <= 45) return m + 1;
+    if (foraPorMin[m] && casaPorMin[m + 1] && m + 1 <= 45) return m + 1;
+  }
+  return null;
+}
+
+// Escolhe o bucket de mercado dinâmico ("Over total_atual+0,5") dado o
+// placar atual — usado tanto pro mercado de HT quanto pro Limite.
+function getBucketDinamico(golsCasa, golsFora) {
+  const total = golsCasa + golsFora;
+  if (total === 0) return '05';
+  if (total === 1) return '15';
+  if (total === 2) return '25';
+  return '35';
+}
+
+function pctParaOdd(pct0a100) {
+  if (pct0a100 == null || pct0a100 <= 0) return null;
+  return Math.round((100 / pct0a100) * 100) / 100;
+}
+
+// Lógica de disparo pros dois novos indicadores. Roda 1x por ciclo por
+// jogo, só enquanto ainda está no 1T. Regra:
+//   - Padrão bate ATÉ o min 10 → dispara na hora, sugere Over HT
+//     (bucket dinâmico pelo placar do momento)
+//   - Padrão bate DEPOIS do min 10 → NÃO dispara na hora; só dispara
+//     se chegar na janela 41-45 com o placar AINDA IGUAL ao que estava
+//     quando o padrão bateu (senão, o padrão já "resolveu sozinho")
+// Envia só pro chat pessoal (validação). Registra em
+// validacaoNovosIndicadores pra depois conferir green/red.
+async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
+  if (estado.passouHT) return; // só 1T
+  const tempoNum = parseInt(jogo.tempo) || 0;
+  if (!tempoNum || jogo.tempo === 'Intervalo') return;
+
+  estado.novoIndicador = estado.novoIndicador || null;
+
+  const tr = checaTrocacaoGonza(jogo, tempoNum);
+  const te = checaTempestadeCruzadaGonza(jogo, tempoNum);
+  const candidatos = [];
+  if (tr != null) candidatos.push({ tipo: 'trocacao_gonza', min: tr, label: '🥊 Trocação Gonza' });
+  if (te != null) candidatos.push({ tipo: 'tempestade_cruzada_gonza', min: te, label: '⛈️ Tempestade Cruzada Gonza' });
+  if (!candidatos.length) return;
+
+  if (!estado.novoIndicador) {
+    candidatos.sort((a, b) => a.min - b.min);
+    const escolhido = candidatos[0];
+    const golsCasa = parseInt(jogo.gols_casa) || 0;
+    const golsFora = parseInt(jogo.gols_fora) || 0;
+    estado.novoIndicador = {
+      tipo: escolhido.tipo,
+      label: escolhido.label,
+      minutoBatido: escolhido.min,
+      placarNoMomento: `${golsCasa}x${golsFora}`,
+      bucketNoMomento: getBucketDinamico(golsCasa, golsFora),
+      jaAlertado: false,
+    };
+  }
+
+  const ni = estado.novoIndicador;
+  if (ni.jaAlertado) return;
+
+  const golsCasa = parseInt(jogo.gols_casa) || 0;
+  const golsFora = parseInt(jogo.gols_fora) || 0;
+  const placarAtual = `${golsCasa}x${golsFora}`;
+  const links = linksExchanges(jogo.urls_exchanges || {});
+
+  const mercadoLabel = {
+    '05': 'Over 0,5 HT',
+    '15': 'Over 1,5 HT',
+    '25': 'Over 2,5 HT',
+    '35': 'Over 3,5 HT',
+  }[ni.bucketNoMomento] || 'Over HT';
+
+  const oddJogoHT = estado.overs ? estado.overs[`over${ni.bucketNoMomento}HT`] : null;
+  const linhaOddJogo = oddJogoHT != null
+    ? `📊 Odd justa do jogo (pré-live, ${mercadoLabel}): ${pctParaOdd(oddJogoHT)?.toFixed(2) || '-'} (${oddJogoHT.toFixed(0)}%)`
+    : '';
+
+  // CASO A: bateu até o min 10 → dispara na hora
+  if (ni.minutoBatido <= 10) {
+    ni.jaAlertado = true;
+    const registro = {
+      jogoId, jogo: `${jogo.mandante} x ${jogo.visitante}`, data: hoje,
+      tipo: ni.tipo, minutoBatido: ni.minutoBatido, placarNoMomento: ni.placarNoMomento,
+      bucket: ni.bucketNoMomento, mercado: mercadoLabel, caso: 'A_ate_min10',
+      status: 'pendente',
+    };
+    validacaoNovosIndicadores.push(registro);
+    salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+    estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
+
+    const texto = `${ni.label} (VALIDAÇÃO)\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${ni.minutoBatido}' · 📊 ${ni.placarNoMomento}\n─────────────────\n➜ ENTRAR: ${mercadoLabel}\n${linhaOddJogo}\n📊 Placar atual: ${placarAtual} · ${tempoNum}'${links}`;
+    const ids = await sendTelegramPessoal(texto);
+    estado.validacaoMsgIds = ids;
+    return;
+  }
+
+  // CASO B: bateu depois do min 10 → só dispara na janela 41-45,
+  // se o placar não mudou desde que bateu
+  if (tempoNum >= 41 && tempoNum <= 45) {
+    if (placarAtual !== ni.placarNoMomento) {
+      ni.jaAlertado = true; // já resolveu sozinho, não alerta
+      return;
+    }
+    ni.jaAlertado = true;
+    const registro = {
+      jogoId, jogo: `${jogo.mandante} x ${jogo.visitante}`, data: hoje,
+      tipo: ni.tipo, minutoBatido: ni.minutoBatido, placarNoMomento: ni.placarNoMomento,
+      bucket: ni.bucketNoMomento, mercado: mercadoLabel, caso: 'B_janela_41_45',
+      status: 'pendente',
+    };
+    validacaoNovosIndicadores.push(registro);
+    salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+    estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
+
+    const texto = `${ni.label} (VALIDAÇÃO)\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${ni.minutoBatido}' · 📊 ${ni.placarNoMomento}\n─────────────────\n⏱ Placar segue igual até o ${tempoNum}'\n➜ ENTRAR: ${mercadoLabel} (fim do 1T)\n${linhaOddJogo}\n📊 Placar atual: ${placarAtual} · ${tempoNum}'${links}`;
+    const ids = await sendTelegramPessoal(texto);
+    estado.validacaoMsgIds = ids;
+    return;
+  }
+}
+
+// Checa no HT (chamado de dentro do fluxo normal de monitorarLive, quando
+// jogo.tempo === 'Intervalo' pela primeira vez) se a validação pendente
+// desse jogo bateu green ou red, e manda a confirmação pro chat pessoal.
+async function confirmarValidacaoNoHT(jogo, estado) {
+  if (estado.validacaoIndex == null) return;
+  const registro = validacaoNovosIndicadores[estado.validacaoIndex];
+  if (!registro || registro.status !== 'pendente') return;
+
+  const [baseCasa, baseFora] = registro.placarNoMomento.split('x').map(Number);
+  const golsCasaHT = parseInt(jogo.gols_casa_ht);
+  const golsForaHT = parseInt(jogo.gols_fora_ht);
+  if (isNaN(golsCasaHT) || isNaN(golsForaHT)) return;
+
+  const totalBase = baseCasa + baseFora;
+  const totalHT = golsCasaHT + golsForaHT;
+  const green = totalHT > totalBase;
+
+  registro.status = green ? 'green' : 'red';
+  registro.htFinal = `${golsCasaHT}x${golsForaHT}`;
+  salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+
+  const emoji = green ? '✅ GREEN' : '❌ RED';
+  const texto = `${emoji} — Validação ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'}\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → HT: ${registro.htFinal}\n➜ Mercado: ${registro.mercado}`;
+  await sendTelegramPessoal(texto);
+}
+
+// ════════════════════════════════════════════════════════════════
+// ── ODDS JUSTAS POR ESTRATÉGIA (25/08) — backtest de 1 ano por   ──
+// ── estratégia, calculado fora e colado aqui como dado estático. ──
+// ── "geral" = usar quando o alerta é no 1T (ainda não se sabe o  ──
+// ── HT). "ht0/ht1/ht2" = usar quando já se sabe o placar do HT   ──
+// ── (2+ gols agrupado porque a amostra é pequena separando mais).──
+// ── Todos os valores são TAXA (0 a 1), não odd — a conversão pra ──
+// ── odd (1/taxa) acontece na hora de montar a mensagem.          ──
+// ════════════════════════════════════════════════════════════════
+const REGRAS_ODDS_JUSTAS = {
+  favorito_ht_gonza: {
+    geral: { n:2848, over05HT:0.7626, over15HT:0.4129, over05:0.9554, over15:0.8153, over25:0.6225, over35:0.3789 },
+    ht0: { n:676, over05:0.8121, over15:0.4778, over25:0.2263, over35:0.0754 },
+    ht1: { n:996, over05:1.0, over15:0.8263, over25:0.5341, over35:0.254 },
+    ht2: { n:1176, over05:1.0, over15:1.0, over25:0.9252, over35:0.659 },
+  },
+  back_gonza_xg: {
+    geral: { n:1518, over05HT:0.7661, over15HT:0.419, over05:0.9578, over15:0.8195, over25:0.6173, over35:0.3834 },
+    ht0: { n:355, over05:0.8197, over15:0.493, over25:0.2, over35:0.0761 },
+    ht1: { n:527, over05:1.0, over15:0.8216, over25:0.5332, over35:0.2543 },
+    ht2: { n:636, over05:1.0, over15:1.0, over25:0.9198, over35:0.6619 },
+  },
+  lay_away_manu: {
+    geral: { n:1145, over05HT:0.7546, over15HT:0.3895, over05:0.9581, over15:0.8105, over25:0.5974, over35:0.3616 },
+    ht0: { n:281, over05:0.8292, over15:0.5125, over25:0.1993, over35:0.0641 },
+    ht1: { n:418, over05:1.0, over15:0.8086, over25:0.512, over35:0.2153 },
+    ht2: { n:446, over05:1.0, over15:1.0, over25:0.9283, over35:0.6861 },
+  },
+  lay_manu4: {
+    geral: { n:493, over05HT:0.7748, over15HT:0.3996, over05:0.9615, over15:0.8377, over25:0.6308, over35:0.3834 },
+    ht0: { n:111, over05:0.8288, over15:0.5766, over25:0.2613, over35:0.0631 },
+    ht1: { n:185, over05:1.0, over15:0.8216, over25:0.5297, over35:0.2108 },
+    ht2: { n:197, over05:1.0, over15:1.0, over25:0.934, over35:0.7259 },
+  },
+  felipe_over15: {
+    geral: { n:2265, over05HT:0.721, over15HT:0.3762, over05:0.9435, over15:0.7965, over25:0.5753, over35:0.3426 },
+    ht0: { n:632, over05:0.7975, over15:0.4731, over25:0.1994, over35:0.0759 },
+    ht1: { n:781, over05:1.0, over15:0.8361, over25:0.5288, over35:0.2292 },
+    ht2: { n:852, over05:1.0, over15:1.0, over25:0.8967, over35:0.6444 },
+  },
+  ambas_marcam_xg: {
+    geral: { n:2157, over05HT:0.7246, over15HT:0.3639, over05:0.9416, over15:0.7854, over25:0.5559, over35:0.3421 },
+    ht0: { n:594, over05:0.7879, over15:0.4579, over25:0.1869, over35:0.0774 },
+    ht1: { n:778, over05:1.0, over15:0.8188, over25:0.4987, over35:0.2249 },
+    ht2: { n:785, over05:1.0, over15:1.0, over25:0.8917, over35:0.6586 },
+  },
+  over05: {
+    geral: { n:794, over05HT:0.6612, over15HT:0.364, over05:0.9484, over15:0.7796, over25:0.5655, over35:0.3753 },
+    ht0: { n:269, over05:0.8476, over15:0.513, over25:0.2528, over35:0.1301 },
+    ht1: { n:236, over05:1.0, over15:0.8136, over25:0.4958, over35:0.2542 },
+    ht2: { n:289, over05:1.0, over15:1.0, over25:0.9135, over35:0.7024 },
+  },
+  gol_no_final: {
+    geral: { n:433, over05HT:0.6767, over15HT:0.3533, over05:0.9284, over15:0.7436, over25:0.515, over35:0.2933 },
+    ht0: { n:140, over05:0.7786, over15:0.4429, over25:0.1786, over35:0.0857 },
+    ht1: { n:140, over05:1.0, over15:0.7643, over25:0.4429, over35:0.2071 },
+    ht2: { n:153, over05:1.0, over15:1.0, over25:0.8889, over35:0.5621 },
+  },
+  over05_ht: {
+    geral: { n:398, over05HT:0.7513, over15HT:0.4447, over05:0.9623, over15:0.8492, over25:0.6608, over35:0.4598 },
+    ht0: { n:99, over05:0.8485, over15:0.5354, over25:0.2727, over35:0.1212 },
+    ht1: { n:122, over05:1.0, over15:0.8852, over25:0.582, over35:0.3033 },
+    ht2: { n:177, over05:1.0, over15:1.0, over25:0.9322, over35:0.7571 },
+  },
+  over15_ia: {
+    geral: { n:352, over05HT:0.7926, over15HT:0.446, over05:0.9659, over15:0.8466, over25:0.6506, over35:0.4659 },
+    ht0: { n:73, over05:0.8356, over15:0.5479, over25:0.274, over35:0.1096 },
+    ht1: { n:122, over05:1.0, over15:0.8279, over25:0.5328, over35:0.3197 },
+    ht2: { n:157, over05:1.0, over15:1.0, over25:0.9172, over35:0.7452 },
+  },
+  ambas_marcam: {
+    geral: { n:246, over05HT:0.7154, over15HT:0.4228, over05:0.9309, over15:0.8008, over25:0.6016, over35:0.4024 },
+    ht0: { n:70, over05:0.7571, over15:0.4571, over25:0.2, over35:0.1143 },
+    ht1: { n:72, over05:1.0, over15:0.8472, over25:0.5417, over35:0.2639 },
+    ht2: { n:104, over05:1.0, over15:1.0, over25:0.9135, over35:0.6923 },
+  },
+  lay_0x1_ia: {
+    geral: { n:579, over05HT:0.7789, over15HT:0.418, over05:0.9758, over15:0.8359, over25:0.6149, over35:0.4249 },
+    ht0: { n:128, over05:0.8906, over15:0.5625, over25:0.2422, over35:0.1484 },
+    ht1: { n:209, over05:1.0, over15:0.8134, over25:0.5024, over35:0.2727 },
+    ht2: { n:242, over05:1.0, over15:1.0, over25:0.9091, over35:0.7025 },
+  },
+  lay_1x0_ia: {
+    geral: { n:286, over05HT:0.7308, over15HT:0.3986, over05:0.9545, over15:0.8182, over25:0.6049, over35:0.4231 },
+    ht0: { n:77, over05:0.8312, over15:0.5455, over25:0.2597, over35:0.1818 },
+    ht1: { n:95, over05:1.0, over15:0.8211, over25:0.5053, over35:0.2526 },
+    ht2: { n:114, over05:1.0, over15:1.0, over25:0.9211, over35:0.7281 },
+  },
+  lay_gol_visit: {
+    geral: { n:487, over05HT:0.6612, over15HT:0.3142, over05:0.9302, over15:0.7351, over25:0.4784, over35:0.2793 },
+    ht0: { n:165, over05:0.7939, over15:0.4303, over25:0.1697, over35:0.0667 },
+    ht1: { n:169, over05:1.0, over15:0.7929, over25:0.426, over35:0.2071 },
+    ht2: { n:153, over05:1.0, over15:1.0, over25:0.8693, over35:0.5882 },
+  },
+  lay_gol_mand: {
+    geral: { n:216, over05HT:0.6991, over15HT:0.2917, over05:0.9306, over15:0.7639, over25:0.5093, over35:0.3194 },
+    ht0: { n:65, over05:0.7692, over15:0.4308, over25:0.1692, over35:0.1077 },
+    ht1: { n:88, over05:1.0, over15:0.8409, over25:0.4886, over35:0.2045 },
+    ht2: { n:63, over05:1.0, over15:1.0, over25:0.8889, over35:0.6984 },
+  },
+};
+
+// Devolve a taxa (0-1) da estratégia pro mercado/contexto pedido, ou null
+// se não tiver dado. `contexto` = 'geral' (1T) ou 'ht0'/'ht1'/'ht2' (2T,
+// já sabendo o HT). `mercado` = 'over05HT'|'over15HT'|'over05'|'over15'|
+// 'over25'|'over35'.
+function taxaEstrategia(stratKey, contexto, mercado) {
+  const bloco = REGRAS_ODDS_JUSTAS[stratKey];
+  if (!bloco || !bloco[contexto]) return null;
+  const v = bloco[contexto][mercado];
+  return (v == null) ? null : v;
+}
+
+// Monta as linhas de odd justa pro corpo do alerta. SEMPRE usa a taxa
+// PRÉ-LIVE (nunca a "ao vivo") — é o piso de segurança, já que o indicador
+// ao vivo tende a igualar ou melhorar esse número, nunca piorar.
+//   - stratKey: chave da estratégia (ou null se não tiver — ex: Trocação/
+//     Tempestade Cruzada rodando num jogo sem nenhuma estratégia nossa)
+//   - is1T: true = ainda não passou HT (usa contexto 'geral' + mostra
+//     tanto a linha de HT quanto a de Limite); false = já sabe o HT
+//     (usa contexto ht0/ht1/ht2, só mostra a linha de Limite)
+//   - golsCasa/golsFora: placar ATUAL (não o placar do alerta) — usado
+//     pra escolher o bucket dinâmico (over05/15/25/35)
+//   - htTotal: só relevante quando is1T=false, pra escolher ht0/ht1/ht2
+//   - overs: estado.overs do jogo (percentuais pré-live dos 2 times),
+//     pode ser null se ainda não carregou
+function montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, overs) {
+  const linhas = [];
+  const bucket = getBucketDinamico(golsCasa, golsFora); // '05'|'15'|'25'|'35'
+  const mercadoFT = `over${bucket}`;
+  const labelFT = { '05':'Over 0,5', '15':'Over 1,5', '25':'Over 2,5', '35':'Over 3,5' }[bucket];
+
+  const contexto = is1T ? 'geral' : (htTotal === 0 ? 'ht0' : (htTotal === 1 ? 'ht1' : 'ht2'));
+
+  // ── Linha de HT (só faz sentido mostrar enquanto ainda não passou HT) ──
+  if (is1T) {
+    const mercadoHT = bucket === '05' ? 'over05HT' : 'over15HT'; // HT so tem esses 2 buckets calculados
+    const labelHT = bucket === '05' ? 'Over 0,5 HT' : 'Over 1,5 HT';
+    const taxaEstHT = stratKey ? taxaEstrategia(stratKey, 'geral', mercadoHT) : null;
+    const taxaJogoHT = overs ? overs[mercadoHT] : null; // overs vem em 0-100
+
+    if (taxaEstHT != null) {
+      linhas.push(`📈 Odd justa estratégia (${labelHT}, pré-live): ${(1/taxaEstHT).toFixed(2)}`);
+    }
+    if (taxaJogoHT != null) {
+      linhas.push(`📊 Odd justa do jogo (pré-live, ${labelHT}): ${pctParaOdd(taxaJogoHT).toFixed(2)} (${taxaJogoHT.toFixed(0)}%)`);
+    }
+    if (taxaEstHT != null && taxaJogoHT != null) {
+      const media = (taxaEstHT + (taxaJogoHT/100)) / 2;
+      linhas.push(`🎯 Odd justa combinada (${labelHT}): ${(1/media).toFixed(2)}`);
+    }
+  }
+
+  // ── Linha de Limite (sempre mostra, 1T ou 2T) ──────────────────────
+  const taxaEstFT = stratKey ? taxaEstrategia(stratKey, contexto, mercadoFT) : null;
+  const taxaJogoFT = overs ? overs[mercadoFT] : null;
+
+  if (taxaEstFT != null) {
+    linhas.push(`📈 Odd justa estratégia (${labelFT} Limite, pré-live): ${(1/taxaEstFT).toFixed(2)}`);
+  }
+  if (taxaJogoFT != null) {
+    linhas.push(`📊 Odd justa do jogo (pré-live, ${labelFT} Limite): ${pctParaOdd(taxaJogoFT).toFixed(2)} (${taxaJogoFT.toFixed(0)}%)`);
+  }
+  if (taxaEstFT != null && taxaJogoFT != null) {
+    const media = (taxaEstFT + (taxaJogoFT/100)) / 2;
+    linhas.push(`🎯 Odd justa combinada (${labelFT} Limite): ${(1/media).toFixed(2)}`);
+  }
+
+  return linhas;
 }
 
 function registrarPendente(jogo, strat, tipo = 'pre') {
@@ -754,6 +1139,8 @@ async function monitorarLive() {
           : placarAtual;
         estado.passouHT = true;
         console.log(`[HT] ${jogoId} → HT: ${estado.htPlacar}`);
+        // 25/08: checa validação pendente dos novos indicadores no HT
+        await confirmarValidacaoNoHT(jogo, estado).catch(() => {});
       }
       if (!estado.passouHT && (parseInt(jogo.tempo) || 0) > 60) {
         estado.passouHT = true;
@@ -765,6 +1152,7 @@ async function monitorarLive() {
             ? `${htCasaApi}x${htForaApi}`
             : null;
         }
+        await confirmarValidacaoNoHT(jogo, estado).catch(() => {});
       }
 
       if (estado.passouHT && estado.minutoInicio2T == null && jogo.tempo !== 'Intervalo') {
@@ -786,6 +1174,11 @@ async function monitorarLive() {
       await processarAlertasLive(jogo, estado, jogoId, hoje);
       await processarIndicadoresProprios(jogo, estado, jogoId, hoje);
       await processarEstadoGrupo1(jogo, estado, jogoId, hoje);
+      // 25/08: Trocação Gonza / Tempestade Cruzada Gonza — roda em TODOS
+      // os jogos, com ou sem estratégia nossa
+      await processarTrocacaoTempestade(jogo, estado, jogoId, hoje).catch((e) =>
+        console.error(`[trocacao/tempestade] Erro em ${jogoId}:`, e.message)
+      );
     }
 
     arquivarJogosEncerrados();
@@ -913,12 +1306,27 @@ function placarValidoParaGols(stratKey, golsCasa, golsFora) {
   }
 }
 
-// Monta o corpo completo (indicadores + aviso de saída + placar atual +
-// confiabilidade) — usado tanto no disparo inicial quanto em toda edição
-// posterior, pra nunca haver dois formatos diferentes de montagem.
-function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay) {
+// Monta o corpo completo (indicadores + aviso de saída + odds justas +
+// placar atual + confiabilidade) — usado tanto no disparo inicial quanto
+// em toda edição posterior, pra nunca haver dois formatos diferentes de
+// montagem.
+// 25/08: ganhou os parâmetros stratKey e jogo, pra poder montar as linhas
+// de odd justa (precisa saber a estratégia e o placar atual).
+function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay, stratKey, jogo) {
   const partes = [...montarLinhasIndicadores(info)];
   if (info.avisoSaida) partes.push(info.avisoSaida);
+
+  const golsCasa = parseInt(jogo.gols_casa) || 0;
+  const golsFora = parseInt(jogo.gols_fora) || 0;
+  const is1T = !estado.passouHT;
+  let htTotal = null;
+  if (!is1T && estado.htPlacar) {
+    const [hc, hf] = estado.htPlacar.split('x').map(Number);
+    if (!isNaN(hc) && !isNaN(hf)) htTotal = hc + hf;
+  }
+  const linhasOdds = montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, estado.overs);
+  partes.push(...linhasOdds);
+
   partes.push(`📊 Placar atual: ${placarAtual} · ${tempoDisplay}'`);
   if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
   return partes.join('\n');
@@ -1074,7 +1482,10 @@ function montarLinhaEntradaSugerida(info) {
 }
 
 // Monta o texto completo do alerta consolidado (lista de estratégias
-// ativas + indicadores + entrada sugerida + placar).
+// ativas + indicadores + odds justas + entrada sugerida + placar).
+// 25/08: ganhou as linhas de odd justa também (usa a estratégia MAIS
+// FORTE do grupo — a de menor odd justa geral — como referência, já
+// que estratégias combinadas tendem a ter perfil bem parecido entre si).
 function montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay) {
   const ROTULO_GRUPO1 = {
     atencao: ' — ⚠️ atenção (contra na frente)',
@@ -1094,6 +1505,22 @@ function montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay) 
   if (msgCons.avisoSaida) partes.push(msgCons.avisoSaida);
   const linhaEntrada = montarLinhaEntradaSugerida(msgCons);
   if (linhaEntrada) partes.push(linhaEntrada);
+
+  // Odds justas — usa a 1ª estratégia do grupo como referência (elas
+  // tendem a ter números bem parecidos quando confirmam juntas)
+  if (msgCons.estrategias.length) {
+    const golsCasa = parseInt(jogo.gols_casa) || 0;
+    const golsFora = parseInt(jogo.gols_fora) || 0;
+    const is1T = !estado.passouHT;
+    let htTotal = null;
+    if (!is1T && estado.htPlacar) {
+      const [hc, hf] = estado.htPlacar.split('x').map(Number);
+      if (!isNaN(hc) && !isNaN(hf)) htTotal = hc + hf;
+    }
+    const stratRef = msgCons.estrategias[0].stratKey;
+    partes.push(...montarLinhasOdds(stratRef, is1T, golsCasa, golsFora, htTotal, estado.overs));
+  }
+
   partes.push(`📊 Placar atual: ${placarAtual} · ${tempoDisplay}'`);
   if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
 
@@ -1183,6 +1610,8 @@ async function rerenderizarConsolidado(jogo, estado) {
 
 // Dispara o alerta inicial de uma estratégia (só se ainda não tiver sido
 // alertada). tipoIndicador/periodo/valor = o indicador que disparou.
+// 25/08: passa stratKey e jogo pra montarCorpoAlerta poder montar as
+// linhas de odd justa.
 async function dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, periodo, valor, opcoes = {}) {
   if (estado.msgIds[stratKey]) return false;
 
@@ -1197,7 +1626,7 @@ async function dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, pe
   indicadores[tipoIndicador][periodo].push(valor);
   const infoTemp = { indicadores, avisoSaida: null };
 
-  let corpo = montarCorpoAlerta(infoTemp, estado, placar, tempoDisplay);
+  let corpo = montarCorpoAlerta(infoTemp, estado, placar, tempoDisplay, stratKey, jogo);
   if (opcoes.entradaEspecialTexto) {
     corpo = `➜ ENTRAR: ${opcoes.entradaEspecialTexto}\n${corpo}`;
   }
@@ -1230,7 +1659,7 @@ async function rerenderizarAlerta(jogo, estado, stratKey, info) {
   const links = linksExchanges(jogo.urls_exchanges || {});
   const display = STRAT_DISPLAY[stratKey] || stratKey;
 
-  const corpo = montarCorpoAlerta(info, estado, placarAtual, tempoDisplay);
+  const corpo = montarCorpoAlerta(info, estado, placarAtual, tempoDisplay, stratKey, jogo);
   const texto = montarMsgAlerta(display, jogo, info.tempoAlerta, info.placarAlerta, `${placarAtual} · ${tempoDisplay}'`, links, corpo);
   await editTelegram(info.ids, texto);
 }
@@ -1737,6 +2166,28 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   }
   salvarArquivo(PEND_FILE, pendentes);
 
+  // 25/08 — confirma validação de Trocação/Tempestade quando ela foi pro
+  // mercado de Limite (jogo todo) — o caso do Over HT já foi confirmado
+  // antes, no momento em que o jogo bateu Intervalo (confirmarValidacaoNoHT).
+  // Aqui só cobre o caso raro de a validação nunca ter sido confirmada no
+  // HT por algum motivo (ex: jogo terminou sem passar por "Intervalo" na
+  // API) — fallback de segurança.
+  if (estado.validacaoIndex != null) {
+    const registro = validacaoNovosIndicadores[estado.validacaoIndex];
+    if (registro && registro.status === 'pendente') {
+      const [baseCasa, baseFora] = registro.placarNoMomento.split('x').map(Number);
+      const totalBase = baseCasa + baseFora;
+      const totalFT = golsCasa + golsFora;
+      const green = totalFT > totalBase;
+      registro.status = green ? 'green' : 'red';
+      registro.ftFinal = placarFT;
+      salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+      const emoji = green ? '✅ GREEN' : '❌ RED';
+      const texto = `${emoji} — Validação ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'} (fallback fim de jogo)\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → FT: ${registro.ftFinal}\n➜ Mercado: ${registro.mercado}`;
+      await sendTelegramPessoal(texto).catch(() => {});
+    }
+  }
+
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
 
@@ -1867,6 +2318,19 @@ app.post('/pendentes', (req, res) => {
   pendentes = [...novos, ...mantidos];
   salvarArquivo(PEND_FILE, pendentes);
   res.json({ ok: true, total: pendentes.length });
+});
+
+// 25/08 — histórico de validação dos novos indicadores (Trocação/Tempestade)
+app.get('/validacao-novos-indicadores', (req, res) => {
+  const greens = validacaoNovosIndicadores.filter(v => v.status === 'green').length;
+  const reds = validacaoNovosIndicadores.filter(v => v.status === 'red').length;
+  const pendentesV = validacaoNovosIndicadores.filter(v => v.status === 'pendente').length;
+  res.json({
+    total: validacaoNovosIndicadores.length,
+    greens, reds, pendentes: pendentesV,
+    taxa: (greens + reds) > 0 ? (greens / (greens + reds)) : null,
+    registros: validacaoNovosIndicadores,
+  });
 });
 
 const TIPO_EVENTO_LABEL_MS = {
@@ -2171,7 +2635,7 @@ app.get('/estado-live', (req, res) => {
 });
 
 app.post('/testar-telegram', async (req, res) => {
-  await sendTelegram('✅ FUTATS Server v45b funcionando! 🎯');
+  await sendTelegram('✅ FUTATS Server v45c funcionando! 🎯');
   res.json({ ok: true });
 });
 
@@ -2213,7 +2677,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v45b na porta ${PORT}`);
+  console.log(`FUTATS Server v45c na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -2228,7 +2692,9 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v45b iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v45c iniciado!</b>\n' +
+    '🆕 Odds justas nos alertas — estratégia (pré-live) + jogo (pré-live diário) + combinada, mercado escolhido dinamicamente pelo placar atual (HT e Limite)\n' +
+    '🆕 Trocação Gonza (🥊) e Tempestade Cruzada Gonza (⛈️) — novos indicadores em modo VALIDAÇÃO, só pro chat pessoal: até min 10 dispara na hora sugerindo Over HT; depois disso só dispara na janela 41-45 se o placar não mudou; confirma green/red automaticamente no HT\n' +
     '✅ Horários das APIs ajustados conforme documentação\n' +
     '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
     '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
@@ -2236,12 +2702,12 @@ app.listen(PORT, async () => {
     '✅ Gol no Final / Over 0,5 2T — raio confirmado via periodo do evento (precisão total)\n' +
     '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20\n' +
     '✅ Fix Over 0,5 Gonza (Gol Limite) — mercado agora é total+0,5 após min 60 / total+1,5 antes, nunca mais fixo em Over 1,5\n' +
-    '🆕 Indicadores próprios Pressão Gonza & Jogo Aberto (substituem o raio do futats.com nas entradas)\n' +
+    '✅ Indicadores próprios Pressão Gonza & Jogo Aberto (substituem o raio do futats.com nas entradas)\n' +
     '✅ Fix: indicadores próprios agora respeitam a janela de cada estratégia (gol_no_final só 2T/min80, over05_ht só 1T, lay_0x1_ia/1x0_ia/0x2_manu/0x3/gol_visit/gol_mand até min 20)\n' +
     '✅ Fix: placar/minuto das mensagens dos indicadores próprios agora atualiza a cada ciclo (antes ficava congelado no momento da entrada)\n' +
     '✅ Gol no Final agora checa Pressão Gonza nos dois lados (favorito e zebra), não só no favorito\n' +
-    '🆕 Estratégias de gols já alertadas (raio antigo ou indicador próprio) agora recebem confirmação extra na mesma mensagem quando o outro indicador também bate (Pressão Gonza ou Jogo Aberto)\n' +
-    '🆕 Reconfirmação por período: qualquer estratégia (lado ou gols) já alertada agora anota até 1x por tempo (1T/2T) quando Pressão Gonza ou Jogo Aberto bate de novo, sem duplicar alerta'
+    '✅ Estratégias de gols já alertadas (raio antigo ou indicador próprio) agora recebem confirmação extra na mesma mensagem quando o outro indicador também bate (Pressão Gonza ou Jogo Aberto)\n' +
+    '✅ Reconfirmação por período: qualquer estratégia (lado ou gols) já alertada agora anota até 1x por tempo (1T/2T) quando Pressão Gonza ou Jogo Aberto bate de novo, sem duplicar alerta'
   );
 
   await enviarCardMatinal();
