@@ -11,6 +11,10 @@ app.use(express.json({ limit: '50mb' }));
 const TG_TOKEN    = process.env.TG_TOKEN    || '8826929533:AAH5CdY8yBf9p-2CM-JDYLz_ppu7bkxN5wQ';
 const TG_CHAT_ID  = process.env.TG_CHAT_ID  || '7324646421';
 const TG_CHAT_IDS = [TG_CHAT_ID, '-1003914910677'];
+// 01/09 — grupo dedicado pra validação dos novos indicadores (Trocação
+// Gonza / Tempestade Cruzada Gonza), separado do chat pessoal e do grupo
+// principal, enquanto ainda estão em teste.
+const TG_CHAT_ID_VALIDACAO = process.env.TG_CHAT_ID_VALIDACAO || '-5508923205';
 const PORT        = process.env.PORT        || 3000;
 const FUTATS_TOKEN = 'w8e6q2xa';
 const FUTATS_BASE  = 'https://gz.futats.com/opta';
@@ -180,20 +184,19 @@ async function sendTelegram(msg, extra = {}) {
   return ids;
 }
 
-// 25/08 — envio SÓ pro chat pessoal (não manda pro grupo Gonza Bot).
-// Usado nos novos indicadores (Trocação/Tempestade) enquanto estão em
-// modo validação.
+// 25/08 — envio SÓ pro grupo de validação (Trocação/Tempestade Cruzada),
+// separado do chat pessoal e do grupo principal Gonza Bot.
 async function sendTelegramPessoal(msg, extra = {}) {
   const ids = [];
   try {
     const r = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: TG_CHAT_ID, text: msg, parse_mode: 'HTML', disable_web_page_preview: true, ...extra })
+      body: JSON.stringify({ chat_id: TG_CHAT_ID_VALIDACAO, text: msg, parse_mode: 'HTML', disable_web_page_preview: true, ...extra })
     });
     const d = await r.json();
-    if (d.ok) ids.push({ chatId: TG_CHAT_ID, messageId: d.result.message_id });
-  } catch(e) { console.error('TG send (pessoal) error:', e.message); }
+    if (d.ok) ids.push({ chatId: TG_CHAT_ID_VALIDACAO, messageId: d.result.message_id });
+  } catch(e) { console.error('TG send (validação) error:', e.message); }
   return ids;
 }
 
