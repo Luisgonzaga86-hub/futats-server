@@ -115,6 +115,7 @@ const PEND_FILE   = path.join(DATA_DIR, 'pendentes.json');
 const ESTADO_FILE = path.join(DATA_DIR, 'estado_live.json');
 const MOMENTUM_HISTORICO_FILE = path.join(DATA_DIR, 'momentum_historico.json');
 const VALIDACAO_FILE = path.join(DATA_DIR, 'validacao_novos_indicadores.json');
+const OBSERVADOR_FILE = path.join(DATA_DIR, 'observador_log.json');
 // Depois de encerrado, o jogo fica esse tempo no estado_live.json (pra
 // garantir que nenhum ciclo atrasado ainda vá editar mensagem dele) antes
 // de ser movido pro arquivo de histórico e removido do arquivo "quente"
@@ -133,6 +134,7 @@ let dadosHist = lerArquivo(DATA_FILE, []);
 let pendentes = lerArquivo(PEND_FILE, []);
 let momentumHistorico = lerArquivo(MOMENTUM_HISTORICO_FILE, {});
 let validacaoNovosIndicadores = lerArquivo(VALIDACAO_FILE, []); // 25/08 — histórico de validação Trocação/Tempestade
+let observadorLog = lerArquivo(OBSERVADOR_FILE, []); // 01/09 — histórico de tudo que a página /observador já viu bater
 
 let estadoLive = lerArquivo(ESTADO_FILE, {});
 for (const k of Object.keys(estadoLive)) {
@@ -2328,6 +2330,184 @@ function agendarHoraBRT(hora, minuto, callback) {
   }
   proximaExecucao();
 }
+
+// ════════════════════════════════════════════════════════════════
+// ── PÁGINA OBSERVADOR (01/09) — mostra o status ao vivo de vários ──
+// ── indicadores (inclusive os que ainda não viraram alerta oficial)──
+// ── com a odd justa de referência ao lado, pra acompanhar sem      ──
+// ── esperar disparar nada no Telegram. Só leitura, não manda nada. ──
+// ════════════════════════════════════════════════════════════════
+
+function checaRaioGol5min(jogo, minIni, minFim) {
+  const eventos = jogo.eventos || [];
+  const gols = eventos.filter(e => e.tipo_evento === 'gol');
+  const raios = eventos.filter(e => e.tipo_evento === 'raio');
+  if (!raios.length) return null;
+  for (const g of gols) {
+    if (g.minuto < minIni || g.minuto > minFim) continue;
+    for (const r of raios) {
+      if (Math.abs(r.minuto - g.minuto) <= 5) return g.minuto;
+    }
+  }
+  return null;
+}
+
+function checaJanela6min180(jogo, ateMin) {
+  const momentum = jogo.momentum || [];
+  const mByMin = {};
+  for (const m of momentum) mByMin[m.minuto] = m;
+  for (const [lado, campo] of [['casa', 'valor_casa'], ['fora', 'valor_fora']]) {
+    for (let fim = 6; fim <= ateMin; fim++) {
+      const vals = [];
+      for (let mi = fim - 5; mi <= fim; mi++) {
+        if (mByMin[mi] == null) { vals.length = 0; break; }
+        vals.push(Math.abs(mByMin[mi][campo] || 0));
+      }
+      if (vals.length < 6) continue;
+      const media = vals.reduce((a, b) => a + b, 0) / 6;
+      if (media >= 180) return fim;
+    }
+  }
+  return null;
+}
+
+// Referências de odd justa (calculadas hoje, 01/09, base de 3.297 jogos)
+// pros indicadores que ainda não são alerta oficial — só pra exibir ao
+// lado do status na página observador.
+const ODDS_REFERENCIA_OBSERVADOR = {
+  pressao_gonza:      { htAte20: 1.20, limite: 1.11 },
+  trocacao_gonza:      { ht: 1.41, limite: 1.11 },
+  tempestade_gonza:    { ht: 1.41, limite: 1.11 },
+  raio_gol_5min:       { htAte20: 1.59, limiteJanela4660: 1.28 },
+  janela6min180:        { limite1T: 1.11 },
+};
+
+// Registra 1x cada ocorrência nova de indicador no log persistente
+// (nunca duplica a mesma ocorrência, mesmo com a página recarregando a
+// cada 30s) — assim fica um histórico do dia pra revisar depois, mesmo
+// depois que o jogo já tiver saído da lista de "ao vivo".
+function registrarObservacao(jogoId, jogo, indicadorKey, minuto, mercado, oddRef, estado) {
+  estado.observadorRegistrado = estado.observadorRegistrado || {};
+  const chave = `${indicadorKey}_${minuto}_${mercado}`;
+  if (estado.observadorRegistrado[chave]) return;
+  estado.observadorRegistrado[chave] = true;
+
+  observadorLog.push({
+    jogoId,
+    jogo: `${jogo.mandante} x ${jogo.visitante}`,
+    data: dataHoje(),
+    hora: horaBRT(),
+    indicador: indicadorKey,
+    minuto,
+    mercado,
+    oddRef,
+    placarNoMomento: `${parseInt(jogo.gols_casa)||0}x${parseInt(jogo.gols_fora)||0}`,
+  });
+  salvarArquivo(OBSERVADOR_FILE, observadorLog);
+}
+
+function obsBlocoIndicadores(jogo, estado) {
+  const tempoNum = parseInt(jogo.tempo) || 0;
+  const passouHT = !!estado.passouHT;
+  const linhas = [];
+  const jogoId = `${jogo.mandante}_${jogo.visitante}`;
+
+  if (!passouHT && tempoNum > 0) {
+    const pg = checaPressaoGonza(jogo, estado, 'casa', tempoNum) || checaPressaoGonza(jogo, estado, 'fora', tempoNum);
+    if (pg) {
+      linhas.push(`🟣 Pressão Gonza — bateu (${pg.tipo}) · odd ref. HT≤20': ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite}`);
+      registrarObservacao(jogoId, jogo, 'pressao_gonza', pg.minutoChute || tempoNum, 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20, estado);
+    }
+
+    const tr = checaTrocacaoGonza(jogo, tempoNum);
+    if (tr != null) {
+      linhas.push(`🥊 Trocação Gonza — bateu no min ${tr} · odd ref. HT: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.limite}`);
+      registrarObservacao(jogoId, jogo, 'trocacao_gonza', tr, 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht, estado);
+    }
+
+    const te = checaTempestadeCruzadaGonza(jogo, tempoNum);
+    if (te != null) {
+      linhas.push(`⛈️ Tempestade Cruzada Gonza — bateu no min ${te} · odd ref. HT: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.limite}`);
+      registrarObservacao(jogoId, jogo, 'tempestade_gonza', te, 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht, estado);
+    }
+
+    const rg = checaRaioGol5min(jogo, 0, Math.min(tempoNum, 25));
+    if (rg != null) {
+      linhas.push(`⚡ Raio+Gol (5min) — gol no min ${rg} com raio próximo · odd ref. HT≤20': ${ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.htAte20}`);
+      registrarObservacao(jogoId, jogo, 'raio_gol_5min', rg, 'HT', ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.htAte20, estado);
+    }
+
+    const j6 = checaJanela6min180(jogo, Math.min(tempoNum, 45));
+    if (j6 != null) {
+      linhas.push(`📊 Janela 6min média≥180 — bateu no min ${j6} · odd ref. Limite (1T): ${ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T}`);
+      registrarObservacao(jogoId, jogo, 'janela6min180', j6, 'Limite', ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T, estado);
+    }
+  } else if (passouHT && tempoNum >= 46) {
+    const rg2 = checaRaioGol5min(jogo, 46, Math.min(tempoNum, 60));
+    if (rg2 != null) {
+      linhas.push(`⚡ Raio+Gol (5min), 2T — gol no min ${rg2} com raio próximo · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.limiteJanela4660}`);
+      registrarObservacao(jogoId, jogo, 'raio_gol_5min_2t', rg2, 'Limite', ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.limiteJanela4660, estado);
+    }
+  }
+
+  if (!linhas.length) return '<p class="ms-muted ms-small">Nenhum indicador bateu ainda nesse jogo.</p>';
+  return linhas.map(l => `<p class="obs-linha">${l}</p>`).join('');
+}
+
+app.get('/observador', (req, res) => {
+  const jogosAtivos = Object.entries(estadoLive).filter(([, e]) => !e.encerrado && e.jogo);
+  if (!jogosAtivos.length) {
+    return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo ao vivo no momento.</p>'));
+  }
+
+  const corpo = jogosAtivos.map(([jogoId, estado]) => {
+    const jogo = estado.jogo;
+    const tempoTxt = jogo.tempo === 'Intervalo' ? 'Intervalo' : jogo.tempo === 'Encerrado' ? 'Encerrado' : `${jogo.tempo}'`;
+    return `<div class="ms-jogo">
+      <div class="ms-jogo-header">
+        <p class="ms-jogo-nome">${jogo.mandante} x ${jogo.visitante}</p>
+        <p class="ms-muted ms-small">${tempoTxt} &middot; placar ${jogo.gols_casa}x${jogo.gols_fora}</p>
+      </div>
+      ${obsBlocoIndicadores(jogo, estado)}
+    </div>`;
+  }).join('');
+
+  res.send(msPaginaHTML(`<p class="ms-muted" style="margin-bottom:12px;">🔍 Observador — ${jogosAtivos.length} jogo(s) ao vivo · não manda nada, só pra acompanhar</p><p style="margin-bottom:16px;"><a href="/observador/historico" style="color:#4fd1c5;">📜 Ver histórico de hoje</a></p>${corpo}`));
+});
+
+// Histórico do dia — tudo que a página /observador já registrou, mais
+// recente primeiro. Filtro opcional por data (?data=YYYY-MM-DD), senão
+// mostra só hoje.
+app.get('/observador/historico', (req, res) => {
+  const dataFiltro = (req.query.data || dataHoje()).trim();
+  const registros = observadorLog
+    .filter(r => r.data === dataFiltro)
+    .sort((a, b) => (b.data + b.hora).localeCompare(a.data + a.hora));
+
+  if (!registros.length) {
+    return res.send(msPaginaHTML(`<p><a href="/observador">← Voltar pro observador</a></p><p class="ms-empty">Nenhuma observação registrada em ${dataFiltro} ainda.</p>`));
+  }
+
+  const LABEL_INDICADOR = {
+    pressao_gonza: '🟣 Pressão Gonza',
+    trocacao_gonza: '🥊 Trocação Gonza',
+    tempestade_gonza: '⛈️ Tempestade Cruzada Gonza',
+    raio_gol_5min: '⚡ Raio+Gol (5min)',
+    raio_gol_5min_2t: '⚡ Raio+Gol (5min), 2T',
+    janela6min180: '📊 Janela 6min média≥180',
+  };
+
+  const corpo = registros.map(r => `
+    <div class="ms-jogo">
+      <div class="ms-jogo-header">
+        <p class="ms-jogo-nome">${r.jogo}</p>
+        <p class="ms-muted ms-small">${r.hora} &middot; min ${r.minuto} &middot; placar ${r.placarNoMomento}</p>
+      </div>
+      <p class="obs-linha">${LABEL_INDICADOR[r.indicador] || r.indicador} · mercado ${r.mercado} · odd ref. ${r.oddRef}</p>
+    </div>`).join('');
+
+  res.send(msPaginaHTML(`<p><a href="/observador">← Voltar pro observador</a></p><p class="ms-muted" style="margin:12px 0;">📜 Histórico — ${dataFiltro} (${registros.length} observação(ões))</p>${corpo}`));
+});
 
 app.get('/', (req, res) => res.json({
   status: 'ok', version: 'server_45',
