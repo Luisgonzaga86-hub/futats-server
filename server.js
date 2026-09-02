@@ -415,6 +415,25 @@ function checaTrocacaoGonza(jogo, minutoAtual) {
   return comuns.length ? comuns[0] : null;
 }
 
+// 02/09 — variante pro 2T (só considera min 46 até ateMin), usada só na
+// página /observador pra ver o padrão repetindo depois do intervalo.
+function checaTrocacaoGonza2T(jogo, ateMin) {
+  const eventos = jogo.eventos || [];
+  const casaPorMin = {};
+  const foraPorMin = {};
+  for (const e of eventos) {
+    if (!TIPOS_CHUTE.includes(e.tipo_evento)) continue;
+    if (e.minuto < 46 || e.minuto > ateMin) continue;
+    const alvo = e.lado === 'casa' ? casaPorMin : foraPorMin;
+    (alvo[e.minuto] = alvo[e.minuto] || []).push(e.tipo_evento);
+  }
+  const comuns = Object.keys(casaPorMin)
+    .map(Number)
+    .filter(m => foraPorMin[m])
+    .sort((a, b) => a - b);
+  return comuns.length ? comuns[0] : null;
+}
+
 function checaTempestadeCruzadaGonza(jogo, minutoAtual) {
   if (!minutoAtual || minutoAtual < 2) return null;
   const eventos = jogo.eventos || [];
@@ -430,6 +449,25 @@ function checaTempestadeCruzadaGonza(jogo, minutoAtual) {
   for (const m of todosMin) {
     if (casaPorMin[m] && foraPorMin[m + 1] && m + 1 <= 45) return m + 1;
     if (foraPorMin[m] && casaPorMin[m + 1] && m + 1 <= 45) return m + 1;
+  }
+  return null;
+}
+
+// 02/09 — variante pro 2T (min 46 até ateMin).
+function checaTempestadeCruzadaGonza2T(jogo, ateMin) {
+  const eventos = jogo.eventos || [];
+  const casaPorMin = {};
+  const foraPorMin = {};
+  for (const e of eventos) {
+    if (!TIPOS_CHUTE.includes(e.tipo_evento)) continue;
+    if (e.minuto < 46 || e.minuto > ateMin) continue;
+    const alvo = e.lado === 'casa' ? casaPorMin : foraPorMin;
+    (alvo[e.minuto] = alvo[e.minuto] || []).push(e.tipo_evento);
+  }
+  const todosMin = [...new Set([...Object.keys(casaPorMin), ...Object.keys(foraPorMin)].map(Number))].sort((a, b) => a - b);
+  for (const m of todosMin) {
+    if (casaPorMin[m] && foraPorMin[m + 1] && m + 1 <= ateMin) return m + 1;
+    if (foraPorMin[m] && casaPorMin[m + 1] && m + 1 <= ateMin) return m + 1;
   }
   return null;
 }
@@ -2371,6 +2409,26 @@ function checaJanela6min180(jogo, ateMin) {
   return null;
 }
 
+// 02/09 — variante pro 2T (min 46 até ateMin).
+function checaJanela6min180_2T(jogo, ateMin) {
+  const momentum = jogo.momentum || [];
+  const mByMin = {};
+  for (const m of momentum) mByMin[m.minuto] = m;
+  for (const [lado, campo] of [['casa', 'valor_casa'], ['fora', 'valor_fora']]) {
+    for (let fim = 46; fim <= ateMin; fim++) {
+      const vals = [];
+      for (let mi = fim - 5; mi <= fim; mi++) {
+        if (mByMin[mi] == null) { vals.length = 0; break; }
+        vals.push(Math.abs(mByMin[mi][campo] || 0));
+      }
+      if (vals.length < 6) continue;
+      const media = vals.reduce((a, b) => a + b, 0) / 6;
+      if (media >= 180) return fim;
+    }
+  }
+  return null;
+}
+
 // Referências de odd justa (calculadas hoje, 01/09, base de 3.297 jogos)
 // pros indicadores que ainda não são alerta oficial — só pra exibir ao
 // lado do status na página observador.
@@ -2409,49 +2467,114 @@ function registrarObservacao(jogoId, jogo, indicadorKey, minuto, mercado, oddRef
 function obsBlocoIndicadores(jogo, estado) {
   const tempoNum = parseInt(jogo.tempo) || 0;
   const passouHT = !!estado.passouHT;
-  const linhas = [];
   const jogoId = `${jogo.mandante}_${jogo.visitante}`;
 
+  // 02/09 (v2) — lista única de eventos (indicadores + gols), cada um com
+  // seu minuto, ordenada cronologicamente na hora de exibir. Persiste no
+  // ESTADO do jogo (sobrevive entre ciclos e entre 1T/2T) — nunca reseta
+  // sozinho, só se o processo reiniciar (deploy) no meio do jogo.
+  estado.observadorEventos = estado.observadorEventos || [];
+  estado.observadorRegistrado = estado.observadorRegistrado || {};
+
+  function addEvento(chave, minuto, texto, indicadorKey, mercado, oddRef) {
+    if (estado.observadorRegistrado[chave]) return;
+    estado.observadorRegistrado[chave] = true;
+    estado.observadorEventos.push({ minuto, texto });
+    registrarObservacao(jogoId, jogo, indicadorKey, minuto, mercado, oddRef, estado);
+  }
+
+  // ── Gols (funciona em 1T e 2T, não depende de período) ─────────────
+  for (const ev of (jogo.eventos || [])) {
+    if (ev.tipo_evento !== 'gol') continue;
+    const chave = `gol_${ev.minuto}_${ev.lado}`;
+    if (estado.observadorRegistrado[chave]) continue;
+    const golsCasaAteAqui = (jogo.eventos || []).filter(e => e.tipo_evento === 'gol' && e.lado === 'casa' && e.minuto <= ev.minuto).length;
+    const golsForaAteAqui = (jogo.eventos || []).filter(e => e.tipo_evento === 'gol' && e.lado === 'fora' && e.minuto <= ev.minuto).length;
+    const ladoTxt = ev.lado === 'casa' ? jogo.mandante : jogo.visitante;
+    addEvento(chave, ev.minuto, `⚽ Gol aos ${ev.minuto}' — ${ladoTxt} (${golsCasaAteAqui}x${golsForaAteAqui})`, 'gol', '-', null);
+  }
+
+  // ── Indicadores do 1T ────────────────────────────────────────────
   if (!passouHT && tempoNum > 0) {
     const pg = checaPressaoGonza(jogo, estado, 'casa', tempoNum) || checaPressaoGonza(jogo, estado, 'fora', tempoNum);
     if (pg) {
-      linhas.push(`🟣 Pressão Gonza — bateu (${pg.tipo}) · odd ref. HT≤20': ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite}`);
-      registrarObservacao(jogoId, jogo, 'pressao_gonza', pg.minutoChute || tempoNum, 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20, estado);
+      const minuto = pg.minutoChute || tempoNum;
+      addEvento(`pressao_gonza_${minuto}_HT/Limite`, minuto,
+        `🟣 Pressão Gonza — bateu (${pg.tipo}) · odd ref. HT≤20': ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite}`,
+        'pressao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20);
     }
 
     const tr = checaTrocacaoGonza(jogo, tempoNum);
     if (tr != null) {
-      linhas.push(`🥊 Trocação Gonza — bateu no min ${tr} · odd ref. HT: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.limite}`);
-      registrarObservacao(jogoId, jogo, 'trocacao_gonza', tr, 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht, estado);
+      addEvento(`trocacao_gonza_${tr}_HT/Limite`, tr,
+        `🥊 Trocação Gonza — bateu no min ${tr} · odd ref. HT: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.limite}`,
+        'trocacao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht);
     }
 
     const te = checaTempestadeCruzadaGonza(jogo, tempoNum);
     if (te != null) {
-      linhas.push(`⛈️ Tempestade Cruzada Gonza — bateu no min ${te} · odd ref. HT: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.limite}`);
-      registrarObservacao(jogoId, jogo, 'tempestade_gonza', te, 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht, estado);
+      addEvento(`tempestade_gonza_${te}_HT/Limite`, te,
+        `⛈️ Tempestade Cruzada Gonza — bateu no min ${te} · odd ref. HT: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.limite}`,
+        'tempestade_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht);
     }
 
     const rg = checaRaioGol5min(jogo, 0, Math.min(tempoNum, 25));
     if (rg != null) {
-      linhas.push(`⚡ Raio+Gol (5min) — gol no min ${rg} com raio próximo · odd ref. HT≤20': ${ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.htAte20}`);
-      registrarObservacao(jogoId, jogo, 'raio_gol_5min', rg, 'HT', ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.htAte20, estado);
+      addEvento(`raio_gol_5min_${rg}_HT`, rg,
+        `⚡ Raio+Gol (5min) — gol no min ${rg} com raio próximo · odd ref. HT≤20': ${ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.htAte20}`,
+        'raio_gol_5min', 'HT', ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.htAte20);
     }
 
     const j6 = checaJanela6min180(jogo, Math.min(tempoNum, 45));
     if (j6 != null) {
-      linhas.push(`📊 Janela 6min média≥180 — bateu no min ${j6} · odd ref. Limite (1T): ${ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T}`);
-      registrarObservacao(jogoId, jogo, 'janela6min180', j6, 'Limite', ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T, estado);
-    }
-  } else if (passouHT && tempoNum >= 46) {
-    const rg2 = checaRaioGol5min(jogo, 46, Math.min(tempoNum, 60));
-    if (rg2 != null) {
-      linhas.push(`⚡ Raio+Gol (5min), 2T — gol no min ${rg2} com raio próximo · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.limiteJanela4660}`);
-      registrarObservacao(jogoId, jogo, 'raio_gol_5min_2t', rg2, 'Limite', ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.limiteJanela4660, estado);
+      addEvento(`janela6min180_${j6}_Limite`, j6,
+        `📊 Janela 6min média≥180 — bateu no min ${j6} · odd ref. Limite (1T): ${ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T}`,
+        'janela6min180', 'Limite', ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T);
     }
   }
 
-  if (!linhas.length) return '<p class="ms-muted ms-small">Nenhum indicador bateu ainda nesse jogo.</p>';
-  return linhas.map(l => `<p class="obs-linha">${l}</p>`).join('');
+  // ── Indicadores do 2T (todos, até min 70) ───────────────────────
+  if (passouHT && tempoNum >= 46 && tempoNum <= 70) {
+    const pg2 = checaPressaoGonza(jogo, estado, 'casa', tempoNum) || checaPressaoGonza(jogo, estado, 'fora', tempoNum);
+    if (pg2) {
+      const minuto2 = pg2.minutoChute || tempoNum;
+      addEvento(`pressao_gonza_2t_${minuto2}_HT/Limite`, minuto2,
+        `🟣 Pressão Gonza, 2T — bateu (${pg2.tipo}) no min ${minuto2} · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite}`,
+        'pressao_gonza_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite);
+    }
+
+    const tr2 = checaTrocacaoGonza2T(jogo, Math.min(tempoNum, 70));
+    if (tr2 != null) {
+      addEvento(`trocacao_gonza_2t_${tr2}_Limite`, tr2,
+        `🥊 Trocação Gonza, 2T — bateu no min ${tr2} · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.limite}`,
+        'trocacao_gonza_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.limite);
+    }
+
+    const te2 = checaTempestadeCruzadaGonza2T(jogo, Math.min(tempoNum, 70));
+    if (te2 != null) {
+      addEvento(`tempestade_gonza_2t_${te2}_Limite`, te2,
+        `⛈️ Tempestade Cruzada Gonza, 2T — bateu no min ${te2} · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.limite}`,
+        'tempestade_gonza_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.limite);
+    }
+
+    const rg2 = checaRaioGol5min(jogo, 46, Math.min(tempoNum, 60));
+    if (rg2 != null) {
+      addEvento(`raio_gol_5min_2t_${rg2}_Limite`, rg2,
+        `⚡ Raio+Gol (5min), 2T — gol no min ${rg2} com raio próximo · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.limiteJanela4660}`,
+        'raio_gol_5min_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.limiteJanela4660);
+    }
+
+    const j6_2t = checaJanela6min180_2T(jogo, Math.min(tempoNum, 70));
+    if (j6_2t != null) {
+      addEvento(`janela6min180_2t_${j6_2t}_Limite`, j6_2t,
+        `📊 Janela 6min média≥180, 2T — bateu no min ${j6_2t} · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T}`,
+        'janela6min180_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T);
+    }
+  }
+
+  if (!estado.observadorEventos.length) return '<p class="ms-muted ms-small">Nenhum indicador bateu ainda nesse jogo.</p>';
+  const ordenados = [...estado.observadorEventos].sort((a, b) => a.minuto - b.minuto);
+  return ordenados.map(e => `<p class="obs-linha">${e.texto}</p>`).join('');
 }
 
 app.get('/observador', (req, res) => {
