@@ -799,7 +799,10 @@ function montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, overs) {
       linhas.push(`📈 Odd justa estratégia (${labelHT}, pré-live): ${(1/taxaEstHT).toFixed(2)}`);
     }
     if (taxaJogoHT != null) {
-      linhas.push(`📊 Odd justa do jogo (pré-live, ${labelHT}): ${pctParaOdd(taxaJogoHT).toFixed(2)} (${taxaJogoHT.toFixed(0)}%)`);
+      const oddJogoHT = pctParaOdd(taxaJogoHT);
+      if (oddJogoHT != null) {
+        linhas.push(`📊 Odd justa do jogo (pré-live, ${labelHT}): ${oddJogoHT.toFixed(2)} (${taxaJogoHT.toFixed(0)}%)`);
+      }
     }
     if (taxaEstHT != null && taxaJogoHT != null) {
       const media = (taxaEstHT + (taxaJogoHT/100)) / 2;
@@ -815,7 +818,10 @@ function montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, overs) {
     linhas.push(`📈 Odd justa estratégia (${labelFT} Limite, pré-live): ${(1/taxaEstFT).toFixed(2)}`);
   }
   if (taxaJogoFT != null) {
-    linhas.push(`📊 Odd justa do jogo (pré-live, ${labelFT} Limite): ${pctParaOdd(taxaJogoFT).toFixed(2)} (${taxaJogoFT.toFixed(0)}%)`);
+    const oddJogoFT = pctParaOdd(taxaJogoFT);
+    if (oddJogoFT != null) {
+      linhas.push(`📊 Odd justa do jogo (pré-live, ${labelFT} Limite): ${oddJogoFT.toFixed(2)} (${taxaJogoFT.toFixed(0)}%)`);
+    }
   }
   if (taxaEstFT != null && taxaJogoFT != null) {
     const media = (taxaEstFT + (taxaJogoFT/100)) / 2;
