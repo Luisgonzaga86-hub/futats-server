@@ -928,9 +928,13 @@ const REGRAS_ENTRADA = {
   },
 };
 
-// Estratégias de gol que agora só disparam a partir do 2º tempo
-// (min 45+) — decisão de 10/08, focando o sinal onde ele é mais forte.
-const GOLS_STRATS_SO_2T = ['felipe_over15', 'ambas_marcam', 'ambas_marcam_xg', 'over15_ia'];
+// 02/09 — REVERTIDO: essas 4 estratégias voltam a disparar a QUALQUER
+// momento do jogo (1T ou 2T), assim que o indicador bater — igual as
+// outras estratégias de gols (gol_no_final, over05_ht). Antes (decisão
+// de 10/08) ficavam travadas até o minuto 45 fixo; Luis decidiu reverter
+// em 02/09, então esse array fica vazio (mantido só por clareza histórica
+// — processarGolsMin45 continua existindo mas nunca mais executa nada).
+const GOLS_STRATS_SO_2T = [];
 
 const IA_PARA_STRAT = {
   'Gol no Final':           'gol_no_final',
