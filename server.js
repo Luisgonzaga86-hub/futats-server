@@ -2478,6 +2478,36 @@ function obsBlocoIndicadores(jogo, estado) {
   const tempoNum = parseInt(jogo.tempo) || 0;
   const passouHT = !!estado.passouHT;
   const jogoId = `${jogo.mandante}_${jogo.visitante}`;
+  const golsCasaAgora = parseInt(jogo.gols_casa) || 0;
+  const golsForaAgora = parseInt(jogo.gols_fora) || 0;
+
+  // 04/09 — monta a referência de "odd do jogo" (calculadora, JSON pré-
+  // live diário) pro próximo gol, dado o placar ATUAL: 0x0→Over 0,5,
+  // 1x0/0x1→Over 1,5, 2 gols→Over 2,5 etc. Até o min 20 mostra Over HT
+  // e Over Limite juntos; depois do min 20 (ou em qualquer indicador do
+  // 2T, tempoRef=999), só o Limite.
+  function linhaOddJogo(tempoRef) {
+    const bucket = getBucketDinamico(golsCasaAgora, golsForaAgora);
+    const labelFT = { '05':'Over 0,5', '15':'Over 1,5', '25':'Over 2,5', '35':'Over 3,5' }[bucket];
+    const mercadoFT = `over${bucket}`;
+    const taxaFT = estado.overs ? estado.overs[mercadoFT] : null;
+    const partes = [];
+
+    if (tempoRef <= 20) {
+      const mercadoHT = bucket === '05' ? 'over05HT' : 'over15HT';
+      const labelHT = bucket === '05' ? 'Over 0,5 HT' : 'Over 1,5 HT';
+      const taxaHT = estado.overs ? estado.overs[mercadoHT] : null;
+      if (taxaHT != null) {
+        const oddHT = pctParaOdd(taxaHT);
+        if (oddHT != null) partes.push(`${labelHT} ${oddHT.toFixed(2)} (${taxaHT.toFixed(0)}%)`);
+      }
+    }
+    if (taxaFT != null) {
+      const oddFT = pctParaOdd(taxaFT);
+      if (oddFT != null) partes.push(`${labelFT} Limite ${oddFT.toFixed(2)} (${taxaFT.toFixed(0)}%)`);
+    }
+    return partes.length ? ` · 🧮 odd do jogo: ${partes.join(' / ')}` : '';
+  }
 
   // 02/09 (v2) — lista única de eventos (indicadores + gols), cada um com
   // seu minuto, ordenada cronologicamente na hora de exibir. Persiste no
@@ -2510,35 +2540,35 @@ function obsBlocoIndicadores(jogo, estado) {
     if (pg) {
       const minuto = pg.minutoChute || tempoNum;
       addEvento(`pressao_gonza_${minuto}_HT/Limite`, minuto,
-        `🟣 Pressão Gonza — bateu (${pg.tipo}) · odd ref. HT≤20': ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite}`,
+        `🟣 Pressão Gonza — bateu (${pg.tipo})${linhaOddJogo(tempoNum)}`,
         'pressao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20);
     }
 
     const tr = checaTrocacaoGonza(jogo, tempoNum);
     if (tr != null) {
       addEvento(`trocacao_gonza_${tr}_HT/Limite`, tr,
-        `🥊 Trocação Gonza — bateu no min ${tr} · odd ref. HT: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.limite}`,
+        `🥊 Trocação Gonza — bateu no min ${tr}${linhaOddJogo(tr)}`,
         'trocacao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht);
     }
 
     const te = checaTempestadeCruzadaGonza(jogo, tempoNum);
     if (te != null) {
       addEvento(`tempestade_gonza_${te}_HT/Limite`, te,
-        `⛈️ Tempestade Cruzada Gonza — bateu no min ${te} · odd ref. HT: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht} · Limite: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.limite}`,
+        `⛈️ Tempestade Cruzada Gonza — bateu no min ${te}${linhaOddJogo(te)}`,
         'tempestade_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht);
     }
 
     const rg = checaRaioGol5min(jogo, 0, Math.min(tempoNum, 25));
     if (rg != null) {
       addEvento(`raio_gol_5min_${rg}_HT`, rg,
-        `⚡ Raio+Gol (5min) — gol no min ${rg} com raio próximo · odd ref. HT≤20': ${ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.htAte20}`,
+        `⚡ Raio+Gol (5min) — gol no min ${rg} com raio próximo${linhaOddJogo(rg)}`,
         'raio_gol_5min', 'HT', ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.htAte20);
     }
 
     const j6 = checaJanela6min180(jogo, Math.min(tempoNum, 45));
     if (j6 != null) {
       addEvento(`janela6min180_${j6}_Limite`, j6,
-        `📊 Janela 6min média≥180 — bateu no min ${j6} · odd ref. Limite (1T): ${ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T}`,
+        `📊 Janela 6min média≥180 — bateu no min ${j6}${linhaOddJogo(j6)}`,
         'janela6min180', 'Limite', ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T);
     }
   }
@@ -2549,35 +2579,35 @@ function obsBlocoIndicadores(jogo, estado) {
     if (pg2) {
       const minuto2 = pg2.minutoChute || tempoNum;
       addEvento(`pressao_gonza_2t_${minuto2}_HT/Limite`, minuto2,
-        `🟣 Pressão Gonza, 2T — bateu (${pg2.tipo}) no min ${minuto2} · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite}`,
+        `🟣 Pressão Gonza, 2T — bateu (${pg2.tipo}) no min ${minuto2}${linhaOddJogo(999)}`,
         'pressao_gonza_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite);
     }
 
     const tr2 = checaTrocacaoGonza2T(jogo, Math.min(tempoNum, 70));
     if (tr2 != null) {
       addEvento(`trocacao_gonza_2t_${tr2}_Limite`, tr2,
-        `🥊 Trocação Gonza, 2T — bateu no min ${tr2} · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.limite}`,
+        `🥊 Trocação Gonza, 2T — bateu no min ${tr2}${linhaOddJogo(999)}`,
         'trocacao_gonza_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.limite);
     }
 
     const te2 = checaTempestadeCruzadaGonza2T(jogo, Math.min(tempoNum, 70));
     if (te2 != null) {
       addEvento(`tempestade_gonza_2t_${te2}_Limite`, te2,
-        `⛈️ Tempestade Cruzada Gonza, 2T — bateu no min ${te2} · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.limite}`,
+        `⛈️ Tempestade Cruzada Gonza, 2T — bateu no min ${te2}${linhaOddJogo(999)}`,
         'tempestade_gonza_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.limite);
     }
 
     const rg2 = checaRaioGol5min(jogo, 46, Math.min(tempoNum, 60));
     if (rg2 != null) {
       addEvento(`raio_gol_5min_2t_${rg2}_Limite`, rg2,
-        `⚡ Raio+Gol (5min), 2T — gol no min ${rg2} com raio próximo · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.limiteJanela4660}`,
+        `⚡ Raio+Gol (5min), 2T — gol no min ${rg2} com raio próximo${linhaOddJogo(999)}`,
         'raio_gol_5min_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.raio_gol_5min.limiteJanela4660);
     }
 
     const j6_2t = checaJanela6min180_2T(jogo, Math.min(tempoNum, 70));
     if (j6_2t != null) {
       addEvento(`janela6min180_2t_${j6_2t}_Limite`, j6_2t,
-        `📊 Janela 6min média≥180, 2T — bateu no min ${j6_2t} · odd ref. Limite: ${ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T}`,
+        `📊 Janela 6min média≥180, 2T — bateu no min ${j6_2t}${linhaOddJogo(999)}`,
         'janela6min180_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T);
     }
   }
