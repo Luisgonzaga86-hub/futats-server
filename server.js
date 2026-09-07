@@ -101,6 +101,14 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   if (estado.msgConsolidada?.ids?.length && !estado.msgConsolidada.travado) {
     await rerenderizarConsolidado(jogo, estado);
   }
+
+  // 07/09 — se o alerta de Trocação/Tempestade (validação) já tinha sido
+  // enviado ANTES da confiabilidade carregar, a linha de "odd do jogo"
+  // ficava faltando pra sempre. Agora reedita a mensagem assim que os
+  // dados chegam, preenchendo a linha que faltava.
+  if (estado.novoIndicador?.jaAlertado && estado.validacaoMsgIds?.length) {
+    await reeditarValidacaoComOdds(jogo, estado);
+  }
 }
 
 // Todos os arquivos de dados ficam dentro de data/ — assim o Volume do
@@ -487,6 +495,123 @@ function pctParaOdd(pct0a100) {
   return Math.round((100 / pct0a100) * 100) / 100;
 }
 
+// ════════════════════════════════════════════════════════════════
+// 07/09 — "COMBO FORTE": quando Trocação/Tempestade bate JUNTO com uma
+// das nossas estratégias já validadas (própria ou Seleção IA) no mesmo
+// jogo. Duas listas diferentes (uma pro Caso A/HT, outra pro Caso B/Gol)
+// porque os mercados de referência são diferentes.
+// ════════════════════════════════════════════════════════════════
+const ESTRATEGIAS_COMBO_HT  = ['favorito_ht_gonza', 'back_gonza_xg', 'lay_away_manu', 'lay_manu4', 'over05_ht', 'over15_ia', 'lay_0x1_ia'];
+const ESTRATEGIAS_COMBO_GOL = ['over05_ht', 'over15_ia', 'lay_0x1_ia', 'favorito_ht_gonza', 'back_gonza_xg', 'lay_away_manu'];
+
+// Devolve as chaves de estratégia (própria ou IA) que já estão registradas
+// pré-live pra esse jogo hoje, restrito à lista informada.
+function checaComboEstrategia(jogo, hoje, listaEstrategias) {
+  const pendJogo = pendentes.filter(p =>
+    p.data === hoje && p.tipo === 'pre' &&
+    (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
+  );
+  return [...new Set(pendJogo.filter(p => listaEstrategias.includes(p.strat)).map(p => p.strat))];
+}
+
+// ════════════════════════════════════════════════════════════════
+// 07/09 — filtro de chutes só pra "hora cheia" (Caso B). Quando 3+
+// jogos batem o Caso B na mesma hora, só os que também têm pelo menos
+// 14 chutes totais e 3 no gol (até o min41) ganham a tag de destaque —
+// mas TODOS continuam sendo enviados normalmente, nada é suprimido.
+// Contador em memória, chave "YYYY-MM-DDTHH" (reseta sozinho por causa
+// da granularidade — nunca precisamos limpar, cresce devagar).
+// ════════════════════════════════════════════════════════════════
+const contadorCasoBPorHora = {};
+function registrarCasoBNaHora() {
+  const chave = agoraBRT().toISOString().slice(0, 13);
+  contadorCasoBPorHora[chave] = (contadorCasoBPorHora[chave] || 0) + 1;
+  return contadorCasoBPorHora[chave];
+}
+
+function contaChutesAteMin(jogo, ateMin) {
+  const eventos = jogo.eventos || [];
+  const totais = eventos.filter(e => e.periodo === '1_tempo' && TIPOS_CHUTE.includes(e.tipo_evento) && e.minuto <= ateMin).length;
+  const noGol = eventos.filter(e => e.periodo === '1_tempo' && e.tipo_evento === 'chute_no_gol' && e.minuto <= ateMin).length;
+  return { totais, noGol };
+}
+
+// Monta o texto completo do alerta de validação (Trocação/Tempestade),
+// usado tanto no disparo inicial quanto na reedição posterior (quando a
+// odd do jogo chega atrasada). Todos os dados vêm gravados em `ni`
+// (estado.novoIndicador) — nunca recalcula o combo/filtro de novo aqui,
+// só remonta o texto com o que já foi decidido no momento do disparo.
+function montarTextoValidacao(ni, jogo, estado, tempoDisplay, placarAtualDisplay) {
+  const links = linksExchanges(jogo.urls_exchanges || {});
+  const partes = [];
+
+  if (ni.comboTag) partes.push(ni.comboTag);
+  partes.push(`${ni.label} (VALIDAÇÃO)`);
+  partes.push(`⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>`);
+  partes.push(`⏱ ${ni.minutoBatido}' · 📊 ${ni.placarNoMomento}`);
+  partes.push('─────────────────');
+  if (ni.caso === 'B_janela_41_45') {
+    partes.push(`⏱ Placar segue igual até o ${ni.minutoConfirmacao}'`);
+  }
+  if (ni.estrategiasTexto) partes.push(ni.estrategiasTexto);
+  partes.push(`➜ ENTRAR: ${ni.mercadoTexto}`);
+  if (ni.linhaOddJogo) partes.push(ni.linhaOddJogo);
+  if (ni.linhaOddJogoHT) partes.push(ni.linhaOddJogoHT);
+  partes.push(`📊 Placar atual: ${placarAtualDisplay} · ${tempoDisplay}'`);
+
+  return partes.filter(Boolean).join('\n') + links;
+}
+
+// Recalcula as linhas de odd (que podem ter chegado atrasadas) e reedita
+// a mensagem de validação já enviada, preservando tudo mais (combo,
+// mercado, placar do momento do disparo).
+async function reeditarValidacaoComOdds(jogo, estado) {
+  const ni = estado.novoIndicador;
+  if (!ni || !estado.overs) return;
+  if (ni.oddJogoJaPreenchida) return; // já preencheu antes, não reedita de novo à toa
+
+  if (ni.caso === 'A_ate_min10') {
+    const mercadoHT = `over${ni.bucketNoMomento}HT`;
+    const oddJogoHT = estado.overs[mercadoHT];
+    if (oddJogoHT != null) {
+      const odd = pctParaOdd(oddJogoHT);
+      if (odd != null) {
+        ni.linhaOddJogo = `📊 Odd justa do jogo (pré-live, ${ni.mercadoTexto}): ${odd.toFixed(2)} (${oddJogoHT.toFixed(0)}%)`;
+        ni.oddJogoJaPreenchida = true;
+      }
+    }
+  } else if (ni.caso === 'B_janela_41_45') {
+    const mercadoFT = `over${ni.bucketNoMomento}`;
+    const oddJogoFT = estado.overs[mercadoFT];
+    if (oddJogoFT != null) {
+      const odd = pctParaOdd(oddJogoFT);
+      if (odd != null) {
+        ni.linhaOddJogo = `📊 Odd justa do jogo (pré-live, ${ni.mercadoTexto}): ${odd.toFixed(2)} (${oddJogoFT.toFixed(0)}%)`;
+        ni.oddJogoJaPreenchida = true;
+      }
+    }
+    // prévia do HT (tratando o placar do min41 como proxy do que o HT vai ser)
+    const mercadoHT = `over${ni.bucketNoMomento}HT`;
+    const oddJogoHT = estado.overs[mercadoHT];
+    if (oddJogoHT != null) {
+      const oddHT = pctParaOdd(oddJogoHT);
+      if (oddHT != null) {
+        const labelHT = { '05': 'Over 0,5 HT', '15': 'Over 1,5 HT' }[ni.bucketNoMomento] || 'Over HT';
+        ni.linhaOddJogoHT = `🧮 Prévia HT (placar do 41' como base) — ${labelHT}: ${oddHT.toFixed(2)} (${oddJogoHT.toFixed(0)}%)`;
+      }
+    }
+  }
+
+  if (!ni.oddJogoJaPreenchida && !ni.linhaOddJogoHT) return; // nada novo pra editar
+
+  const golsCasa = parseInt(jogo.gols_casa) || 0;
+  const golsFora = parseInt(jogo.gols_fora) || 0;
+  const placarAtual = `${golsCasa}x${golsFora}`;
+  const tempoNum = parseInt(jogo.tempo) || ni.minutoBatido;
+  const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
+  await editTelegram(estado.validacaoMsgIds, texto);
+}
+
 // Lógica de disparo pros dois novos indicadores. Roda 1x por ciclo por
 // jogo, só enquanto ainda está no 1T. Regra:
 //   - Padrão bate ATÉ o min 10 → dispara na hora, sugere Over HT
@@ -531,34 +656,47 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
   const placarAtual = `${golsCasa}x${golsFora}`;
-  const links = linksExchanges(jogo.urls_exchanges || {});
 
-  const mercadoLabel = {
-    '05': 'Over 0,5 HT',
-    '15': 'Over 1,5 HT',
-    '25': 'Over 2,5 HT',
-    '35': 'Over 3,5 HT',
-  }[ni.bucketNoMomento] || 'Over HT';
-
-  const oddJogoHT = estado.overs ? estado.overs[`over${ni.bucketNoMomento}HT`] : null;
-  const linhaOddJogo = oddJogoHT != null
-    ? `📊 Odd justa do jogo (pré-live, ${mercadoLabel}): ${pctParaOdd(oddJogoHT)?.toFixed(2) || '-'} (${oddJogoHT.toFixed(0)}%)`
-    : '';
-
-  // CASO A: bateu até o min 10 → dispara na hora
+  // CASO A: bateu até o min 10 → dispara na hora. Mercado Over HT.
+  // NUNCA é ocultado, atrasado ou filtrado por volume — sempre dispara
+  // e sempre é enviado, com ou sem combo.
   if (ni.minutoBatido <= 10) {
     ni.jaAlertado = true;
+    ni.caso = 'A_ate_min10';
+
+    const mercadoLabel = {
+      '05': 'Over 0,5 HT', '15': 'Over 1,5 HT', '25': 'Over 2,5 HT', '35': 'Over 3,5 HT',
+    }[ni.bucketNoMomento] || 'Over HT';
+    ni.mercadoTexto = mercadoLabel;
+
+    const oddJogoHT = estado.overs ? estado.overs[`over${ni.bucketNoMomento}HT`] : null;
+    if (oddJogoHT != null) {
+      const odd = pctParaOdd(oddJogoHT);
+      if (odd != null) {
+        ni.linhaOddJogo = `📊 Odd justa do jogo (pré-live, ${mercadoLabel}): ${odd.toFixed(2)} (${oddJogoHT.toFixed(0)}%)`;
+        ni.oddJogoJaPreenchida = true;
+      }
+    }
+
+    // COMBO FORTE — Trocação/Tempestade + estratégia nossa boa de HT
+    const comboHT = checaComboEstrategia(jogo, hoje, ESTRATEGIAS_COMBO_HT);
+    if (comboHT.length) {
+      ni.comboTag = '⭐🥇 COMBO FORTE ⭐';
+      ni.estrategiasTexto = comboHT.map(k => STRAT_DISPLAY[k] || k).join(' · ');
+    }
+
     const registro = {
       jogoId, jogo: `${jogo.mandante} x ${jogo.visitante}`, data: hoje,
       tipo: ni.tipo, minutoBatido: ni.minutoBatido, placarNoMomento: ni.placarNoMomento,
       bucket: ni.bucketNoMomento, mercado: mercadoLabel, caso: 'A_ate_min10',
+      comboEstrategias: comboHT.length ? comboHT : null,
       status: 'pendente',
     };
     validacaoNovosIndicadores.push(registro);
     salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
     estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
 
-    const texto = `${ni.label} (VALIDAÇÃO)\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${ni.minutoBatido}' · 📊 ${ni.placarNoMomento}\n─────────────────\n➜ ENTRAR: ${mercadoLabel}\n${linhaOddJogo}\n📊 Placar atual: ${placarAtual} · ${tempoNum}'${links}`;
+    const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
     const ids = await sendTelegramPessoal(texto);
     estado.validacaoMsgIds = ids;
     return;
@@ -569,32 +707,81 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
   // mercado é "Over Limite" (JOGO TODO), não Over HT — faz pouco sentido
   // entrar em Over HT quando só sobram 1-4 minutos de 1T. A confirmação
   // green/red desse caso acontece no FIM DO JOGO (FT), não no HT.
+  // 07/09 — TAMBÉM NUNCA É OCULTADO: em hora cheia (3+ Caso B na mesma
+  // hora), só ganha uma tag extra se passar no filtro de chutes — mas
+  // sempre dispara e sempre é enviado, igual a qualquer outro caso.
   if (tempoNum >= 41 && tempoNum <= 45) {
     if (placarAtual !== ni.placarNoMomento) {
       ni.jaAlertado = true; // já resolveu sozinho, não alerta
       return;
     }
     ni.jaAlertado = true;
+    ni.caso = 'B_janela_41_45';
+    ni.minutoConfirmacao = tempoNum;
 
     const mercadoLabelFT = {
       '05': 'Over 0,5', '15': 'Over 1,5', '25': 'Over 2,5', '35': 'Over 3,5',
     }[ni.bucketNoMomento] || 'Over';
+    ni.mercadoTexto = `${mercadoLabelFT} Limite (jogo todo)`;
+
     const oddJogoFT = estado.overs ? estado.overs[`over${ni.bucketNoMomento}`] : null;
-    const linhaOddJogoFT = oddJogoFT != null
-      ? `📊 Odd justa do jogo (pré-live, ${mercadoLabelFT} Limite): ${pctParaOdd(oddJogoFT)?.toFixed(2) || '-'} (${oddJogoFT.toFixed(0)}%)`
-      : '';
+    if (oddJogoFT != null) {
+      const odd = pctParaOdd(oddJogoFT);
+      if (odd != null) {
+        ni.linhaOddJogo = `📊 Odd justa do jogo (pré-live, ${ni.mercadoTexto}): ${odd.toFixed(2)} (${oddJogoFT.toFixed(0)}%)`;
+        ni.oddJogoJaPreenchida = true;
+      }
+    }
+    // prévia do HT — usa o placar do min41 como proxy do que o HT vai ser
+    const oddJogoHT = estado.overs ? estado.overs[`over${ni.bucketNoMomento}HT`] : null;
+    if (oddJogoHT != null) {
+      const oddHT = pctParaOdd(oddJogoHT);
+      if (oddHT != null) {
+        const labelHT = { '05': 'Over 0,5 HT', '15': 'Over 1,5 HT' }[ni.bucketNoMomento] || 'Over HT';
+        ni.linhaOddJogoHT = `🧮 Prévia HT (placar do 41' como base) — ${labelHT}: ${oddHT.toFixed(2)} (${oddJogoHT.toFixed(0)}%)`;
+      }
+    }
+
+    // COMBO FORTE — estratégia nossa boa de gol
+    const comboGol = checaComboEstrategia(jogo, hoje, ESTRATEGIAS_COMBO_GOL);
+    let filtroChutesInfo = null;
+    if (comboGol.length) {
+      ni.comboTag = '⭐🥇 COMBO FORTE ⭐';
+      ni.estrategiasTexto = comboGol.map(k => STRAT_DISPLAY[k] || k).join(' · ');
+    } else {
+      // Sem estratégia nossa — só aplica o filtro de chutes SE a hora
+      // estiver cheia (3+ Caso B na mesma hora). Nunca suprime o envio,
+      // só decide se ganha a tag de destaque.
+      const contagemHora = registrarCasoBNaHora();
+      if (contagemHora >= 3) {
+        const { totais, noGol } = contaChutesAteMin(jogo, 41);
+        filtroChutesInfo = { totais, noGol, passou: totais >= 14 && noGol >= 3 };
+        if (filtroChutesInfo.passou) {
+          ni.comboTag = `⚡🥊 Combo (filtro de chutes, ${totais} chutes / ${noGol} no gol) ⚡`;
+        } else {
+          // hora cheia + não passou no filtro → sem destaque. Só afeta a
+          // prioridade visual no /observador (esmaece), NUNCA deixa de
+          // ser enviado no Telegram (isso já acontece de qualquer forma,
+          // já que chegamos até aqui e vamos disparar normalmente abaixo).
+          ni.semDestaqueHoraCheia = true;
+          ni.filtroChutesTexto = `Não passou no filtro de chutes dessa hora cheia (${totais} totais / ${noGol} no gol)`;
+        }
+      }
+    }
 
     const registro = {
       jogoId, jogo: `${jogo.mandante} x ${jogo.visitante}`, data: hoje,
       tipo: ni.tipo, minutoBatido: ni.minutoBatido, placarNoMomento: ni.placarNoMomento,
-      bucket: ni.bucketNoMomento, mercado: `${mercadoLabelFT} Limite (jogo todo)`, caso: 'B_janela_41_45',
+      bucket: ni.bucketNoMomento, mercado: ni.mercadoTexto, caso: 'B_janela_41_45',
+      comboEstrategias: comboGol.length ? comboGol : null,
+      filtroChutes: filtroChutesInfo,
       status: 'pendente',
     };
     validacaoNovosIndicadores.push(registro);
     salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
     estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
 
-    const texto = `${ni.label} (VALIDAÇÃO)\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${ni.minutoBatido}' · 📊 ${ni.placarNoMomento}\n─────────────────\n⏱ Placar segue igual até o ${tempoNum}'\n➜ ENTRAR: ${mercadoLabelFT} Limite (jogo todo)\n${linhaOddJogoFT}\n📊 Placar atual: ${placarAtual} · ${tempoNum}'${links}`;
+    const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
     const ids = await sendTelegramPessoal(texto);
     estado.validacaoMsgIds = ids;
     return;
@@ -2617,20 +2804,54 @@ function obsBlocoIndicadores(jogo, estado) {
   return ordenados.map(e => `<p class="obs-linha">${e.texto}</p>`).join('');
 }
 
+// 07/09 — badges de estratégia própria e Seleção IA pra mostrar no
+// Observador, separado visualmente (🔵 própria vs 🤖 Seleção IA usam
+// emojis diferentes dentro do próprio STRAT_DISPLAY, então só precisa
+// listar os nomes já formatados).
+function getEstrategiasBadgeHTML(jogo, hoje) {
+  const pendJogo = pendentes.filter(p =>
+    p.data === hoje && p.tipo === 'pre' &&
+    (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
+  );
+  const strats = [...new Set(pendJogo.map(p => p.strat))];
+  if (!strats.length) return '';
+  const nomes = strats.map(k => STRAT_DISPLAY[k] || k).join(' · ');
+  return `<p class="obs-linha" style="opacity:0.85;font-size:12px;">${nomes}</p>`;
+}
+
 app.get('/observador', (req, res) => {
   const jogosAtivos = Object.entries(estadoLive).filter(([, e]) => !e.encerrado && e.jogo);
   if (!jogosAtivos.length) {
     return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo ao vivo no momento.</p>'));
   }
 
+  const hoje = dataHoje();
   const corpo = jogosAtivos.map(([jogoId, estado]) => {
     const jogo = estado.jogo;
     const tempoTxt = jogo.tempo === 'Intervalo' ? 'Intervalo' : jogo.tempo === 'Encerrado' ? 'Encerrado' : `${jogo.tempo}'`;
-    return `<div class="ms-jogo">
+    const ni = estado.novoIndicador;
+
+    // Estilo do card: combo forte = borda dourada; hora cheia sem
+    // destaque = esmaecido (opacity menor); normal = padrão de sempre.
+    // NUNCA esconde nada, só muda a prioridade visual.
+    let estiloExtra = '';
+    let tagHTML = '';
+    if (ni?.comboTag) {
+      estiloExtra = 'border:1.5px solid #f0b429;';
+      tagHTML = `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">${ni.comboTag}</p>`;
+    } else if (ni?.semDestaqueHoraCheia) {
+      estiloExtra = 'opacity:0.6;';
+    }
+
+    const badgeEstrategias = getEstrategiasBadgeHTML(jogo, hoje);
+
+    return `<div class="ms-jogo" style="${estiloExtra}">
       <div class="ms-jogo-header">
         <p class="ms-jogo-nome">${jogo.mandante} x ${jogo.visitante}</p>
         <p class="ms-muted ms-small">${tempoTxt} &middot; placar ${jogo.gols_casa}x${jogo.gols_fora}</p>
       </div>
+      ${tagHTML}
+      ${badgeEstrategias}
       ${obsBlocoIndicadores(jogo, estado)}
     </div>`;
   }).join('');
