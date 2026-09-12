@@ -3137,6 +3137,8 @@ app.get('/momentum-status', async (req, res) => {
 // ── Exportar histórico bruto de momentum (JSON completo) ──────────
 // Rota temporária pra baixar o arquivo direto do Volume e analisar fora.
 // Uso: /interno/exportar-momentum?token=SEU_INTERNAL_TOKEN
+// 12/09 — aceita ?desde=YYYY-MM-DD (opcional) pra devolver só os jogos
+// a partir dessa data, evitando baixar o arquivo inteiro toda vez.
 app.get('/interno/exportar-momentum', (req, res) => {
   if (!INTERNAL_TOKEN || req.query.token !== INTERNAL_TOKEN) {
     return res.status(403).send('Token inválido.');
@@ -3144,7 +3146,26 @@ app.get('/interno/exportar-momentum', (req, res) => {
   if (!fs.existsSync(MOMENTUM_HISTORICO_FILE)) {
     return res.status(404).send('Arquivo momentum_historico.json não encontrado.');
   }
-  res.download(MOMENTUM_HISTORICO_FILE, 'momentum_historico.json');
+
+  const desde = (req.query.desde || '').trim(); // "2026-09-05"
+  if (!desde) {
+    return res.download(MOMENTUM_HISTORICO_FILE, 'momentum_historico.json');
+  }
+
+  // Filtra em memória — momentumHistorico já está carregado no processo,
+  // não precisa reler o arquivo do disco.
+  const filtrado = {};
+  for (const [confronto, lista] of Object.entries(momentumHistorico)) {
+    const mantidos = lista.filter(reg => {
+      const dataJogo = (reg.jogo?.data || '').slice(0, 10);
+      return dataJogo >= desde;
+    });
+    if (mantidos.length) filtrado[confronto] = mantidos;
+  }
+
+  res.setHeader('Content-Disposition', `attachment; filename="momentum_desde_${desde}.json"`);
+  res.setHeader('Content-Type', 'application/json');
+  res.send(JSON.stringify(filtrado));
 });
 
 // ── Histórico do momentum — jogos já encerrados e arquivados ──────
