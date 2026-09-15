@@ -150,7 +150,14 @@ async function main() {
   }
 }
 
-main().catch(err => {
-  console.error('Erro fatal:', err);
-  process.exit(1);
-});
+// So executa automaticamente quando rodado direto (node baixar_historico.js).
+// Quando importado como modulo (require) por outro arquivo como o server.js,
+// nao dispara sozinho — quem importa decide quando chamar main().
+if (require.main === module) {
+  main().catch(err => {
+    console.error('Erro fatal:', err);
+    process.exit(1);
+  });
+}
+
+module.exports = { main, dentroDaJanela, horaAtualBRT };
