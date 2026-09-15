@@ -3325,3 +3325,19 @@ app.listen(PORT, async () => {
 
   await enviarCardMatinal();
 });
+// ===== INTEGRAÇÃO: download automático do histórico FUTATS =====
+// Adicionar isso no FINAL do server.js (depois de app.listen(...)).
+// Checa a cada 15 minutos se está na janela de horário (01h-04h BRT);
+// se estiver e ainda tiver dias pra baixar, dispara o download.
+// A própria baixar_historico.js já controla tudo (janela, delay, retomada) —
+// aqui só precisamos chamar ela periodicamente.
+
+const { main: baixarHistoricoFutats } = require('./baixar_historico.js');
+
+setInterval(() => {
+  baixarHistoricoFutats().catch(err => {
+    console.error('[baixar_historico] erro:', err.message);
+  });
+}, 15 * 60 * 1000); // a cada 15 minutos
+
+console.log('[baixar_historico] agendador ativo — roda automaticamente entre 01h-04h BRT');
