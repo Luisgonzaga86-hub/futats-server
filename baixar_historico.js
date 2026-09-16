@@ -15,11 +15,9 @@ const fs = require('fs');
 const path = require('path');
 
 const API_BASE = 'https://gz.futats.com/opta/api-games-live-day';
-// Nota: no teste via Insomnia essa rota funcionou sem precisar de token —
-// diferente das outras rotas do FUTATS que usam header x-token. Deixando
-// como variavel opcional, caso precise no futuro (ex: se o dono adicionar
-// autenticacao depois).
-const FUTATS_TOKEN = process.env.FUTATS_TOKEN || null;
+// Confirmado via Insomnia: a API exige o header x-token (o Insomnia so
+// funcionou porque ja tinha esse header salvo de uma sessao anterior).
+const FUTATS_TOKEN = process.env.FUTATS_TOKEN || 'w8e6q2xa';
 const DELAY_MS = 30 * 1000; // 30 segundos entre chamadas, conforme pedido
 const DATA_INICIO = '2026-01-01';
 const PASTA_SAIDA = process.env.FUTATS_HIST_DIR || '/data/futats-historico'; // ajustar pro Volume do Railway
