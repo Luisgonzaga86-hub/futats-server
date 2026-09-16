@@ -62,7 +62,13 @@ function salvarProgresso(progresso) {
 
 async function baixarDia(dataStr) {
   const url = `${API_BASE}?data=${dataStr}`;
-  const opcoes = FUTATS_TOKEN ? { headers: { 'x-token': FUTATS_TOKEN } } : {};
+  const opcoes = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'application/json',
+      ...(FUTATS_TOKEN ? { 'x-token': FUTATS_TOKEN } : {})
+    }
+  };
   const resp = await fetch(url, opcoes);
   if (!resp.ok) {
     throw new Error(`HTTP ${resp.status} para ${dataStr}`);
