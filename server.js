@@ -3168,6 +3168,92 @@ app.get('/interno/exportar-momentum', (req, res) => {
   res.send(JSON.stringify(filtrado));
 });
 
+// ── Exportar histórico da API do FUTATS (baixado por baixar_historico.js) ──
+// Consolida os arquivos diarios salvos em FUTATS_HIST_DIR num unico JSON.
+// Uso:
+//   Tudo: /interno/exportar-historico-futats?token=SEU_INTERNAL_TOKEN
+//   Intervalo: .../interno/exportar-historico-futats?token=SEU_INTERNAL_TOKEN&desde=2026-01-01&ate=2026-03-31
+app.get('/interno/exportar-historico-futats', (req, res) => {
+  if (!INTERNAL_TOKEN || req.query.token !== INTERNAL_TOKEN) {
+    return res.status(403).send('Token inválido.');
+  }
+
+  const pastaHistorico = process.env.FUTATS_HIST_DIR || '/app/data/futats-historico';
+  if (!fs.existsSync(pastaHistorico)) {
+    return res.status(404).send('Pasta de histórico não encontrada — o download ainda não rodou.');
+  }
+
+  const desde = (req.query.desde || '').trim();
+  const ate = (req.query.ate || '').trim();
+
+  const arquivos = fs.readdirSync(pastaHistorico)
+    .filter(f => /^\d{4}-\d{2}-\d{2}\.json$/.test(f))
+    .filter(f => {
+      const dataStr = f.replace('.json', '');
+      if (desde && dataStr < desde) return false;
+      if (ate && dataStr > ate) return false;
+      return true;
+    })
+    .sort();
+
+  if (arquivos.length === 0) {
+    return res.status(404).send('Nenhum arquivo encontrado nesse intervalo.');
+  }
+
+  const todosOsJogos = [];
+  for (const nomeArquivo of arquivos) {
+    try {
+      const conteudo = JSON.parse(fs.readFileSync(path.join(pastaHistorico, nomeArquivo), 'utf8'));
+      const jogosDoDia = conteudo?.[0]?.eventos || conteudo;
+      if (Array.isArray(jogosDoDia)) {
+        todosOsJogos.push(...jogosDoDia);
+      }
+    } catch (err) {
+      console.error(`Erro lendo ${nomeArquivo}: ${err.message}`);
+    }
+  }
+
+  const nomeDownload = desde || ate
+    ? `historico_futats_${desde || 'inicio'}_a_${ate || 'fim'}.json`
+    : 'historico_futats_completo.json';
+
+  res.setHeader('Content-Disposition', `attachment; filename="${nomeDownload}"`);
+  res.setHeader('Content-Type', 'application/json');
+  res.send(JSON.stringify(todosOsJogos));
+});
+
+// ── Verificar quantos dias/jogos ja foram baixados (rapido, sem baixar tudo) ──
+app.get('/interno/status-historico-futats', (req, res) => {
+  if (!INTERNAL_TOKEN || req.query.token !== INTERNAL_TOKEN) {
+    return res.status(403).send('Token inválido.');
+  }
+
+  const pastaHistorico = process.env.FUTATS_HIST_DIR || '/app/data/futats-historico';
+  if (!fs.existsSync(pastaHistorico)) {
+    return res.status(404).json({ erro: 'Pasta de histórico não encontrada.' });
+  }
+
+  const arquivos = fs.readdirSync(pastaHistorico)
+    .filter(f => /^\d{4}-\d{2}-\d{2}\.json$/.test(f))
+    .sort();
+
+  let totalJogos = 0;
+  for (const nomeArquivo of arquivos) {
+    try {
+      const conteudo = JSON.parse(fs.readFileSync(path.join(pastaHistorico, nomeArquivo), 'utf8'));
+      const jogosDoDia = conteudo?.[0]?.eventos || conteudo;
+      if (Array.isArray(jogosDoDia)) totalJogos += jogosDoDia.length;
+    } catch (err) {}
+  }
+
+  res.json({
+    total_dias: arquivos.length,
+    total_jogos: totalJogos,
+    primeiro_dia: arquivos[0]?.replace('.json',''),
+    ultimo_dia: arquivos[arquivos.length-1]?.replace('.json',''),
+  });
+});
+
 // ── Histórico do momentum — jogos já encerrados e arquivados ──────
 // Lista todos os jogos arquivados (com filtro opcional por data/time),
 // cada um linkando pra reabrir o gráfico completo dele.
