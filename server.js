@@ -2587,6 +2587,67 @@ function checaRaioGol5min(jogo, minIni, minFim) {
   return null;
 }
 
+// ════════════════════════════════════════════════════════════════
+// ── 18/09 — TRÊS NOVOS INDICADORES (nomeados por Luis) ───────────
+// ── 🌧️🚩 Chuva de Cantos, ⚡⚡⚡ Tá Relampegando, ⚡🔺 Relâmpago    ──
+// ── Triangular. Descobertos por análise exploratória na base de  ──
+// ── 23 mil jogos — mesmo padrão de assinatura (minIni/minFim) das──
+// ── funções de indicador já existentes, pra encaixar igual no    ──
+// ── fluxo de 1T/2T (corte min70) já usado pelos outros.          ──
+// ════════════════════════════════════════════════════════════════
+
+// 🌧️🚩 Chuva de Cantos — 3+ escanteios do MESMO lado numa janela
+// deslizante de 10 minutos (não é bloco fixo — qualquer intervalo de
+// 10min dentro do range pedido conta).
+function checaChuvaDeCantos(jogo, minIni, minFim) {
+  const eventos = jogo.eventos || [];
+  const porMin = { casa: {}, fora: {} };
+  for (const e of eventos) {
+    if (e.tipo_evento !== 'escanteio') continue;
+    if (e.minuto < minIni || e.minuto > minFim) continue;
+    porMin[e.lado][e.minuto] = (porMin[e.lado][e.minuto] || 0) + 1;
+  }
+  let melhor = null;
+  for (const lado of ['casa', 'fora']) {
+    for (let fim = minIni; fim <= minFim; fim++) {
+      let cnt = 0;
+      for (let mi = Math.max(minIni, fim - 9); mi <= fim; mi++) cnt += porMin[lado][mi] || 0;
+      if (cnt >= 3) { if (melhor == null || fim < melhor) melhor = fim; break; }
+    }
+  }
+  return melhor;
+}
+
+// ⚡⚡⚡ Tá Relampegando — evento "raio" seguido ou precedido, no MESMO
+// lado, por um chute NO GOL a até 3 minutos de distância.
+function checaTaRelampegando(jogo, minIni, minFim) {
+  const eventos = jogo.eventos || [];
+  const raios = eventos.filter(e => e.tipo_evento === 'raio' && e.minuto >= minIni && e.minuto <= minFim);
+  if (!raios.length) return null;
+  const chutes = eventos.filter(e => e.tipo_evento === 'chute_no_gol' && e.minuto >= minIni - 3 && e.minuto <= minFim + 3);
+  let melhor = null;
+  for (const r of raios) {
+    const bate = chutes.some(c => c.lado === r.lado && Math.abs(c.minuto - r.minuto) <= 3);
+    if (bate && (melhor == null || r.minuto < melhor)) melhor = r.minuto;
+  }
+  return melhor;
+}
+
+// ⚡🔺 Relâmpago Triangular — igual ao anterior, mas o segundo evento é
+// um ESCANTEIO (em vez de chute no gol), mesmo lado, até 3min.
+function checaRelampagoTriangular(jogo, minIni, minFim) {
+  const eventos = jogo.eventos || [];
+  const raios = eventos.filter(e => e.tipo_evento === 'raio' && e.minuto >= minIni && e.minuto <= minFim);
+  if (!raios.length) return null;
+  const escanteios = eventos.filter(e => e.tipo_evento === 'escanteio' && e.minuto >= minIni - 3 && e.minuto <= minFim + 3);
+  let melhor = null;
+  for (const r of raios) {
+    const bate = escanteios.some(c => c.lado === r.lado && Math.abs(c.minuto - r.minuto) <= 3);
+    if (bate && (melhor == null || r.minuto < melhor)) melhor = r.minuto;
+  }
+  return melhor;
+}
+
 function checaJanela6min180(jogo, ateMin) {
   const momentum = jogo.momentum || [];
   const mByMin = {};
@@ -2635,6 +2696,11 @@ const ODDS_REFERENCIA_OBSERVADOR = {
   tempestade_gonza:    { ht: 1.41, limite: 1.11 },
   raio_gol_5min:       { htAte20: 1.59, limiteJanela4660: 1.28 },
   janela6min180:        { limite1T: 1.11 },
+  // 18/09 — validados na base de 23 mil jogos, cruzados com estratégia
+  // (ver futats_novos_indicadores_17set.md pro detalhe completo)
+  chuva_de_cantos:     { htAte20: 1.55, limite: 1.05 },
+  ta_relampegando:     { htAte15: 1.40, limite: 1.07 },
+  relampago_triangular:{ htAte15: 1.41, limite: 1.11 },
 };
 
 // Registra 1x cada ocorrência nova de indicador no log persistente
@@ -2659,6 +2725,51 @@ function registrarObservacao(jogoId, jogo, indicadorKey, minuto, mercado, oddRef
     placarNoMomento: `${parseInt(jogo.gols_casa)||0}x${parseInt(jogo.gols_fora)||0}`,
   });
   salvarArquivo(OBSERVADOR_FILE, observadorLog);
+}
+
+// 18/09 — calculadora completa (6 mercados), pros jogos que têm
+// estratégia/Seleção IA confirmada. `estado.overs` já vem com essas 6
+// chaves prontas do JSON pré-live diário (ver linha `estado.overs =`).
+function calculadoraCompleta(estado) {
+  if (!estado.overs) return null;
+  const o = estado.overs;
+  const item = (label, pct) => {
+    if (pct == null) return null;
+    const odd = pctParaOdd(pct);
+    return odd != null ? `${label} <b>${odd.toFixed(2)}</b>` : null;
+  };
+  const partes = [
+    item('Over HT', o.overHT),
+    item('Over 1,5 HT', o.over15HT),
+    item('Over 0,5', o.over05),
+    item('Over 1,5', o.over15),
+    item('Over 2,5', o.over25),
+    item('Over 3,5', o.over35),
+  ].filter(Boolean);
+  return partes.length ? `🧮 ${partes.join(' &middot; ')}` : null;
+}
+
+// 18/09 — pros jogos SEM estratégia/Seleção IA, só a média do próximo
+// gol (bucket dinâmico pelo placar atual), sem a calculadora inteira.
+function mediaProximoGolHTML(jogo, estado) {
+  if (!estado.overs) return null;
+  const golsCasa = parseInt(jogo.gols_casa) || 0;
+  const golsFora = parseInt(jogo.gols_fora) || 0;
+  const bucket = getBucketDinamico(golsCasa, golsFora);
+  const label = { '05': 'Over 0,5', '15': 'Over 1,5', '25': 'Over 2,5', '35': 'Over 3,5' }[bucket];
+  const taxa = estado.overs[`over${bucket}`];
+  if (taxa == null) return null;
+  const odd = pctParaOdd(taxa);
+  return odd != null ? `🧮 Média próximo gol: <b>${odd.toFixed(2)}</b> (${label})` : null;
+}
+
+// 18/09 — nome do time com a odd pré-jogo ao lado, mandante e visitante.
+function nomesComOdd(jogo) {
+  const oc  = parseFloat(jogo.odd_inicial_casa || jogo.odd_casa);
+  const of_ = parseFloat(jogo.odd_inicial_fora || jogo.odd_fora);
+  const ocTxt = isFinite(oc) ? ` (${oc.toFixed(2)})` : '';
+  const ofTxt = isFinite(of_) ? ` (${of_.toFixed(2)})` : '';
+  return `${jogo.mandante}${ocTxt} x ${jogo.visitante}${ofTxt}`;
 }
 
 function obsBlocoIndicadores(jogo, estado) {
@@ -2726,9 +2837,32 @@ function obsBlocoIndicadores(jogo, estado) {
     const pg = checaPressaoGonza(jogo, estado, 'casa', tempoNum) || checaPressaoGonza(jogo, estado, 'fora', tempoNum);
     if (pg) {
       const minuto = pg.minutoChute || tempoNum;
+      const janelaTxt = `${Math.max(1, tempoNum - 4)}-${tempoNum}'`;
+      const emoji = pg.tipo === 'gonza2' ? '🔵 Gonza 2' : '🟣 Pressão Gonza';
       addEvento(`pressao_gonza_${minuto}_HT/Limite`, minuto,
-        `🟣 Pressão Gonza — bateu (${pg.tipo})${linhaOddJogo(tempoNum)}`,
+        `${emoji} — bateu (janela ${janelaTxt})${linhaOddJogo(tempoNum)}`,
         'pressao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20);
+    }
+
+    const cc = checaChuvaDeCantos(jogo, 1, tempoNum);
+    if (cc != null) {
+      addEvento(`chuva_de_cantos_${cc}_HT/Limite`, cc,
+        `🌧️🚩 Chuva de Cantos — bateu ${cc}'${linhaOddJogo(cc)}`,
+        'chuva_de_cantos', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.chuva_de_cantos.htAte20);
+    }
+
+    const trel = checaTaRelampegando(jogo, 1, tempoNum);
+    if (trel != null) {
+      addEvento(`ta_relampegando_${trel}_HT/Limite`, trel,
+        `⚡⚡⚡ Tá Relampegando — bateu ${trel}'${linhaOddJogo(trel)}`,
+        'ta_relampegando', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.ta_relampegando.htAte15);
+    }
+
+    const rtri = checaRelampagoTriangular(jogo, 1, tempoNum);
+    if (rtri != null) {
+      addEvento(`relampago_triangular_${rtri}_HT/Limite`, rtri,
+        `⚡🔺 Relâmpago Triangular — bateu ${rtri}'${linhaOddJogo(rtri)}`,
+        'relampago_triangular', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.relampago_triangular.htAte15);
     }
 
     const tr = checaTrocacaoGonza(jogo, tempoNum);
@@ -2765,9 +2899,32 @@ function obsBlocoIndicadores(jogo, estado) {
     const pg2 = checaPressaoGonza(jogo, estado, 'casa', tempoNum) || checaPressaoGonza(jogo, estado, 'fora', tempoNum);
     if (pg2) {
       const minuto2 = pg2.minutoChute || tempoNum;
+      const janelaTxt2 = `${Math.max(46, tempoNum - 4)}-${tempoNum}'`;
+      const emoji2 = pg2.tipo === 'gonza2' ? '🔵 Gonza 2, 2T' : '🟣 Pressão Gonza, 2T';
       addEvento(`pressao_gonza_2t_${minuto2}_HT/Limite`, minuto2,
-        `🟣 Pressão Gonza, 2T — bateu (${pg2.tipo}) no min ${minuto2}${linhaOddJogo(999)}`,
+        `${emoji2} — bateu (janela ${janelaTxt2})${linhaOddJogo(999)}`,
         'pressao_gonza_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.limite);
+    }
+
+    const cc2 = checaChuvaDeCantos(jogo, 46, Math.min(tempoNum, 70));
+    if (cc2 != null) {
+      addEvento(`chuva_de_cantos_2t_${cc2}_Limite`, cc2,
+        `🌧️🚩 Chuva de Cantos, 2T — bateu ${cc2}'${linhaOddJogo(999)}`,
+        'chuva_de_cantos_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.chuva_de_cantos.limite);
+    }
+
+    const trel2 = checaTaRelampegando(jogo, 46, Math.min(tempoNum, 70));
+    if (trel2 != null) {
+      addEvento(`ta_relampegando_2t_${trel2}_Limite`, trel2,
+        `⚡⚡⚡ Tá Relampegando, 2T — bateu ${trel2}'${linhaOddJogo(999)}`,
+        'ta_relampegando_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.ta_relampegando.limite);
+    }
+
+    const rtri2 = checaRelampagoTriangular(jogo, 46, Math.min(tempoNum, 70));
+    if (rtri2 != null) {
+      addEvento(`relampago_triangular_2t_${rtri2}_Limite`, rtri2,
+        `⚡🔺 Relâmpago Triangular, 2T — bateu ${rtri2}'${linhaOddJogo(999)}`,
+        'relampago_triangular_2t', 'Limite', ODDS_REFERENCIA_OBSERVADOR.relampago_triangular.limite);
     }
 
     const tr2 = checaTrocacaoGonza2T(jogo, Math.min(tempoNum, 70));
@@ -2808,17 +2965,30 @@ function obsBlocoIndicadores(jogo, estado) {
 // Observador, separado visualmente (🔵 própria vs 🤖 Seleção IA usam
 // emojis diferentes dentro do próprio STRAT_DISPLAY, então só precisa
 // listar os nomes já formatados).
-function getEstrategiasBadgeHTML(jogo, hoje) {
+function getEstrategiasKeys(jogo, hoje) {
   const pendJogo = pendentes.filter(p =>
     p.data === hoje && p.tipo === 'pre' &&
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
-  const strats = [...new Set(pendJogo.map(p => p.strat))];
+  return [...new Set(pendJogo.map(p => p.strat))];
+}
+
+function getEstrategiasBadgeHTML(strats) {
   if (!strats.length) return '';
   const nomes = strats.map(k => STRAT_DISPLAY[k] || k).join(' · ');
   return `<p class="obs-linha" style="opacity:0.85;font-size:12px;">${nomes}</p>`;
 }
 
+// 18/09 — REGRAS DE EXIBIÇÃO (definidas com o Luis):
+//  1. Jogo com estratégia/Seleção IA → SEMPRE aparece, mesmo sem nenhum
+//     indicador batido ainda. Fica no grupo de cima.
+//  2. Jogo sem estratégia/Seleção IA → só entra na lista a partir do
+//     momento que algum indicador bater; enquanto isso, nem aparece.
+//     Sempre abaixo do grupo com estratégia.
+//  3. Com estratégia → calculadora completa (6 mercados) ao lado.
+//     Sem estratégia → só a média do próximo gol.
+//  4. Nome dos times sempre com a odd pré-jogo ao lado.
+//  5. Combo Forte mantém a borda dourada e a tag, sem mudança.
 app.get('/observador', (req, res) => {
   const jogosAtivos = Object.entries(estadoLive).filter(([, e]) => !e.encerrado && e.jogo);
   if (!jogosAtivos.length) {
@@ -2826,15 +2996,12 @@ app.get('/observador', (req, res) => {
   }
 
   const hoje = dataHoje();
-  const corpo = jogosAtivos.map(([jogoId, estado]) => {
-    const jogo = estado.jogo;
+
+  function montaCard(jogo, estado, comEstrategia, eventosHTML) {
     const tempoTxt = jogo.tempo === 'Intervalo' ? 'Intervalo' : jogo.tempo === 'Encerrado' ? 'Encerrado' : `${jogo.tempo}'`;
     const ni = estado.novoIndicador;
 
-    // Estilo do card: combo forte = borda dourada; hora cheia sem
-    // destaque = esmaecido (opacity menor); normal = padrão de sempre.
-    // NUNCA esconde nada, só muda a prioridade visual.
-    let estiloExtra = '';
+    let estiloExtra = comEstrategia ? 'border:1px solid #2c2c30;' : 'border:1px solid #202023;opacity:0.9;';
     let tagHTML = '';
     if (ni?.comboTag) {
       estiloExtra = 'border:1.5px solid #f0b429;';
@@ -2843,18 +3010,61 @@ app.get('/observador', (req, res) => {
       estiloExtra = 'opacity:0.6;';
     }
 
-    const badgeEstrategias = getEstrategiasBadgeHTML(jogo, hoje);
+    const strats = getEstrategiasKeys(jogo, hoje);
+    const badgeEstrategias = getEstrategiasBadgeHTML(strats);
+    const calcHTML = comEstrategia
+      ? calculadoraCompleta(estado)
+      : mediaProximoGolHTML(jogo, estado);
+    const calcBloco = calcHTML
+      ? `<p class="obs-linha" style="margin-top:8px;background:#101012;border-radius:8px;padding:6px 10px;font-size:12px;color:#9a9a96;">${calcHTML}</p>`
+      : '';
 
     return `<div class="ms-jogo" style="${estiloExtra}">
       <div class="ms-jogo-header">
-        <p class="ms-jogo-nome">${jogo.mandante} x ${jogo.visitante}</p>
+        <p class="ms-jogo-nome">${nomesComOdd(jogo)}</p>
         <p class="ms-muted ms-small">${tempoTxt} &middot; placar ${jogo.gols_casa}x${jogo.gols_fora}</p>
       </div>
       ${tagHTML}
       ${badgeEstrategias}
-      ${obsBlocoIndicadores(jogo, estado)}
+      ${eventosHTML}
+      ${calcBloco}
     </div>`;
-  }).join('');
+  }
+
+  const comEstrategia = [];
+  const semEstrategia = [];
+
+  for (const [jogoId, estado] of jogosAtivos) {
+    const jogo = estado.jogo;
+    const eventosHTML = obsBlocoIndicadores(jogo, estado);
+    const strats = getEstrategiasKeys(jogo, hoje);
+    const temEstrategia = strats.length > 0;
+
+    if (temEstrategia) {
+      comEstrategia.push({ jogo, estado, eventosHTML, comboForte: !!estado.novoIndicador?.comboTag });
+    } else {
+      // sem estratégia: só entra se já tiver pelo menos 1 indicador batido
+      // (obsBlocoIndicadores devolve a mensagem "nenhum indicador ainda"
+      // quando a lista tá vazia — nesse caso, o jogo fica de fora)
+      const temIndicador = !eventosHTML.includes('Nenhum indicador bateu ainda');
+      if (temIndicador) semEstrategia.push({ jogo, estado, eventosHTML });
+    }
+  }
+
+  // combo forte primeiro dentro do grupo com estratégia
+  comEstrategia.sort((a, b) => (b.comboForte ? 1 : 0) - (a.comboForte ? 1 : 0));
+
+  const blocoComEstrategia = comEstrategia
+    .map(x => montaCard(x.jogo, x.estado, true, x.eventosHTML)).join('');
+  const blocoSemEstrategia = semEstrategia
+    .map(x => montaCard(x.jogo, x.estado, false, x.eventosHTML)).join('');
+
+  const tituloComEstrategia = `<p class="ms-periodo" style="margin-top:0;">Com estratégia / Seleção IA &mdash; ${comEstrategia.length} jogo(s)</p>`;
+  const tituloSemEstrategia = `<p class="ms-periodo">Sem estratégia &mdash; só aparecem quando algum indicador bate &mdash; ${semEstrategia.length} jogo(s)</p>`;
+
+  const corpo =
+    (comEstrategia.length ? tituloComEstrategia + blocoComEstrategia : '<p class="ms-muted ms-small">Nenhum jogo com estratégia/Seleção IA ao vivo agora.</p>') +
+    (semEstrategia.length ? tituloSemEstrategia + blocoSemEstrategia : '');
 
   res.send(msPaginaHTML(`<p class="ms-muted" style="margin-bottom:12px;">🔍 Observador — ${jogosAtivos.length} jogo(s) ao vivo · não manda nada, só pra acompanhar</p><p style="margin-bottom:16px;"><a href="/observador/historico" style="color:#4fd1c5;">📜 Ver histórico de hoje</a></p>${corpo}`));
 });
@@ -2879,6 +3089,12 @@ app.get('/observador/historico', (req, res) => {
     raio_gol_5min: '⚡ Raio+Gol (5min)',
     raio_gol_5min_2t: '⚡ Raio+Gol (5min), 2T',
     janela6min180: '📊 Janela 6min média≥180',
+    chuva_de_cantos: '🌧️🚩 Chuva de Cantos',
+    chuva_de_cantos_2t: '🌧️🚩 Chuva de Cantos, 2T',
+    ta_relampegando: '⚡⚡⚡ Tá Relampegando',
+    ta_relampegando_2t: '⚡⚡⚡ Tá Relampegando, 2T',
+    relampago_triangular: '⚡🔺 Relâmpago Triangular',
+    relampago_triangular_2t: '⚡🔺 Relâmpago Triangular, 2T',
   };
 
   const corpo = registros.map(r => `
@@ -2894,7 +3110,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_45',
+  status: 'ok', version: 'server_70',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
