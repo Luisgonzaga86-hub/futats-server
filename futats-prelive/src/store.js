@@ -57,6 +57,11 @@ function upsertGame(game) {
     // analisado=false por muito tempo, se os baldes não valerem a pena.
     calculado: existing?.calculado ?? false,
     calculo: existing?.calculo ?? null,
+    // 21/09 — placar final (via api-games-live), independente de
+    // analisado/calculado — usado pro histórico de confiabilidade
+    // (comparar previsão do cálculo local com o resultado real).
+    resultado_final: existing?.resultado_final ?? null,
+    resultado_final_em: existing?.resultado_final_em ?? null,
   };
   writeAll(data);
 }
@@ -68,6 +73,17 @@ function markCalculado(id, calculoResultado) {
   if (!data.jogos[id]) return;
   data.jogos[id].calculado = true;
   data.jogos[id].calculo = calculoResultado;
+  writeAll(data);
+}
+
+// 21/09 — salva o placar final do jogo, buscado da api-games-live depois
+// que o jogo encerra. Usado só pro histórico de confiabilidade (cálculo
+// local) — não mexe em nada da análise paga (analisado/analise/resultado_real).
+function markResultadoFinal(id, golsCasa, golsFora) {
+  const data = readAll();
+  if (!data.jogos[id]) return;
+  data.jogos[id].resultado_final = { golsCasa, golsFora };
+  data.jogos[id].resultado_final_em = new Date().toISOString();
   writeAll(data);
 }
 
@@ -157,14 +173,23 @@ function getPendingCalculo() {
   return getAllGames().filter((g) => !g.calculado);
 }
 
+// 21/09 — jogos já calculados localmente mas que ainda não têm placar
+// final salvo — é essa lista que o buscarResultadosFinais() do
+// futatsClient.js usa pra saber quais jogos ainda precisa ir atrás.
+function getPendingResultadoFinal() {
+  return getAllGames().filter((g) => g.calculado && !g.resultado_final);
+}
+
 module.exports = {
   upsertGame,
   getGame,
   getAllGames,
   getPendingGames,
   getPendingCalculo,
+  getPendingResultadoFinal,
   markAnalyzed,
   markCalculado,
+  markResultadoFinal,
   markProcessing,
   markProcessingFailed,
   markConferido,

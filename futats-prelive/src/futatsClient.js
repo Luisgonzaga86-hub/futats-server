@@ -98,4 +98,42 @@ async function buscarJogosDoDia() {
     clearTimeout(timeout);
   }
 }
-module.exports = { buscarJogosDoDia };
+
+// 21/09 — busca jogos ao vivo/encerrados (api-games-live, mesma API usada
+// pelo server live) e salva o placar final de quem já tiver os baldes
+// calculados localmente e ainda não tem resultado_final salvo. Usado só
+// pro histórico de confiabilidade (comparar previsão vs resultado real) —
+// não mexe em nada do fluxo de análise paga.
+async function buscarResultadosFinais() {
+  let eventos;
+  try {
+    eventos = await futatsGet('api-games-live');
+  } catch (err) {
+    console.error('[futatsClient] Falha ao buscar api-games-live:', err.message);
+    return 0;
+  }
+
+  const encerrados = eventos.filter((j) => j.tempo === 'Encerrado');
+  if (!encerrados.length) return 0;
+
+  const pendentes = store.getPendingResultadoFinal();
+  if (!pendentes.length) return 0;
+
+  let atualizados = 0;
+  for (const jogoLive of encerrados) {
+    const jogoStore = pendentes.find(
+      (g) => g.mandante === jogoLive.mandante && g.visitante === jogoLive.visitante
+    );
+    if (!jogoStore) continue;
+
+    const golsCasa = parseInt(jogoLive.gols_casa, 10) || 0;
+    const golsFora = parseInt(jogoLive.gols_fora, 10) || 0;
+    store.markResultadoFinal(jogoStore.id, golsCasa, golsFora);
+    atualizados++;
+  }
+
+  if (atualizados > 0) console.log(`[futatsClient] ${atualizados} resultado(s) final(is) salvos.`);
+  return atualizados;
+}
+
+module.exports = { buscarJogosDoDia, buscarResultadosFinais };

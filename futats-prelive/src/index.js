@@ -41,6 +41,47 @@ function emojiNivel(nivel) {
   return '🟡';
 }
 
+// 21/09 — descobre qual lado (casa/fora) é o favorito pré-jogo, pela odd
+// inicial mais baixa. Mesmo critério usado no server live (getFavorito).
+function ladoFavorito(jogo) {
+  const oc = parseFloat(jogo.odd_casa);
+  const of_ = parseFloat(jogo.odd_fora);
+  if (isNaN(oc) || isNaN(of_)) return null;
+  return oc <= of_ ? 'casa' : 'fora';
+}
+
+// 21/09 — jogos de HOJE onde o cálculo local bateu Favorito=Média E
+// Gols=Alta ao mesmo tempo — a combinação que o Luis usa pra montar a
+// múltipla do dia.
+function getMultiplasDoDia(hoje) {
+  return store
+    .getAllGames()
+    .filter((j) => j.data && j.data.slice(0, 10) === hoje)
+    .filter(
+      (j) =>
+        j.calculado &&
+        j.calculo?.favorito?.nivel === 'Média' &&
+        j.calculo?.gols?.nivel === 'Alta'
+    )
+    .sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
+}
+
+function htmlSugestaoMultipla(hoje, senha) {
+  const jogos = getMultiplasDoDia(hoje);
+  if (!jogos.length) return '';
+  const linhas = jogos
+    .map(
+      (j) =>
+        `<div>• <b>${j.hora}</b> — ${j.mandante} x ${j.visitante} <small style="color:#9a9a96;">(Favorito Média · Gols Alta)</small></div>`
+    )
+    .join('');
+  return `
+    <div style="background:#132a1a;border:1px solid #2ea043;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
+      <div style="font-size:15px;font-weight:700;color:#3fb950;margin-bottom:10px;">⭐ Sugestão de Múltipla do Dia — ${jogos.length} jogo(s)</div>
+      <div style="font-size:13px;color:#c9d1d9;line-height:1.9;">${linhas}</div>
+    </div>`;
+}
+
 // Página principal: lista só os jogos de HOJE
 app.get('/', checarSenha, (req, res) => {
   const hoje = hojeBrasilia();
@@ -101,6 +142,8 @@ app.get('/', checarSenha, (req, res) => {
       <h2>⚽ FUTATS — Jogos de hoje</h2>
       <p><a class="atualizar" href="/atualizar?senha=${req.query.senha}">🔄 Puxar jogos novos agora</a></p>
       <p><a class="atualizar" href="/historico?senha=${req.query.senha}">📜 Ver histórico de análises</a></p>
+      <p><a class="atualizar" href="/historico-confiabilidade?senha=${req.query.senha}">📊 Ver histórico de confiabilidade (cálculo local)</a></p>
+      ${htmlSugestaoMultipla(hoje, req.query.senha)}
       <table>
         <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds</th><th>Seleção IA</th><th>Status</th><th></th></tr>
         ${linhas}
@@ -320,6 +363,115 @@ app.get('/historico', checarSenha, (req, res) => {
       </form>
       <table>
         <tr><th>Data / Hora</th><th>Liga</th><th>Jogo</th><th>Seleção IA</th><th></th></tr>
+        ${linhas}
+      </table>
+    </body>
+    </html>
+  `);
+});
+
+// 21/09 — Histórico de Confiabilidade: separado do /historico (que é da
+// análise PAGA via API). Esse aqui é só do CÁLCULO LOCAL (calculadora.js,
+// grátis) — mostra todo jogo onde Favorito e/ou Gols bateu pelo menos
+// Média, com o resultado final ao lado e fundo verde quando acertou.
+//   Fundo verde Favorito = o time apontado como favorito venceu o jogo
+//   Fundo verde Gols = bateu o corte (Média→Over 1,5 · Alta→Over 2,5)
+app.get('/historico-confiabilidade', checarSenha, (req, res) => {
+  const filtroData = (req.query.data || '').trim();
+  const filtroTime = (req.query.time || '').trim().toLowerCase();
+
+  let jogos = store.getAllGames().filter((j) => {
+    if (!j.calculado || !j.calculo) return false;
+    const nivelFav = j.calculo.favorito?.nivel;
+    const nivelGols = j.calculo.gols?.nivel;
+    return nivelFav === 'Média' || nivelFav === 'Alta' || nivelGols === 'Média' || nivelGols === 'Alta';
+  });
+
+  if (filtroData) {
+    jogos = jogos.filter((j) => j.data && j.data.slice(0, 10) === filtroData);
+  }
+  if (filtroTime) {
+    jogos = jogos.filter(
+      (j) =>
+        (j.mandante || '').toLowerCase().includes(filtroTime) ||
+        (j.visitante || '').toLowerCase().includes(filtroTime)
+    );
+  }
+
+  // Mais recente primeiro (por data do jogo + hora)
+  jogos.sort((a, b) => `${b.data || ''}${b.hora || ''}`.localeCompare(`${a.data || ''}${a.hora || ''}`));
+
+  const linhas = jogos
+    .map((j) => {
+      const nivelFav = j.calculo.favorito?.nivel || '-';
+      const nivelGols = j.calculo.gols?.nivel || '-';
+      const dataJogo = j.data ? j.data.slice(0, 10) : '-';
+      const rf = j.resultado_final;
+
+      // ── Célula Favorito ──
+      let favTexto = `${emojiNivel(nivelFav)} ${nivelFav}`;
+      let favEstilo = '';
+      if (rf) {
+        const lado = ladoFavorito(j);
+        const favoritoVenceu =
+          lado === 'casa' ? rf.golsCasa > rf.golsFora : lado === 'fora' ? rf.golsFora > rf.golsCasa : null;
+        if (favoritoVenceu === true) { favEstilo = 'background:#132a1a;'; favTexto += ' ✓'; }
+        else if (favoritoVenceu === false) { favEstilo = 'background:#2a1616;'; favTexto += ' ✗'; }
+      }
+
+      // ── Célula Gols ──
+      let golsTexto = `${emojiNivel(nivelGols)} ${nivelGols}`;
+      let golsEstilo = '';
+      if (rf && (nivelGols === 'Média' || nivelGols === 'Alta')) {
+        const total = rf.golsCasa + rf.golsFora;
+        const alvo = nivelGols === 'Alta' ? 3 : 2; // Alta→Over2,5 · Média→Over1,5
+        const bateu = total >= alvo;
+        golsEstilo = bateu ? 'background:#132a1a;' : 'background:#2a1616;';
+        golsTexto += bateu ? ` ✓ (Over${alvo === 3 ? '2,5' : '1,5'})` : ` ✗`;
+      }
+
+      const resultadoTxto = rf ? `${rf.golsCasa}x${rf.golsFora}` : '⏳ aguardando';
+
+      return `
+        <tr>
+          <td>${dataJogo} ${j.hora || ''}</td>
+          <td>${j.pais || ''} — ${j.campeonato || ''}</td>
+          <td>${j.mandante} x ${j.visitante}</td>
+          <td style="${favEstilo}">${favTexto}</td>
+          <td style="${golsEstilo}">${golsTexto}</td>
+          <td>${resultadoTxto}</td>
+        </tr>`;
+    })
+    .join('');
+
+  res.send(`
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <title>FUTATS — Histórico de Confiabilidade</title>
+      <style>
+        body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; }
+        td, th { padding: 8px; border-bottom: 1px solid #333; text-align: left; font-size: 14px; }
+        a { color: #4fd1c5; }
+        form.filtros { margin-bottom: 16px; }
+        input { background: #222; border: 1px solid #444; color: #eee; padding: 6px 8px; border-radius: 4px; margin-right: 8px; }
+        button { background: #2b6cb0; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
+      </style>
+    </head>
+    <body>
+      <p><a href="/?senha=${req.query.senha}">← Voltar pra hoje</a></p>
+      <h2>📊 FUTATS — Histórico de Confiabilidade (${jogos.length})</h2>
+      <p style="color:#9a9a96;font-size:12px;">Cálculo local (grátis) — favorito e/ou gols em Média/Alta. Fundo verde = acertou, fundo vermelho = errou, sem fundo = ainda sem resultado.</p>
+      <form class="filtros" method="GET" action="/historico-confiabilidade">
+        <input type="hidden" name="senha" value="${req.query.senha}" />
+        <input type="date" name="data" value="${escapeHtml(filtroData)}" />
+        <input type="text" name="time" placeholder="nome do time" value="${escapeHtml(req.query.time || '')}" />
+        <button type="submit">Filtrar</button>
+        ${filtroData || filtroTime ? `<a href="/historico-confiabilidade?senha=${req.query.senha}" style="margin-left:8px;">Limpar filtro</a>` : ''}
+      </form>
+      <table>
+        <tr><th>Data / Hora</th><th>Liga</th><th>Jogo</th><th>Favorito</th><th>Gols</th><th>Resultado Final</th></tr>
         ${linhas}
       </table>
     </body>

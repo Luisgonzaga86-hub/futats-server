@@ -170,6 +170,13 @@ function iniciar() {
 
       calcularJogosPendentes();
       await checarJogosProntosParaAnalise();
+
+      // 21/09 — busca placar final dos jogos já encerrados, pro histórico
+      // de confiabilidade (cálculo local). Roda no mesmo ciclo de 5min,
+      // não atrapalha nada do fluxo de análise paga.
+      await futatsClient.buscarResultadosFinais().catch((err) =>
+        console.error('[scheduler] Falha ao buscar resultados finais:', err.message)
+      );
     } catch (err) {
       // Rede de segurança final — qualquer exceção não prevista aqui dentro
       // (async, sem isso vira unhandled rejection e derruba o processo
