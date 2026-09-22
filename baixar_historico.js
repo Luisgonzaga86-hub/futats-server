@@ -19,7 +19,7 @@ const API_BASE = 'https://gz.futats.com/opta/api-games-live-day';
 // funcionou porque ja tinha esse header salvo de uma sessao anterior).
 const FUTATS_TOKEN = process.env.FUTATS_TOKEN || 'w8e6q2xa';
 const DELAY_MS = 30 * 1000; // 30 segundos entre chamadas, conforme pedido
-const DATA_INICIO = '2026-01-01';
+const DATA_INICIO = '2025-10-25'; // ajustado 18/09 — dono do FUTATS confirmou que so tem dados a partir dessa data
 const PASTA_SAIDA = process.env.FUTATS_HIST_DIR || '/data/futats-historico'; // ajustar pro Volume do Railway
 const ARQUIVO_PROGRESSO = path.join(PASTA_SAIDA, '_progresso.json');
 
@@ -87,23 +87,32 @@ async function main() {
 
   const progresso = carregarProgresso();
   const hoje = new Date();
-  const dataInicioObj = progresso.ultimaDataBaixada
-    ? new Date(new Date(progresso.ultimaDataBaixada).getTime() + 86400000) // dia seguinte ao ultimo baixado
-    : new Date(DATA_INICIO);
+  // So baixa ate ONTEM, nunca "hoje" — rodando de madrugada (01h-04h), o dia
+  // atual mal comecou, a maioria dos jogos ainda vai rolar durante o dia.
+  // Se baixasse "hoje" agora, salvaria um arquivo quase vazio e nunca mais
+  // tentaria de novo (por causa do check "ja existe, pulando" abaixo).
+  const ontem = new Date(hoje.getTime() - 86400000);
+  // Sempre parte do DATA_INICIO (nao so do ultimo baixado) — assim, se
+  // DATA_INICIO for movido pra tras (backfill, como em 18/09/2026 quando
+  // passou de 2026-01-01 pra 2025-10-25), os dias antigos que faltam sao
+  // pegos tambem. O check "ja existe, pulando" abaixo cuida de nao
+  // rebaixar os dias que ja tem arquivo — entao isso e rapido mesmo
+  // passando de novo pelos dias ja baixados.
+  const dataInicioObj = new Date(DATA_INICIO);
 
-  if (dataInicioObj > hoje) {
-    console.log('Ja esta tudo baixado ate hoje. Nada a fazer.');
+  if (dataInicioObj > ontem) {
+    console.log('Ja esta tudo baixado ate ontem. Nada a fazer.');
     return;
   }
 
-  console.log(`Iniciando/retomando download a partir de ${formatarData(dataInicioObj)} ate ${formatarData(hoje)}`);
+  console.log(`Iniciando/retomando download a partir de ${formatarData(dataInicioObj)} ate ${formatarData(ontem)}`);
   console.log(`Delay entre chamadas: ${DELAY_MS/1000}s | Janela permitida: ${JANELA_INICIO_HORA_BRT}h-${JANELA_FIM_HORA_BRT}h BRT`);
 
   let atual = new Date(dataInicioObj);
   let contador = 0;
   let totalJogos = 0;
 
-  while (atual <= hoje) {
+  while (atual <= ontem) {
     if (!dentroDaJanela()) {
       console.log(`\nFim da janela (04h BRT atingido). Parando aqui — retoma automaticamente na proxima madrugada a partir de ${formatarData(atual)}.`);
       break;
@@ -138,7 +147,7 @@ async function main() {
 
     atual.setDate(atual.getDate() + 1);
 
-    if (atual <= hoje && dentroDaJanela()) {
+    if (atual <= ontem && dentroDaJanela()) {
       await sleep(DELAY_MS);
     }
   }
@@ -147,7 +156,7 @@ async function main() {
   if (progresso.diasComErro.length) {
     console.log(`Dias com erro (retry na proxima execucao): ${progresso.diasComErro.join(', ')}`);
   }
-  if (atual <= hoje) {
+  if (atual <= ontem) {
     console.log(`Restam dias a baixar a partir de ${formatarData(atual)} — a proxima execucao (madrugada seguinte) continua sozinha.`);
   } else {
     console.log('Download historico completo!');
