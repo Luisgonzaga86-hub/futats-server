@@ -11,19 +11,11 @@ app.use(express.json({ limit: '50mb' }));
 const TG_TOKEN    = process.env.TG_TOKEN    || '8826929533:AAH5CdY8yBf9p-2CM-JDYLz_ppu7bkxN5wQ';
 const TG_CHAT_ID  = process.env.TG_CHAT_ID  || '7324646421';
 const TG_CHAT_IDS = [TG_CHAT_ID, '-1003914910677'];
-// 01/09 — grupo dedicado pra validação dos novos indicadores (Trocação
-// Gonza / Tempestade Cruzada Gonza), separado do chat pessoal e do grupo
-// principal, enquanto ainda estão em teste.
 const TG_CHAT_ID_VALIDACAO = process.env.TG_CHAT_ID_VALIDACAO || '-5508923205';
 const PORT        = process.env.PORT        || 3000;
 const FUTATS_TOKEN = 'w8e6q2xa';
 const FUTATS_BASE  = 'https://gz.futats.com/opta';
 
-// ── CONFIABILIDADE PRÉ-LIVE — ponte com o futats-prelive via rede interna
-// do Railway (23/07). Busca não-bloqueante: nunca atrasa o disparo de um
-// alerta. Retry espaçado (a cada CONFIABILIDADE_RETRY_MS) enquanto não achar
-// — cobre o caso de o Luis analisar o jogo manualmente pelo site depois que
-// o alerta live já disparou.
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN;
 const FUTATS_PRELIVE_INTERNAL_URL = process.env.FUTATS_PRELIVE_INTERNAL_URL || 'http://futats-server.railway.internal:8080';
 const CONFIABILIDADE_RETRY_MS = 5 * 60 * 1000;
@@ -61,14 +53,9 @@ function formatarBlocoConfiabilidade(conf) {
   return linhas.join('\n');
 }
 
-// Busca (com retry espaçado) e, assim que encontra pela 1ª vez, re-renderiza
-// TODOS os alertas já ativos desse jogo — assim o bloco fica "gravado" desde
-// já, sem precisar esperar o próximo evento de placar.
-// 25/08: agora também guarda estado.overs (percentuais de Over do jogo,
-// vindos do cálculo local do prelive) — usado nas linhas de odd justa.
 async function garantirConfiabilidade(jogoId, estado, jogo) {
   if (estado.confiabilidadeBloco) return;
-  if (estado.encerrado) return; // jogo já acabou, mensagens já fechadas — não vale mais a pena buscar
+  if (estado.encerrado) return;
   const agora = Date.now();
   if (estado.confiabilidadeUltimaTentativa && (agora - estado.confiabilidadeUltimaTentativa) < CONFIABILIDADE_RETRY_MS) return;
   estado.confiabilidadeUltimaTentativa = agora;
@@ -80,13 +67,9 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   }
 
   estado.confiabilidadeBloco = formatarBlocoConfiabilidade(conf);
-  estado.overs = conf.overs || null; // { over05, over15, over25, over35, overHT, over15HT } em %, ou null
+  estado.overs = conf.overs || null;
   console.log(`[confiabilidade] ${jogoId} → bloco carregado.${estado.overs ? ' (com overs)' : ''}`);
 
-  // Se o jogo JÁ terminou (processarFimDeJogo já rodou), as mensagens já
-  // têm o resultado final escrito (GREEN/RED · HT/FT) — não voltar a editar
-  // como se o jogo ainda estivesse rolando, senão apagaria esse resultado.
-  // Nesse caso o bloco só fica guardado (não é usado nesse jogo, já é tarde).
   if (estado.encerrado) {
     console.log(`[confiabilidade] ${jogoId} → jogo já encerrado, não re-renderiza (evita sobrescrever o resultado final).`);
     return;
@@ -95,26 +78,18 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   console.log(`[confiabilidade] ${jogoId} → re-renderizando alertas ativos.`);
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
-    if (info.grupo1Status) continue; // Grupo 1 recebe o bloco na próxima transição de estado
+    if (info.grupo1Status) continue;
     await rerenderizarAlerta(jogo, estado, stratKey, info);
   }
   if (estado.msgConsolidada?.ids?.length && !estado.msgConsolidada.travado) {
     await rerenderizarConsolidado(jogo, estado);
   }
 
-  // 07/09 — se o alerta de Trocação/Tempestade (validação) já tinha sido
-  // enviado ANTES da confiabilidade carregar, a linha de "odd do jogo"
-  // ficava faltando pra sempre. Agora reedita a mensagem assim que os
-  // dados chegam, preenchendo a linha que faltava.
   if (estado.novoIndicador?.jaAlertado && estado.validacaoMsgIds?.length) {
     await reeditarValidacaoComOdds(jogo, estado);
   }
 }
 
-// Todos os arquivos de dados ficam dentro de data/ — assim o Volume do
-// Railway pode ser montado só nessa pasta (montar direto na raiz do app
-// apagaria o node_modules na primeira vez, comportamento conhecido do
-// Railway com volumes vazios sobrepondo o path de montagem).
 const DATA_DIR = path.join(__dirname, 'data');
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -124,11 +99,7 @@ const ESTADO_FILE = path.join(DATA_DIR, 'estado_live.json');
 const MOMENTUM_HISTORICO_FILE = path.join(DATA_DIR, 'momentum_historico.json');
 const VALIDACAO_FILE = path.join(DATA_DIR, 'validacao_novos_indicadores.json');
 const OBSERVADOR_FILE = path.join(DATA_DIR, 'observador_log.json');
-// Depois de encerrado, o jogo fica esse tempo no estado_live.json (pra
-// garantir que nenhum ciclo atrasado ainda vá editar mensagem dele) antes
-// de ser movido pro arquivo de histórico e removido do arquivo "quente"
-// (que é reescrito por inteiro a cada ciclo — sem isso, ele só cresce).
-const ARQUIVAR_APOS_MS = 60 * 60 * 1000; // 1h
+const ARQUIVAR_APOS_MS = 60 * 60 * 1000;
 
 function lerArquivo(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -141,8 +112,8 @@ function salvarArquivo(file, data) {
 let dadosHist = lerArquivo(DATA_FILE, []);
 let pendentes = lerArquivo(PEND_FILE, []);
 let momentumHistorico = lerArquivo(MOMENTUM_HISTORICO_FILE, {});
-let validacaoNovosIndicadores = lerArquivo(VALIDACAO_FILE, []); // 25/08 — histórico de validação Trocação/Tempestade
-let observadorLog = lerArquivo(OBSERVADOR_FILE, []); // 01/09 — histórico de tudo que a página /observador já viu bater
+let validacaoNovosIndicadores = lerArquivo(VALIDACAO_FILE, []);
+let observadorLog = lerArquivo(OBSERVADOR_FILE, []);
 
 let estadoLive = lerArquivo(ESTADO_FILE, {});
 for (const k of Object.keys(estadoLive)) {
@@ -194,8 +165,6 @@ async function sendTelegram(msg, extra = {}) {
   return ids;
 }
 
-// 25/08 — envio SÓ pro grupo de validação (Trocação/Tempestade Cruzada),
-// separado do chat pessoal e do grupo principal Gonza Bot.
 async function sendTelegramPessoal(msg, extra = {}) {
   const ids = [];
   try {
@@ -335,8 +304,6 @@ function checaPressaoGonza(jogo, estado, ladoAlvo, minutoAtual) {
       return { tipo: 'completo', media: round2(media), minutoChute: chuteGol.minuto, eficiencia: round2(efNosso) };
     }
   }
-  // Pressão Gonza 2 (26/07) — mesma janela/média do completo, mas aceita
-  // QUALQUER tipo de chute (não só no gol) e não exige eficiência mínima.
   if (media >= 136 && chuteQualquer) {
     return { tipo: 'gonza2', media: round2(media), minutoChute: chuteQualquer.minuto };
   }
@@ -393,16 +360,6 @@ function checaJogoAberto(jogo, minutoAtual) {
   return null;
 }
 
-// ════════════════════════════════════════════════════════════════
-// ── NOVOS INDICADORES (25/08) — Trocação Gonza / Tempestade      ──
-// ── Cruzada Gonza. Detectam chute dos dois lados no MESMO minuto ──
-// ── (Trocação) ou em minutos CONSECUTIVOS (Tempestade). Rodam    ──
-// ── pra QUALQUER jogo ao vivo, independente de ter estratégia    ──
-// ── nossa nele — a diferença de taxa entre "com estratégia" e    ──
-// ── "sem estratégia" se mostrou mínima nos testes, então vale a  ──
-// ── pena captar em todos os jogos.                               ──
-// ════════════════════════════════════════════════════════════════
-
 const TIPOS_CHUTE = ['chute_no_gol', 'chute_para_fora', 'chute_bloqueado', 'chute_na_trave'];
 
 function checaTrocacaoGonza(jogo, minutoAtual) {
@@ -423,8 +380,6 @@ function checaTrocacaoGonza(jogo, minutoAtual) {
   return comuns.length ? comuns[0] : null;
 }
 
-// 02/09 — variante pro 2T (só considera min 46 até ateMin), usada só na
-// página /observador pra ver o padrão repetindo depois do intervalo.
 function checaTrocacaoGonza2T(jogo, ateMin) {
   const eventos = jogo.eventos || [];
   const casaPorMin = {};
@@ -461,7 +416,6 @@ function checaTempestadeCruzadaGonza(jogo, minutoAtual) {
   return null;
 }
 
-// 02/09 — variante pro 2T (min 46 até ateMin).
 function checaTempestadeCruzadaGonza2T(jogo, ateMin) {
   const eventos = jogo.eventos || [];
   const casaPorMin = {};
@@ -480,8 +434,6 @@ function checaTempestadeCruzadaGonza2T(jogo, ateMin) {
   return null;
 }
 
-// Escolhe o bucket de mercado dinâmico ("Over total_atual+0,5") dado o
-// placar atual — usado tanto pro mercado de HT quanto pro Limite.
 function getBucketDinamico(golsCasa, golsFora) {
   const total = golsCasa + golsFora;
   if (total === 0) return '05';
@@ -495,17 +447,9 @@ function pctParaOdd(pct0a100) {
   return Math.round((100 / pct0a100) * 100) / 100;
 }
 
-// ════════════════════════════════════════════════════════════════
-// 07/09 — "COMBO FORTE": quando Trocação/Tempestade bate JUNTO com uma
-// das nossas estratégias já validadas (própria ou Seleção IA) no mesmo
-// jogo. Duas listas diferentes (uma pro Caso A/HT, outra pro Caso B/Gol)
-// porque os mercados de referência são diferentes.
-// ════════════════════════════════════════════════════════════════
 const ESTRATEGIAS_COMBO_HT  = ['favorito_ht_gonza', 'back_gonza_xg', 'lay_away_manu', 'lay_manu4', 'over05_ht', 'over15_ia', 'lay_0x1_ia'];
 const ESTRATEGIAS_COMBO_GOL = ['over05_ht', 'over15_ia', 'lay_0x1_ia', 'favorito_ht_gonza', 'back_gonza_xg', 'lay_away_manu'];
 
-// Devolve as chaves de estratégia (própria ou IA) que já estão registradas
-// pré-live pra esse jogo hoje, restrito à lista informada.
 function checaComboEstrategia(jogo, hoje, listaEstrategias) {
   const pendJogo = pendentes.filter(p =>
     p.data === hoje && p.tipo === 'pre' &&
@@ -514,14 +458,6 @@ function checaComboEstrategia(jogo, hoje, listaEstrategias) {
   return [...new Set(pendJogo.filter(p => listaEstrategias.includes(p.strat)).map(p => p.strat))];
 }
 
-// ════════════════════════════════════════════════════════════════
-// 07/09 — filtro de chutes só pra "hora cheia" (Caso B). Quando 3+
-// jogos batem o Caso B na mesma hora, só os que também têm pelo menos
-// 14 chutes totais e 3 no gol (até o min41) ganham a tag de destaque —
-// mas TODOS continuam sendo enviados normalmente, nada é suprimido.
-// Contador em memória, chave "YYYY-MM-DDTHH" (reseta sozinho por causa
-// da granularidade — nunca precisamos limpar, cresce devagar).
-// ════════════════════════════════════════════════════════════════
 const contadorCasoBPorHora = {};
 function registrarCasoBNaHora() {
   const chave = agoraBRT().toISOString().slice(0, 13);
@@ -536,11 +472,6 @@ function contaChutesAteMin(jogo, ateMin) {
   return { totais, noGol };
 }
 
-// Monta o texto completo do alerta de validação (Trocação/Tempestade),
-// usado tanto no disparo inicial quanto na reedição posterior (quando a
-// odd do jogo chega atrasada). Todos os dados vêm gravados em `ni`
-// (estado.novoIndicador) — nunca recalcula o combo/filtro de novo aqui,
-// só remonta o texto com o que já foi decidido no momento do disparo.
 function montarTextoValidacao(ni, jogo, estado, tempoDisplay, placarAtualDisplay) {
   const links = linksExchanges(jogo.urls_exchanges || {});
   const partes = [];
@@ -562,13 +493,10 @@ function montarTextoValidacao(ni, jogo, estado, tempoDisplay, placarAtualDisplay
   return partes.filter(Boolean).join('\n') + links;
 }
 
-// Recalcula as linhas de odd (que podem ter chegado atrasadas) e reedita
-// a mensagem de validação já enviada, preservando tudo mais (combo,
-// mercado, placar do momento do disparo).
 async function reeditarValidacaoComOdds(jogo, estado) {
   const ni = estado.novoIndicador;
   if (!ni || !estado.overs) return;
-  if (ni.oddJogoJaPreenchida) return; // já preencheu antes, não reedita de novo à toa
+  if (ni.oddJogoJaPreenchida) return;
 
   if (ni.caso === 'A_ate_min10') {
     const mercadoHT = `over${ni.bucketNoMomento}HT`;
@@ -590,7 +518,6 @@ async function reeditarValidacaoComOdds(jogo, estado) {
         ni.oddJogoJaPreenchida = true;
       }
     }
-    // prévia do HT (tratando o placar do min41 como proxy do que o HT vai ser)
     const mercadoHT = `over${ni.bucketNoMomento}HT`;
     const oddJogoHT = estado.overs[mercadoHT];
     if (oddJogoHT != null) {
@@ -602,7 +529,7 @@ async function reeditarValidacaoComOdds(jogo, estado) {
     }
   }
 
-  if (!ni.oddJogoJaPreenchida && !ni.linhaOddJogoHT) return; // nada novo pra editar
+  if (!ni.oddJogoJaPreenchida && !ni.linhaOddJogoHT) return;
 
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
@@ -612,17 +539,8 @@ async function reeditarValidacaoComOdds(jogo, estado) {
   await editTelegram(estado.validacaoMsgIds, texto);
 }
 
-// Lógica de disparo pros dois novos indicadores. Roda 1x por ciclo por
-// jogo, só enquanto ainda está no 1T. Regra:
-//   - Padrão bate ATÉ o min 10 → dispara na hora, sugere Over HT
-//     (bucket dinâmico pelo placar do momento)
-//   - Padrão bate DEPOIS do min 10 → NÃO dispara na hora; só dispara
-//     se chegar na janela 41-45 com o placar AINDA IGUAL ao que estava
-//     quando o padrão bateu (senão, o padrão já "resolveu sozinho")
-// Envia só pro chat pessoal (validação). Registra em
-// validacaoNovosIndicadores pra depois conferir green/red.
 async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
-  if (estado.passouHT) return; // só 1T
+  if (estado.passouHT) return;
   const tempoNum = parseInt(jogo.tempo) || 0;
   if (!tempoNum || jogo.tempo === 'Intervalo') return;
 
@@ -657,9 +575,6 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
   const golsFora = parseInt(jogo.gols_fora) || 0;
   const placarAtual = `${golsCasa}x${golsFora}`;
 
-  // CASO A: bateu até o min 10 → dispara na hora. Mercado Over HT.
-  // NUNCA é ocultado, atrasado ou filtrado por volume — sempre dispara
-  // e sempre é enviado, com ou sem combo.
   if (ni.minutoBatido <= 10) {
     ni.jaAlertado = true;
     ni.caso = 'A_ate_min10';
@@ -678,7 +593,6 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
       }
     }
 
-    // COMBO FORTE — Trocação/Tempestade + estratégia nossa boa de HT
     const comboHT = checaComboEstrategia(jogo, hoje, ESTRATEGIAS_COMBO_HT);
     if (comboHT.length) {
       ni.comboTag = '⭐🥇 COMBO FORTE ⭐';
@@ -702,17 +616,9 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
     return;
   }
 
-  // CASO B: bateu depois do min 10 → só dispara na janela 41-45,
-  // se o placar não mudou desde que bateu. Diferente do Caso A, aqui o
-  // mercado é "Over Limite" (JOGO TODO), não Over HT — faz pouco sentido
-  // entrar em Over HT quando só sobram 1-4 minutos de 1T. A confirmação
-  // green/red desse caso acontece no FIM DO JOGO (FT), não no HT.
-  // 07/09 — TAMBÉM NUNCA É OCULTADO: em hora cheia (3+ Caso B na mesma
-  // hora), só ganha uma tag extra se passar no filtro de chutes — mas
-  // sempre dispara e sempre é enviado, igual a qualquer outro caso.
   if (tempoNum >= 41 && tempoNum <= 45) {
     if (placarAtual !== ni.placarNoMomento) {
-      ni.jaAlertado = true; // já resolveu sozinho, não alerta
+      ni.jaAlertado = true;
       return;
     }
     ni.jaAlertado = true;
@@ -732,7 +638,6 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
         ni.oddJogoJaPreenchida = true;
       }
     }
-    // prévia do HT — usa o placar do min41 como proxy do que o HT vai ser
     const oddJogoHT = estado.overs ? estado.overs[`over${ni.bucketNoMomento}HT`] : null;
     if (oddJogoHT != null) {
       const oddHT = pctParaOdd(oddJogoHT);
@@ -742,16 +647,12 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
       }
     }
 
-    // COMBO FORTE — estratégia nossa boa de gol
     const comboGol = checaComboEstrategia(jogo, hoje, ESTRATEGIAS_COMBO_GOL);
     let filtroChutesInfo = null;
     if (comboGol.length) {
       ni.comboTag = '⭐🥇 COMBO FORTE ⭐';
       ni.estrategiasTexto = comboGol.map(k => STRAT_DISPLAY[k] || k).join(' · ');
     } else {
-      // Sem estratégia nossa — só aplica o filtro de chutes SE a hora
-      // estiver cheia (3+ Caso B na mesma hora). Nunca suprime o envio,
-      // só decide se ganha a tag de destaque.
       const contagemHora = registrarCasoBNaHora();
       if (contagemHora >= 3) {
         const { totais, noGol } = contaChutesAteMin(jogo, 41);
@@ -759,10 +660,6 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
         if (filtroChutesInfo.passou) {
           ni.comboTag = `⚡🥊 Combo (filtro de chutes, ${totais} chutes / ${noGol} no gol) ⚡`;
         } else {
-          // hora cheia + não passou no filtro → sem destaque. Só afeta a
-          // prioridade visual no /observador (esmaece), NUNCA deixa de
-          // ser enviado no Telegram (isso já acontece de qualquer forma,
-          // já que chegamos até aqui e vamos disparar normalmente abaixo).
           ni.semDestaqueHoraCheia = true;
           ni.filtroChutesTexto = `Não passou no filtro de chutes dessa hora cheia (${totais} totais / ${noGol} no gol)`;
         }
@@ -788,17 +685,11 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
   }
 }
 
-// Checa no HT (chamado de dentro do fluxo normal de monitorarLive, quando
-// jogo.tempo === 'Intervalo' pela primeira vez) se a validação PENDENTE
-// desse jogo bateu green ou red, e manda a confirmação pro chat pessoal.
-// SÓ trata o Caso A (até min 10, mercado Over HT) — o Caso B (janela
-// 41-45, mercado Over Limite/jogo todo) confirma no fim do jogo, não
-// aqui (ver confirmarValidacaoNoFim).
 async function confirmarValidacaoNoHT(jogo, estado) {
   if (estado.validacaoIndex == null) return;
   const registro = validacaoNovosIndicadores[estado.validacaoIndex];
   if (!registro || registro.status !== 'pendente') return;
-  if (registro.caso !== 'A_ate_min10') return; // Caso B confirma no FT, não no HT
+  if (registro.caso !== 'A_ate_min10') return;
 
   const [baseCasa, baseFora] = registro.placarNoMomento.split('x').map(Number);
   const golsCasaHT = parseInt(jogo.gols_casa_ht);
@@ -818,14 +709,11 @@ async function confirmarValidacaoNoHT(jogo, estado) {
   await sendTelegramPessoal(texto);
 }
 
-// Confirma a validação do Caso B (janela 41-45, mercado Over Limite/jogo
-// todo) no FIM do jogo, comparando o placar final com o placar que estava
-// quando o padrão bateu. Chamado de dentro de processarFimDeJogo.
 async function confirmarValidacaoNoFim(estado, golsCasaFT, golsForaFT, placarFT) {
   if (estado.validacaoIndex == null) return;
   const registro = validacaoNovosIndicadores[estado.validacaoIndex];
   if (!registro || registro.status !== 'pendente') return;
-  if (registro.caso !== 'B_janela_41_45') return; // Caso A já confirmou no HT
+  if (registro.caso !== 'B_janela_41_45') return;
 
   const [baseCasa, baseFora] = registro.placarNoMomento.split('x').map(Number);
   const totalBase = baseCasa + baseFora;
@@ -841,15 +729,6 @@ async function confirmarValidacaoNoFim(estado, golsCasaFT, golsForaFT, placarFT)
   await sendTelegramPessoal(texto).catch(() => {});
 }
 
-// ════════════════════════════════════════════════════════════════
-// ── ODDS JUSTAS POR ESTRATÉGIA (25/08) — backtest de 1 ano por   ──
-// ── estratégia, calculado fora e colado aqui como dado estático. ──
-// ── "geral" = usar quando o alerta é no 1T (ainda não se sabe o  ──
-// ── HT). "ht0/ht1/ht2" = usar quando já se sabe o placar do HT   ──
-// ── (2+ gols agrupado porque a amostra é pequena separando mais).──
-// ── Todos os valores são TAXA (0 a 1), não odd — a conversão pra ──
-// ── odd (1/taxa) acontece na hora de montar a mensagem.          ──
-// ════════════════════════════════════════════════════════════════
 const REGRAS_ODDS_JUSTAS = {
   favorito_ht_gonza: {
     geral: { n:2848, over05HT:0.7626, over15HT:0.4129, over05:0.9554, over15:0.8153, over25:0.6225, over35:0.3789 },
@@ -943,10 +822,6 @@ const REGRAS_ODDS_JUSTAS = {
   },
 };
 
-// Devolve a taxa (0-1) da estratégia pro mercado/contexto pedido, ou null
-// se não tiver dado. `contexto` = 'geral' (1T) ou 'ht0'/'ht1'/'ht2' (2T,
-// já sabendo o HT). `mercado` = 'over05HT'|'over15HT'|'over05'|'over15'|
-// 'over25'|'over35'.
 function taxaEstrategia(stratKey, contexto, mercado) {
   const bloco = REGRAS_ODDS_JUSTAS[stratKey];
   if (!bloco || !bloco[contexto]) return null;
@@ -954,33 +829,19 @@ function taxaEstrategia(stratKey, contexto, mercado) {
   return (v == null) ? null : v;
 }
 
-// Monta as linhas de odd justa pro corpo do alerta. SEMPRE usa a taxa
-// PRÉ-LIVE (nunca a "ao vivo") — é o piso de segurança, já que o indicador
-// ao vivo tende a igualar ou melhorar esse número, nunca piorar.
-//   - stratKey: chave da estratégia (ou null se não tiver — ex: Trocação/
-//     Tempestade Cruzada rodando num jogo sem nenhuma estratégia nossa)
-//   - is1T: true = ainda não passou HT (usa contexto 'geral' + mostra
-//     tanto a linha de HT quanto a de Limite); false = já sabe o HT
-//     (usa contexto ht0/ht1/ht2, só mostra a linha de Limite)
-//   - golsCasa/golsFora: placar ATUAL (não o placar do alerta) — usado
-//     pra escolher o bucket dinâmico (over05/15/25/35)
-//   - htTotal: só relevante quando is1T=false, pra escolher ht0/ht1/ht2
-//   - overs: estado.overs do jogo (percentuais pré-live dos 2 times),
-//     pode ser null se ainda não carregou
 function montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, overs) {
   const linhas = [];
-  const bucket = getBucketDinamico(golsCasa, golsFora); // '05'|'15'|'25'|'35'
+  const bucket = getBucketDinamico(golsCasa, golsFora);
   const mercadoFT = `over${bucket}`;
   const labelFT = { '05':'Over 0,5', '15':'Over 1,5', '25':'Over 2,5', '35':'Over 3,5' }[bucket];
 
   const contexto = is1T ? 'geral' : (htTotal === 0 ? 'ht0' : (htTotal === 1 ? 'ht1' : 'ht2'));
 
-  // ── Linha de HT (só faz sentido mostrar enquanto ainda não passou HT) ──
   if (is1T) {
-    const mercadoHT = bucket === '05' ? 'over05HT' : 'over15HT'; // HT so tem esses 2 buckets calculados
+    const mercadoHT = bucket === '05' ? 'over05HT' : 'over15HT';
     const labelHT = bucket === '05' ? 'Over 0,5 HT' : 'Over 1,5 HT';
     const taxaEstHT = stratKey ? taxaEstrategia(stratKey, 'geral', mercadoHT) : null;
-    const taxaJogoHT = overs ? overs[mercadoHT] : null; // overs vem em 0-100
+    const taxaJogoHT = overs ? overs[mercadoHT] : null;
 
     if (taxaEstHT != null) {
       linhas.push(`📈 Odd justa estratégia (${labelHT}, pré-live): ${(1/taxaEstHT).toFixed(2)}`);
@@ -997,7 +858,6 @@ function montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, overs) {
     }
   }
 
-  // ── Linha de Limite (sempre mostra, 1T ou 2T) ──────────────────────
   const taxaEstFT = stratKey ? taxaEstrategia(stratKey, contexto, mercadoFT) : null;
   const taxaJogoFT = overs ? overs[mercadoFT] : null;
 
@@ -1098,35 +958,23 @@ const STRAT_DISPLAY = {
   ambas_marcam_xg:       '🟤 Ambas Marcam xG',
 };
 
-// ════════════════════════════════════════════════════════════════
-// ── REGRAS_ENTRADA — tabela de decisão validada com dados reais ──
-// (10/08/2026, cruzando alertas do canal + odds pré-jogo + placar
-// final de centenas de jogos). Mexer aqui não muda a lógica que usa
-// essa tabela, só os números/cortes.
-// ════════════════════════════════════════════════════════════════
 const REGRAS_ENTRADA = {
   favorito_ht_gonza: {
-    corte2T: 65,               // 45'-65' = Over Limite / depois = Lay+1 zebra
+    corte2T: 65,
     oddJustaOverLimite1T: 1.06,
     oddJustaLay1Zebra2T: 1.17,
   },
   over05: {
-    oddJustaCombinado: 1.05,   // com qualquer outra estratégia junto → Over Limite
+    oddJustaCombinado: 1.05,
     oddJustaOverHT: 1.06,
     oddJustaOverLimiteIsolado: 1.05,
   },
   gol_no_final: {
-    limiteMinuto: 65,          // só dispara até aqui
+    limiteMinuto: 65,
     oddJusta: 1.36,
   },
 };
 
-// 02/09 — REVERTIDO: essas 4 estratégias voltam a disparar a QUALQUER
-// momento do jogo (1T ou 2T), assim que o indicador bater — igual as
-// outras estratégias de gols (gol_no_final, over05_ht). Antes (decisão
-// de 10/08) ficavam travadas até o minuto 45 fixo; Luis decidiu reverter
-// em 02/09, então esse array fica vazio (mantido só por clareza histórica
-// — processarGolsMin45 continua existindo mas nunca mais executa nada).
 const GOLS_STRATS_SO_2T = [];
 
 const IA_PARA_STRAT = {
@@ -1373,8 +1221,6 @@ async function monitorarLive() {
       estado.ultimaVez = agora;
       estado.jogo = jogo;
 
-      // Busca a confiabilidade pré-live em paralelo, sem bloquear os alertas
-      // (fire-and-forget) — assim que chega, re-renderiza os alertas ativos.
       garantirConfiabilidade(jogoId, estado, jogo).catch((e) =>
         console.error(`[confiabilidade] Erro inesperado em ${jogoId}:`, e.message)
       );
@@ -1382,9 +1228,7 @@ async function monitorarLive() {
       for (const m of (jogo.momentum || [])) {
         const idxMom = estado.momentum.findIndex(x => x.minuto === m.minuto);
         if (idxMom === -1) estado.momentum.push(m);
-        else estado.momentum[idxMom] = m; // atualiza com o valor mais recente da API
-                                           // (evita ficar preso no valor 0 inicial de um
-                                           // minuto que a API ainda estava processando)
+        else estado.momentum[idxMom] = m;
       }
       for (const ev of (jogo.eventos || [])) {
         const jaExiste = estado.eventos.find(x =>
@@ -1418,7 +1262,6 @@ async function monitorarLive() {
           : placarAtual;
         estado.passouHT = true;
         console.log(`[HT] ${jogoId} → HT: ${estado.htPlacar}`);
-        // 25/08: checa validação pendente dos novos indicadores no HT
         await confirmarValidacaoNoHT(jogo, estado).catch(() => {});
       }
       if (!estado.passouHT && (parseInt(jogo.tempo) || 0) > 60) {
@@ -1453,8 +1296,6 @@ async function monitorarLive() {
       await processarAlertasLive(jogo, estado, jogoId, hoje);
       await processarIndicadoresProprios(jogo, estado, jogoId, hoje);
       await processarEstadoGrupo1(jogo, estado, jogoId, hoje);
-      // 25/08: Trocação Gonza / Tempestade Cruzada Gonza — roda em TODOS
-      // os jogos, com ou sem estratégia nossa
       await processarTrocacaoTempestade(jogo, estado, jogoId, hoje).catch((e) =>
         console.error(`[trocacao/tempestade] Erro em ${jogoId}:`, e.message)
       );
@@ -1467,11 +1308,6 @@ async function monitorarLive() {
   }
 }
 
-// Move pro arquivo de histórico (e remove do estado_live.json) qualquer
-// jogo encerrado há mais de ARQUIVAR_APOS_MS — assim o arquivo "quente"
-// (reescrito por inteiro a cada ciclo) não fica acumulando pra sempre.
-// Os dados brutos (momentum/eventos) ficam preservados no histórico, só
-// pra dar de reabrir o gráfico depois.
 function arquivarJogosEncerrados() {
   const agora = Date.now();
   let arquivados = 0;
@@ -1481,8 +1317,6 @@ function arquivarJogosEncerrados() {
     if ((agora - encerradoEm) < ARQUIVAR_APOS_MS) continue;
 
     momentumHistorico[jogoId] = momentumHistorico[jogoId] || [];
-    // Guarda como lista (não sobrescreve) — cobre o caso raro de dois jogos
-    // diferentes do mesmo confronto (ida/volta, edições diferentes do ano).
     momentumHistorico[jogoId].push({
       jogo: estado.jogo,
       momentum: estado.momentum,
@@ -1509,25 +1343,6 @@ function montarMsgAlerta(display, jogo, tempo, placarAlerta, placarAtual, links,
   return fixo + sep + editavel + links;
 }
 
-// ════════════════════════════════════════════════════════════════
-// ── MOTOR ÚNICO DE INDICADORES (26/07) ───────────────────────────
-// ════════════════════════════════════════════════════════════════
-// A partir de 26/07, TODA estratégia (Seleção IA, Filtros, Estratégias-
-// bolinha, Grupo 1) dispara SÓ por estes 4 indicadores próprios — raio
-// do futats.com e os índices de resumo_pressao deixaram de ser gatilho
-// de entrada (continuam existindo só como dado bruto em getIndicadores,
-// usado apenas pela checagem de eficiência do Pressão Gonza "completo").
-//
-//   • Pressão Gonza    — janela limpa, média≥136, chute NO GOL, eficiência≥0.17
-//   • Pressão Gonza 2  — mesma janela/média, QUALQUER chute, sem exigir eficiência
-//   • Pressão sem ef.  — janela limpa, média≥180 (observação, não conta como entrada)
-//   • Jogo Aberto      — pico≥150 dos dois lados + chute, perto no tempo
-//
-// Cada alerta guarda os minutos de cada indicador por tempo (1T/2T) em
-// info.indicadores — 1 linha por indicador por tempo, acumulando minutos
-// na mesma linha se bater de novo (nunca duplica, nunca perde histórico).
-// ════════════════════════════════════════════════════════════════
-
 const INDICADOR_LABEL = {
   gonza:  '🟣 Pressão Gonza',
   gonza2: '🟣 Pressão Gonza 2',
@@ -1542,9 +1357,6 @@ function novoRegistroIndicadores() {
   return r;
 }
 
-// Registra uma ocorrência (minuto, ou "min-min" no caso de Jogo Aberto)
-// na linha certa — nunca duplica o mesmo valor. Devolve true se era nova
-// (útil pra saber se precisa re-renderizar a mensagem).
 function registrarIndicador(info, tipo, periodoLabel, valor) {
   info.indicadores = info.indicadores || novoRegistroIndicadores();
   const lista = info.indicadores[tipo][periodoLabel];
@@ -1566,8 +1378,6 @@ function montarLinhasIndicadores(info) {
   return linhas;
 }
 
-// Filtro de placar — evita disparar mercado que já não faz mais sentido
-// dado o placar atual (ex: Over 1.5 quando já saíram 2+ gols).
 function placarValidoParaGols(stratKey, golsCasa, golsFora) {
   const total = golsCasa + golsFora;
   switch (stratKey) {
@@ -1577,20 +1387,14 @@ function placarValidoParaGols(stratKey, golsCasa, golsFora) {
     case 'ambas_marcam':
     case 'ambas_marcam_xg':
     case 'am_xg':
-      return !(golsCasa > 0 && golsFora > 0); // Ambas Marcam ainda não ocorreu
+      return !(golsCasa > 0 && golsFora > 0);
     case 'over05':
       return total <= 3;
     default:
-      return true; // gol_no_final, over05_ht — sem filtro extra de placar
+      return true;
   }
 }
 
-// Monta o corpo completo (indicadores + aviso de saída + odds justas +
-// placar atual + confiabilidade) — usado tanto no disparo inicial quanto
-// em toda edição posterior, pra nunca haver dois formatos diferentes de
-// montagem.
-// 25/08: ganhou os parâmetros stratKey e jogo, pra poder montar as linhas
-// de odd justa (precisa saber a estratégia e o placar atual).
 function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay, stratKey, jogo) {
   const partes = [...montarLinhasIndicadores(info)];
   if (info.avisoSaida) partes.push(info.avisoSaida);
@@ -1611,13 +1415,6 @@ function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay, stratKey, jo
   return partes.join('\n');
 }
 
-// ════════════════════════════════════════════════════════════════
-// ── ALERTA CONSOLIDADO (10/08) — 1 mensagem por jogo, agrupando  ──
-// ── todas as estratégias próprias que dispararem juntas, com a   ──
-// ── entrada sugerida calculada a partir das regras validadas.    ──
-// ════════════════════════════════════════════════════════════════
-// gol_no_final NUNCA entra aqui — sempre mensagem própria (ver mais
-// abaixo, continua usando dispararAlertaIndicador/rerenderizarAlerta).
 const STRATS_FORA_DO_CONSOLIDADO = ['gol_no_final'];
 
 function golsDoEstado(estado) {
@@ -1634,8 +1431,6 @@ function calcularAlvoLayPlacar(placarBase, zebraLado, incremento) {
   return `${gc}x${gf + incremento}`;
 }
 
-// CASO1/2/3 do manual do Over 0,5 Gonza sozinho (sem nenhuma outra
-// estratégia confirmando junto).
 function determinarEntradaOver05Isolado(jogo, placarBase, tempoNum) {
   const [gc, gf] = placarBase.split('x').map(Number);
   const favorito = getFavorito(jogo);
@@ -1662,12 +1457,8 @@ function determinarEntradaOver05Isolado(jogo, placarBase, tempoNum) {
   return { tipo: 'over_limite', texto: 'Over Limite', placarBase };
 }
 
-// Estratégias de lado que seguem a mesma regra Lay[placar+N zebra]
-// que o Favorito ht Gonza (mesma família de mercado).
 const LADO_MESMA_REGRA_FAVORITO = ['lay_away_manu', 'lay_manu4', 'back_gonza_xg', 'lay_gol_mand', 'lay_gol_visit'];
 
-// Decide qual entrada sugerir dado o conjunto de estratégias ativas no
-// alerta consolidado. `estrategias` = [{stratKey, tempoNum, placarAlerta}].
 function determinarEntradaSugerida(jogo, estrategias) {
   const keys = estrategias.map(e => e.stratKey);
   const temFavorito = keys.includes('favorito_ht_gonza');
@@ -1680,12 +1471,10 @@ function determinarEntradaSugerida(jogo, estrategias) {
   const is1T = tempoNum < 45;
   const zebra = ladoZebra(jogo);
 
-  // Over 0,5 Gonza + qualquer outra estratégia junto → Over Limite
   if (temOver && estrategias.length > 1) {
     return { tipo: 'over_limite', texto: 'Over Limite', placarBase, oddJusta: REGRAS_ENTRADA.over05.oddJustaCombinado };
   }
 
-  // Favorito ht Gonza (ou lado da mesma família), sem Over 0,5 Gonza junto
   if (temFavorito || outrasLado) {
     if (is1T) {
       const alvoLay = calcularAlvoLayPlacar(placarBase, zebra, 2);
@@ -1704,19 +1493,14 @@ function determinarEntradaSugerida(jogo, estrategias) {
     };
   }
 
-  // Só Over 0,5 Gonza, sozinho — CASO1/2/3 (com Lay) só valem no 1T;
-  // no 2T é sempre Over Limite (11/08, corrigindo bug: regra de Lay
-  // estava vazando pro 2T sem querer).
   if (temOver) {
     if (!is1T) return { tipo: 'over_limite', texto: 'Over Limite', placarBase, oddJusta: REGRAS_ENTRADA.over05.oddJustaOverLimiteIsolado };
     return determinarEntradaOver05Isolado(jogo, placarBase, tempoNum);
   }
 
-  return null; // nenhuma estratégia com regra de entrada validada
+  return null;
 }
 
-// Verifica se a entrada sugerida já bateu green com os gols atuais do
-// jogo, e acha o minuto do gol específico que confirmou.
 function checarGreenConsolidado(jogo, estado, entradaSugerida) {
   if (!entradaSugerida) return { green: false };
   const golsCasa = parseInt(jogo.gols_casa) || 0;
@@ -1727,7 +1511,7 @@ function checarGreenConsolidado(jogo, estado, entradaSugerida) {
   if (['over_limite', 'duas_opcoes_1T', 'over_ht_recuperacao'].includes(entradaSugerida.tipo)) {
     const totalBase = baseCasa + baseFora;
     if ((golsCasa + golsFora) > totalBase) {
-      const golQueDecide = gols[totalBase]; // (totalBase+1)-ésimo gol cronológico do jogo
+      const golQueDecide = gols[totalBase];
       return { green: true, minutoGreen: golQueDecide ? golQueDecide.minuto : null };
     }
     return { green: false };
@@ -1739,7 +1523,7 @@ function checarGreenConsolidado(jogo, estado, entradaSugerida) {
       const ladoQueEstourou = golsCasa > alvoCasa ? 'casa' : 'fora';
       const alvoDesseLado = ladoQueEstourou === 'casa' ? alvoCasa : alvoFora;
       const golsDesseLado = gols.filter(g => g.lado === ladoQueEstourou);
-      const golQueDecide = golsDesseLado[alvoDesseLado]; // gol nº (alvo+1) desse lado
+      const golQueDecide = golsDesseLado[alvoDesseLado];
       return { green: true, minutoGreen: golQueDecide ? golQueDecide.minuto : null };
     }
     if (jogo.tempo === 'Encerrado' && !(golsCasa === alvoCasa && golsFora === alvoFora)) {
@@ -1760,11 +1544,6 @@ function montarLinhaEntradaSugerida(info) {
   return linha;
 }
 
-// Monta o texto completo do alerta consolidado (lista de estratégias
-// ativas + indicadores + odds justas + entrada sugerida + placar).
-// 25/08: ganhou as linhas de odd justa também (usa a estratégia MAIS
-// FORTE do grupo — a de menor odd justa geral — como referência, já
-// que estratégias combinadas tendem a ter perfil bem parecido entre si).
 function montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay) {
   const ROTULO_GRUPO1 = {
     atencao: ' — ⚠️ atenção (contra na frente)',
@@ -1785,8 +1564,6 @@ function montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay) 
   const linhaEntrada = montarLinhaEntradaSugerida(msgCons);
   if (linhaEntrada) partes.push(linhaEntrada);
 
-  // Odds justas — usa a 1ª estratégia do grupo como referência (elas
-  // tendem a ter números bem parecidos quando confirmam juntas)
   if (msgCons.estrategias.length) {
     const golsCasa = parseInt(jogo.gols_casa) || 0;
     const golsFora = parseInt(jogo.gols_fora) || 0;
@@ -1807,16 +1584,11 @@ function montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay) 
   return fixo + sep + '\n' + partes.join('\n') + links;
 }
 
-// Chamado sempre que uma estratégia própria dispara (nova, ou já com o
-// jogo tendo alerta consolidado ativo). Cria a mensagem se não existir;
-// se existir e ainda não travou (green), adiciona a estratégia e
-// recalcula a entrada sugerida; se já travou, devolve false (quem
-// chamou deve então abrir uma mensagem NOVA em vez desta).
 async function dispararOuAtualizarConsolidado(jogo, estado, stratKey, tempoNum, placarAlerta, opcoes = {}) {
   estado.msgConsolidada = estado.msgConsolidada || null;
   const cons = estado.msgConsolidada;
 
-  if (cons && cons.travado) return false; // já fechou — quem chamou abre mensagem nova
+  if (cons && cons.travado) return false;
 
   const tempoDisplay = jogo.tempo === 'Intervalo' ? 'HT' : tempoNum;
   const placarAtual = `${parseInt(jogo.gols_casa)||0}x${parseInt(jogo.gols_fora)||0}`;
@@ -1866,12 +1638,10 @@ async function dispararOuAtualizarConsolidado(jogo, estado, stratKey, tempoNum, 
   return true;
 }
 
-// Re-renderiza o alerta consolidado quando algo muda (placar, indicador
-// novo) sem adicionar estratégia nova.
 async function rerenderizarConsolidado(jogo, estado) {
   const msgCons = estado.msgConsolidada;
   if (!msgCons || !msgCons.ids) return;
-  if (msgCons.travado) return; // já fechou, não mexe mais
+  if (msgCons.travado) return;
 
   const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
   const tempoDisplay = jogo.tempo === 'Intervalo' ? 'HT' : tempoNum;
@@ -1887,10 +1657,6 @@ async function rerenderizarConsolidado(jogo, estado) {
   await editTelegram(msgCons.ids, texto);
 }
 
-// Dispara o alerta inicial de uma estratégia (só se ainda não tiver sido
-// alertada). tipoIndicador/periodo/valor = o indicador que disparou.
-// 25/08: passa stratKey e jogo pra montarCorpoAlerta poder montar as
-// linhas de odd justa.
 async function dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, periodo, valor, opcoes = {}) {
   if (estado.msgIds[stratKey]) return false;
 
@@ -1928,8 +1694,6 @@ async function dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, pe
   return true;
 }
 
-// Reconstrói e reedita a mensagem de um alerta JÁ ativo — chamado sempre
-// que algo novo entra (indicador, placar, confiabilidade, aviso de saída).
 async function rerenderizarAlerta(jogo, estado, stratKey, info) {
   const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
   const tempoDisplay = jogo.tempo === 'Intervalo' ? 'HT' : tempoNum;
@@ -1943,9 +1707,6 @@ async function rerenderizarAlerta(jogo, estado, stratKey, info) {
   await editTelegram(info.ids, texto);
 }
 
-// Re-renderiza todo alerta ativo de um jogo quando o placar muda (chamado
-// pelo monitorarLive) — pula os do Grupo 1, que têm sua própria máquina de
-// estados e já incluem os indicadores nas próprias mensagens.
 async function atualizarPlacarNasMensagens(jogo, estado, placarAtual, hoje) {
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
     if (!info?.ids?.length) continue;
@@ -1964,9 +1725,6 @@ const LADO_STRATS_PROPRIOS = [
   'lay_gol_visit', 'lay_gol_mand',
 ];
 
-// Estas 6 só existem (por definição) até o minuto 20 — entrada por
-// fragilidade bem no início do jogo. Depois do min 20, não abre alerta
-// NOVO, mas se já foi aberto, continua reconhecendo indicador novo.
 const LADO_STRATS_LIMITE_MIN20 = [
   'lay_0x1_ia', 'lay_1x0_ia', 'lay_gol_visit', 'lay_gol_mand',
 ];
@@ -1979,16 +1737,10 @@ const GOLS_STRATS_PROPRIOS = [
 function periodoValidoParaGols(stratKey, is1T, is2T, tempoNum) {
   if (stratKey === 'over05_ht')   return is1T;
   if (stratKey === 'gol_no_final') return is2T && tempoNum <= REGRAS_ENTRADA.gol_no_final.limiteMinuto;
-  if (GOLS_STRATS_SO_2T.includes(stratKey)) return false; // essas 4 têm fluxo próprio (ver processarGolsMin45)
+  if (GOLS_STRATS_SO_2T.includes(stratKey)) return false;
   return true;
 }
 
-// ── GOLS_STRATS_SO_2T (Felipe Over1.5, Ambas Marcam, Ambas Marcam xG,
-// Over 1.5) — 11/08: o padrão de momentum pode ser detectado a qualquer
-// momento do 1T, mas o ALERTA só dispara exatamente quando o jogo chega
-// no minuto 45, olhando o placar naquele instante: 0x0 → sugere Over 0,5
-// (jogo todo); 1 gol no total → sugere Over 1,5 (jogo todo); 2+ gols →
-// descarta de vez, nunca dispara nesse jogo pra essa estratégia.
 async function processarGolsMin45(jogo, estado, pendJogo, tempoNum, golsCasa, golsFora) {
   estado.padraoGols2T = estado.padraoGols2T || {};
   estado.min45Avaliado = estado.min45Avaliado || {};
@@ -1996,9 +1748,8 @@ async function processarGolsMin45(jogo, estado, pendJogo, tempoNum, golsCasa, go
 
   for (const stratKey of GOLS_STRATS_SO_2T) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
-    if (estado.min45Avaliado[stratKey]) continue; // já decidiu (disparou ou descartou)
+    if (estado.min45Avaliado[stratKey]) continue;
 
-    // Detecta o padrão (pode acontecer em qualquer minuto do 1T)
     if (!estado.padraoGols2T[stratKey] && tempoNum < 45) {
       const pgFav = checaPressaoGonza(jogo, estado, favorito, tempoNum);
       const ja = checaJogoAberto(jogo, tempoNum);
@@ -2009,7 +1760,6 @@ async function processarGolsMin45(jogo, estado, pendJogo, tempoNum, golsCasa, go
       if (tipoIndicador) estado.padraoGols2T[stratKey] = { tipoIndicador, valor };
     }
 
-    // Chegou no minuto 45 (ou passou direto pro intervalo) → decide agora
     if (tempoNum >= 45) {
       estado.min45Avaliado[stratKey] = true;
       const padrao = estado.padraoGols2T[stratKey];
@@ -2022,7 +1772,6 @@ async function processarGolsMin45(jogo, estado, pendJogo, tempoNum, golsCasa, go
           entradaReal: true, entradaEspecialTexto: entradaTexto,
         });
       }
-      // se não tinha padrão registrado, ou já tinha 2+ gols → descarta, sem disparar
     }
   }
 }
@@ -2048,8 +1797,6 @@ function getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo) {
   }
 }
 
-// Checa aviso de saída (reação do oponente / cartão vermelho) — só faz
-// sentido pra quem tem lado definido, e só dispara 1x por jogo.
 function checarAvisoSaida(jogo, info, ladoAlvo, tempoNum) {
   if (!ladoAlvo || info.avisoSaida) return false;
   const ladoOp = ladoOposto(ladoAlvo);
@@ -2070,10 +1817,6 @@ function checarAvisoSaida(jogo, info, ladoAlvo, tempoNum) {
   return false;
 }
 
-// Registra na estrutura info um resultado de checaPressaoGonza (se veio
-// completo/gonza2, conta como entrada real; sem_eficiencia é só observação
-// até que apareça completo/gonza2/aberto de verdade). Devolve true se algo
-// mudou (precisa re-renderizar).
 function registrarPressaoGonza(info, pg, periodo, stratKey) {
   if (!pg) {
     info.semEfAtivoPeriodo = info.semEfAtivoPeriodo || {};
@@ -2125,9 +1868,8 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     (p.home === jogo.mandante || p.jogo === `${jogo.mandante} x ${jogo.visitante}`)
   );
 
-  estado.stratsDisparadas = estado.stratsDisparadas || {}; // stratKey -> true (já entrou em algum alerta, consolidado ou próprio)
+  estado.stratsDisparadas = estado.stratsDisparadas || {};
 
-  // ── ESTRATÉGIAS DE LADO ──────────────────────────────────────
   for (const stratKey of LADO_STRATS_PROPRIOS) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     const ladoAlvo = getLadoAlvoEstrategia(stratKey, jogo, hoje, pendJogo);
@@ -2137,7 +1879,7 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     const jaDisparou = estado.stratsDisparadas[stratKey];
 
     if (!jaDisparou) {
-      if (limitadaMin20 && tempoNum > 20) continue; // janela de entrada já fechou
+      if (limitadaMin20 && tempoNum > 20) continue;
 
       const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
       const ja = checaJogoAberto(jogo, tempoNum);
@@ -2153,13 +1895,10 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
         const placarAlerta = `${golsCasa}x${golsFora}`;
         const abriu = await dispararOuAtualizarConsolidado(jogo, estado, stratKey, tempoNum, placarAlerta, { entradaReal, tipoIndicador, valorIndicador: valor });
         if (!abriu) {
-          // consolidado já travado — abre mensagem própria pra essa estratégia
           await dispararAlertaIndicador(jogo, estado, stratKey, tipoIndicador, periodoAtual, valor, { ladoAlvo, entradaReal });
         }
       }
     } else if (estado.msgIds[stratKey]) {
-      // essa estratégia abriu mensagem PRÓPRIA (consolidado já tinha travado
-      // quando ela disparou) — segue o fluxo antigo pra ela.
       const info = estado.msgIds[stratKey];
       let mudou = false;
       const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
@@ -2178,7 +1917,6 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
       if (mudou && !info.grupo1Status) await rerenderizarAlerta(jogo, estado, stratKey, info);
     } else if (estado.msgConsolidada && !estado.msgConsolidada.travado &&
                estado.msgConsolidada.estrategias.some(e => e.stratKey === stratKey)) {
-      // estratégia já está no consolidado — só atualiza indicador/aviso dele
       estado.msgConsolidada.__tempoAtualParaSemEf = tempoNum;
       estado.msgConsolidada.__jogoParaRegistro = jogo;
       const pg = checaPressaoGonza(jogo, estado, ladoAlvo, tempoNum);
@@ -2193,7 +1931,6 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     }
   }
 
-  // ── ESTRATÉGIAS DE GOLS ───────────────────────────────────────
   await processarGolsMin45(jogo, estado, pendJogo, tempoNum, golsCasa, golsFora);
 
   for (const stratKey of GOLS_STRATS_PROPRIOS) {
@@ -2266,10 +2003,6 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
 
 const GRUPO1_STRATS = ['favorito_ht_gonza','lay_away_manu','lay_manu4','back_gonza_xg','lay_xg'];
 
-// Grupo 1 tem sua própria máquina de estados (quem marca primeiro decide o
-// resultado), mas as transições de "reação" agora usam os indicadores
-// próprios em vez de raio+índices. O conceito de "Gol Limite" (conversão
-// via raio no 2T) deixou de existir — o estado "red" agora é terminal.
 async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
@@ -2277,9 +2010,6 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
   const isHT      = jogo.tempo === 'Intervalo';
   const links     = linksExchanges(jogo.urls_exchanges || {});
 
-  // Transição de estado (green/atencao/reacao/red) — igual pros dois casos
-  // (mensagem própria ou dentro do consolidado). Devolve o novo status, ou
-  // null se nada mudou.
   function calcularTransicao(statusAtual, minutoGolContraAtual, alvoGols, contraGols, alvo) {
     if (!statusAtual) {
       if (alvoGols > contraGols) return { status: 'green' };
@@ -2295,7 +2025,7 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
       if (temReacao && tempo > (minutoGolContraAtual || 0)) return { status: 'reacao' };
       return null;
     }
-    return null; // 'reacao' e 'red' são terminais
+    return null;
   }
 
   function alvoDaStrat(stratKey) {
@@ -2314,7 +2044,6 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     green: '✅ green',
   };
 
-  // ── Caso 1: estratégia com mensagem PRÓPRIA (fallback, consolidado já travado quando ela abriu) ──
   for (const stratKey of GRUPO1_STRATS) {
     const info = estado.msgIds[stratKey];
     if (!info || !info.ids?.length) continue;
@@ -2338,7 +2067,6 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     await editTelegram(info.ids, `${fixo}\n${rotuloStatus[t.status]} · ${golsCasa}x${golsFora} (min ${tempo})${corpoExtra}${links}`);
   }
 
-  // ── Caso 2: estratégia dentro do alerta CONSOLIDADO ──────────────
   if (estado.msgConsolidada?.ids?.length) {
     let mudouAlgo = false;
     for (const e of estado.msgConsolidada.estrategias) {
@@ -2359,10 +2087,6 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
 }
 
 async function processarAlertasLive(jogo, estado, jogoId, hoje) {
-  // 26/07 — toda a lógica antiga baseada em raio/índices (resumo_pressao)
-  // foi removida daqui. Praticamente tudo migrou pra dentro de
-  // processarIndicadoresProprios. Só sobra aqui o caso especial do
-  // Over 1.5 HT (upgrade do Over 0.5 HT quando já tem exatamente 1 gol).
   const tempoNum = parseInt(jogo.tempo) || 0;
   const isHT = jogo.tempo === 'Intervalo';
   const is1T = !isHT && !estado.passouHT;
@@ -2445,12 +2169,6 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   }
   salvarArquivo(PEND_FILE, pendentes);
 
-  // 25/08 — confirma validação do Caso B (Trocação/Tempestade que bateu
-  // na janela 41-45, mercado Over Limite/jogo todo) aqui no fim do jogo.
-  // O Caso A (até min 10, mercado Over HT) já foi confirmado antes, no
-  // momento em que o jogo bateu Intervalo (confirmarValidacaoNoHT) — essa
-  // função pula automaticamente se o registro já não estiver mais pendente
-  // ou não for do Caso B.
   await confirmarValidacaoNoFim(estado, golsCasa, golsFora, placarFT).catch(() => {});
 
   for (const [stratKey, info] of Object.entries(estado.msgIds || {})) {
@@ -2466,7 +2184,7 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
 
     let res;
     if (!info.entradaConfirmada) {
-      res = 'nao_entra'; // só teve Pressão sem eficiência, nunca virou entrada real
+      res = 'nao_entra';
     } else {
       res = pLive?.result || calcularResultado(stratBase, golsCasa, golsFora, htH, htA);
     }
@@ -2477,8 +2195,6 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     else                        emoji = '⏳ AVALIAR MANUALMENTE';
     const display = STRAT_DISPLAY[stratKey] || stratKey;
 
-    // Preserva todo o histórico acumulado (indicadores + aviso de saída +
-    // confiabilidade) — nunca reescreve do zero, só acrescenta o resultado.
     const partes = [...montarLinhasIndicadores(info)];
     if (info.avisoSaida) partes.push(info.avisoSaida);
     if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
@@ -2490,12 +2206,9 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     await editTelegram(info.ids, textoFinal);
   }
 
-  // ── Fecha o alerta CONSOLIDADO, se existir ─────────────────────
   if (estado.msgConsolidada?.ids?.length) {
     const msgCons = estado.msgConsolidada;
 
-    // Resultado original de cada estratégia ativa (Opção A — sempre
-    // preservado, independente do resultado da entrada sugerida).
     const linhasEstrategias = msgCons.estrategias.map(e => {
       const stratBase = e.stratKey.replace(/_live$/, '');
       const pLive = pendJogo.find(p => {
@@ -2508,14 +2221,11 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
       return `  ${emoji} ${display} (${e.tempoNum}' · ${e.placarAlerta})`;
     }).join('\n');
 
-    // Fecha a entrada sugerida com o placar final, se ainda não tinha travado.
     if (!msgCons.travado) {
       const gr = checarGreenConsolidado(jogo, estado, msgCons.entradaSugerida);
       msgCons.entradaGreen = gr.green || (msgCons.entradaSugerida ? true : false);
       msgCons.entradaMinutoGreen = gr.minutoGreen;
       if (!gr.green && msgCons.entradaSugerida) {
-        // jogo acabou e a entrada sugerida não bateu green ainda pelo
-        // critério ao vivo — resolve como RED aqui no fechamento.
         msgCons.entradaGreen = false;
         msgCons.entradaRed = true;
       }
@@ -2541,10 +2251,6 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
     await editTelegram(msgCons.ids, textoFinal);
   }
 
-  // Só manda o aviso solto de "FIM DE JOGO" se o jogo teve pelo menos 1
-  // alerta de estratégia de verdade — evita poluir o chat com jogos que o
-  // servidor só estava monitorando (Seleção IA/Filtro/Estratégia registrada
-  // no pré-jogo) mas nenhum indicador bateu durante a partida.
   if (Object.keys(estado.msgIds || {}).length > 0 || estado.msgConsolidada?.ids?.length) {
     await sendTelegram(`🏁 <b>FIM DE JOGO</b>\n⚽ ${jogo.mandante} x ${jogo.visitante}\n📊 FT: ${placarFT}`);
   }
@@ -2566,13 +2272,6 @@ function agendarHoraBRT(hora, minuto, callback) {
   proximaExecucao();
 }
 
-// ════════════════════════════════════════════════════════════════
-// ── PÁGINA OBSERVADOR (01/09) — mostra o status ao vivo de vários ──
-// ── indicadores (inclusive os que ainda não viraram alerta oficial)──
-// ── com a odd justa de referência ao lado, pra acompanhar sem      ──
-// ── esperar disparar nada no Telegram. Só leitura, não manda nada. ──
-// ════════════════════════════════════════════════════════════════
-
 function checaRaioGol5min(jogo, minIni, minFim) {
   const eventos = jogo.eventos || [];
   const gols = eventos.filter(e => e.tipo_evento === 'gol');
@@ -2587,18 +2286,6 @@ function checaRaioGol5min(jogo, minIni, minFim) {
   return null;
 }
 
-// ════════════════════════════════════════════════════════════════
-// ── 18/09 — TRÊS NOVOS INDICADORES (nomeados por Luis) ───────────
-// ── 🌧️🚩 Chuva de Cantos, ⚡⚡⚡ Tá Relampegando, ⚡🔺 Relâmpago    ──
-// ── Triangular. Descobertos por análise exploratória na base de  ──
-// ── 23 mil jogos — mesmo padrão de assinatura (minIni/minFim) das──
-// ── funções de indicador já existentes, pra encaixar igual no    ──
-// ── fluxo de 1T/2T (corte min70) já usado pelos outros.          ──
-// ════════════════════════════════════════════════════════════════
-
-// 🌧️🚩 Chuva de Cantos — 3+ escanteios do MESMO lado numa janela
-// deslizante de 10 minutos (não é bloco fixo — qualquer intervalo de
-// 10min dentro do range pedido conta).
 function checaChuvaDeCantos(jogo, minIni, minFim) {
   const eventos = jogo.eventos || [];
   const porMin = { casa: {}, fora: {} };
@@ -2618,8 +2305,6 @@ function checaChuvaDeCantos(jogo, minIni, minFim) {
   return melhor;
 }
 
-// ⚡⚡⚡ Tá Relampegando — evento "raio" seguido ou precedido, no MESMO
-// lado, por um chute NO GOL a até 3 minutos de distância.
 function checaTaRelampegando(jogo, minIni, minFim) {
   const eventos = jogo.eventos || [];
   const raios = eventos.filter(e => e.tipo_evento === 'raio' && e.minuto >= minIni && e.minuto <= minFim);
@@ -2633,8 +2318,6 @@ function checaTaRelampegando(jogo, minIni, minFim) {
   return melhor;
 }
 
-// ⚡🔺 Relâmpago Triangular — igual ao anterior, mas o segundo evento é
-// um ESCANTEIO (em vez de chute no gol), mesmo lado, até 3min.
 function checaRelampagoTriangular(jogo, minIni, minFim) {
   const eventos = jogo.eventos || [];
   const raios = eventos.filter(e => e.tipo_evento === 'raio' && e.minuto >= minIni && e.minuto <= minFim);
@@ -2667,7 +2350,6 @@ function checaJanela6min180(jogo, ateMin) {
   return null;
 }
 
-// 02/09 — variante pro 2T (min 46 até ateMin).
 function checaJanela6min180_2T(jogo, ateMin) {
   const momentum = jogo.momentum || [];
   const mByMin = {};
@@ -2687,26 +2369,85 @@ function checaJanela6min180_2T(jogo, ateMin) {
   return null;
 }
 
-// Referências de odd justa (calculadas hoje, 01/09, base de 3.297 jogos)
-// pros indicadores que ainda não são alerta oficial — só pra exibir ao
-// lado do status na página observador.
 const ODDS_REFERENCIA_OBSERVADOR = {
   pressao_gonza:      { htAte20: 1.20, limite: 1.11 },
   trocacao_gonza:      { ht: 1.41, limite: 1.11 },
   tempestade_gonza:    { ht: 1.41, limite: 1.11 },
   raio_gol_5min:       { htAte20: 1.59, limiteJanela4660: 1.28 },
   janela6min180:        { limite1T: 1.11 },
-  // 18/09 — validados na base de 23 mil jogos, cruzados com estratégia
-  // (ver futats_novos_indicadores_17set.md pro detalhe completo)
   chuva_de_cantos:     { htAte20: 1.55, limite: 1.05 },
   ta_relampegando:     { htAte15: 1.40, limite: 1.07 },
   relampago_triangular:{ htAte15: 1.41, limite: 1.11 },
 };
 
-// Registra 1x cada ocorrência nova de indicador no log persistente
-// (nunca duplica a mesma ocorrência, mesmo com a página recarregando a
-// cada 30s) — assim fica um histórico do dia pra revisar depois, mesmo
-// depois que o jogo já tiver saído da lista de "ao vivo".
+// ════════════════════════════════════════════════════════════════
+// ── 23/09 — TABELA "MANDANTE FAVORITO ≤1,7" (feature 2, indicação ──
+// ── de valor). Odds justas por indicador, cortes min10/min20, JÁ  ──
+// ── cruzadas com estratégia/Seleção IA (estudo do dia 23/09, base ──
+// ── de 29.522 jogos). Over 3,5 ainda não temos pra esse recorte   ──
+// ── especifico — fica de fora por enquanto, sem inventar número.  ──
+// ════════════════════════════════════════════════════════════════
+const ODDS_FAVORITO_CASA_17 = {
+  trocacao_gonza:       { min10:{ n:88,  overHT:1.31, over05:1.02, over15:1.28, over25:1.66 }, min20:{ n:168, overHT:1.40, over05:1.04, over15:1.31, over25:1.79 } },
+  tempestade_gonza:     { min10:{ n:324, overHT:1.36, over05:1.05, over15:1.22, over25:1.60 }, min20:{ n:617, overHT:1.48, over05:1.07, over15:1.29, over25:1.73 } },
+  pressao_gonza:        { min10:{ n:606, overHT:1.40, over05:1.05, over15:1.26, over25:1.65 }, min20:{ n:1221,overHT:1.50, over05:1.07, over15:1.32, over25:1.81 } },
+  janela6min180:        { min10:{ n:95,  overHT:1.32, over05:1.01, over15:1.25, over25:1.56 }, min20:{ n:305, overHT:1.45, over05:1.04, over15:1.31, over25:1.69 } },
+  chuva_de_cantos:      { min10:{ n:189, overHT:1.47, over05:1.04, over15:1.26, over25:1.59 }, min20:{ n:464, overHT:1.54, over05:1.05, over15:1.30, over25:1.73 } },
+  ta_relampegando:      { min10:{ n:457, overHT:1.38, over05:1.06, over15:1.26, over25:1.67 }, min20:{ n:881, overHT:1.50, over05:1.07, over15:1.33, over25:1.84 } },
+  relampago_triangular: { min10:{ n:687, overHT:1.42, over05:1.06, over15:1.27, over25:1.70 }, min20:{ n:1242,overHT:1.49, over05:1.07, over15:1.31, over25:1.83 } },
+};
+const LABEL_INDICADOR_VALOR = {
+  trocacao_gonza: '🥊 Trocação Gonza', tempestade_gonza: '⛈️ Tempestade Cruzada',
+  pressao_gonza: '🟣 Pressão Gonza', janela6min180: '📊 Janela 6min/180',
+  chuva_de_cantos: '🌧️🚩 Chuva de Cantos', ta_relampegando: '⚡⚡⚡ Tá Relampegando',
+  relampago_triangular: '⚡🔺 Relâmpago Triangular',
+};
+
+// Devolve o bloco HTML de "indicação de valor" pra um indicador que bateu
+// num jogo com mandante favorito<=1,7 e placar ainda 0x0 no momento do
+// disparo — compara a odd justa do ESTUDO (base historica, com estrategia)
+// contra a odd do jogo especifico (calculadora, estado.overs). Só mostra
+// quando as duas existem; "valor" = odd do indicador <= odd da calculadora
+// (ou seja, o indicador aponta uma taxa igual/melhor que a calculadora já
+// dava sem saber que o indicador ia bater).
+function indicacaoDeValorHTML(indicadorKey, minutoTrigger, jogo, estado) {
+  const tabela = ODDS_FAVORITO_CASA_17[indicadorKey];
+  if (!tabela) return '';
+  const oc = parseFloat(jogo.odd_inicial_casa || jogo.odd_casa);
+  const of_ = parseFloat(jogo.odd_inicial_fora || jogo.odd_fora);
+  if (!isFinite(oc) || !isFinite(of_) || oc > of_ || oc > 1.7) return '';
+  const golsCasa = parseInt(jogo.gols_casa) || 0;
+  const golsFora = parseInt(jogo.gols_fora) || 0;
+  if (golsCasa !== 0 || golsFora !== 0) return ''; // só faz sentido com 0x0 no momento do disparo
+  if (!estado.overs) return '';
+
+  let bucket;
+  if (minutoTrigger <= 10) bucket = tabela.min10;
+  else if (minutoTrigger <= 20) bucket = tabela.min20;
+  else return '';
+  if (!bucket) return '';
+
+  const linhas = [];
+  const pares = [
+    ['Over 1,5', bucket.over15, estado.overs.over15],
+    ['Over 2,5', bucket.over25, estado.overs.over25],
+  ];
+  for (const [label, oddIndicador, pctCalculadora] of pares) {
+    if (oddIndicador == null || pctCalculadora == null) continue;
+    const oddCalculadora = pctParaOdd(pctCalculadora);
+    if (oddCalculadora == null) continue;
+    const temValor = oddIndicador <= oddCalculadora + 0.001;
+    const corVal = temValor ? '#3fb950' : '#8b949e';
+    const marca = temValor ? '✓ valor' : '—';
+    linhas.push(`<tr><td style="padding:3px 8px;">${label}</td><td style="padding:3px 8px;">${oddCalculadora.toFixed(2)}</td><td style="padding:3px 8px;">${oddIndicador.toFixed(2)}</td><td style="padding:3px 8px;color:${corVal};font-weight:600;">${marca}</td></tr>`);
+  }
+  if (!linhas.length) return '';
+  return `<table style="width:100%;font-size:11px;border-collapse:collapse;margin-top:4px;color:#c9d1d9;">
+    <tr style="color:#8b949e;text-align:left;"><th style="padding:3px 8px;">Mercado</th><th style="padding:3px 8px;">Calculadora</th><th style="padding:3px 8px;">Indicador</th><th style="padding:3px 8px;">Valor?</th></tr>
+    ${linhas.join('')}
+  </table>`;
+}
+
 function registrarObservacao(jogoId, jogo, indicadorKey, minuto, mercado, oddRef, estado) {
   estado.observadorRegistrado = estado.observadorRegistrado || {};
   const chave = `${indicadorKey}_${minuto}_${mercado}`;
@@ -2727,9 +2468,49 @@ function registrarObservacao(jogoId, jogo, indicadorKey, minuto, mercado, oddRef
   salvarArquivo(OBSERVADOR_FILE, observadorLog);
 }
 
-// 18/09 — calculadora completa (6 mercados), pros jogos que têm
-// estratégia/Seleção IA confirmada. `estado.overs` já vem com essas 6
-// chaves prontas do JSON pré-live diário (ver linha `estado.overs =`).
+// ════════════════════════════════════════════════════════════════
+// ── 23/09 — FEATURE 3: combos estrategia×indicador fortes pra     ──
+// ── Over 2,5 (estudo do dia 18/09, matriz completa, filtrado a    ──
+// ── odd<=1,60 e n>=25 — exclui Padrao Gonza HT, que nao temos     ──
+// ── checagem live implementada). Quando a estrategia do jogo E o  ──
+// ── indicador que bateu formam um par dessa lista, mostra a odd   ──
+// ── justa de Over 2,5 como sugestao extra no observador.          ──
+// ════════════════════════════════════════════════════════════════
+const OVER25_COMBOS_FORTES = [
+  { strat:'over05_ht', ind:'janela6min180', odd:1.17 },
+  { strat:'lay_0x1_ia', ind:'chuva_de_cantos', odd:1.29 },
+  { strat:'lay_0x1_ia', ind:'janela6min180', odd:1.30 },
+  { strat:'over05_ht', ind:'chuva_de_cantos', odd:1.35 },
+  { strat:'over05_ht', ind:'pressao_gonza', odd:1.36 },
+  { strat:'lay_0x1_ia', ind:'tempestade_gonza', odd:1.39 },
+  { strat:'favorito_ht_gonza', ind:'janela6min180', odd:1.42 },
+  { strat:'lay_manu4', ind:'tempestade_gonza', odd:1.43 },
+  { strat:'back_gonza_xg', ind:'janela6min180', odd:1.46 },
+  { strat:'over15_ia', ind:'tempestade_gonza', odd:1.46 },
+  { strat:'lay_0x1_ia', ind:'pressao_gonza', odd:1.46 },
+  { strat:'ambas_marcam', ind:'tempestade_gonza', odd:1.47 },
+  { strat:'ambas_marcam', ind:'pressao_gonza', odd:1.51 },
+  { strat:'back_gonza_xg', ind:'chuva_de_cantos', odd:1.52 },
+  { strat:'over05_ht', ind:'tempestade_gonza', odd:1.54 },
+  { strat:'ambas_marcam', ind:'ta_relampegando', odd:1.54 },
+  { strat:'over15_ia', ind:'pressao_gonza', odd:1.54 },
+  { strat:'favorito_ht_gonza', ind:'trocacao_gonza', odd:1.55 },
+  { strat:'lay_0x1_ia', ind:'trocacao_gonza', odd:1.55 },
+  { strat:'back_gonza_xg', ind:'pressao_gonza', odd:1.55 },
+  { strat:'over15_ia', ind:'chuva_de_cantos', odd:1.56 },
+  { strat:'lay_0x1_ia', ind:'ta_relampegando', odd:1.56 },
+  { strat:'over05_ht', ind:'ta_relampegando', odd:1.57 },
+  { strat:'over15_ia', ind:'ta_relampegando', odd:1.58 },
+  { strat:'over05_ht', ind:'relampago_triangular', odd:1.58 },
+  { strat:'favorito_ht_gonza', ind:'pressao_gonza', odd:1.59 },
+];
+function buscaOver25ComboForte(stratKeys, indicadorKey) {
+  for (const combo of OVER25_COMBOS_FORTES) {
+    if (combo.ind === indicadorKey && stratKeys.includes(combo.strat)) return combo;
+  }
+  return null;
+}
+
 function calculadoraCompleta(estado) {
   if (!estado.overs) return null;
   const o = estado.overs;
@@ -2749,8 +2530,6 @@ function calculadoraCompleta(estado) {
   return partes.length ? `🧮 ${partes.join(' &middot; ')}` : null;
 }
 
-// 18/09 — pros jogos SEM estratégia/Seleção IA, só a média do próximo
-// gol (bucket dinâmico pelo placar atual), sem a calculadora inteira.
 function mediaProximoGolHTML(jogo, estado) {
   if (!estado.overs) return null;
   const golsCasa = parseInt(jogo.gols_casa) || 0;
@@ -2763,7 +2542,6 @@ function mediaProximoGolHTML(jogo, estado) {
   return odd != null ? `🧮 Média próximo gol: <b>${odd.toFixed(2)}</b> (${label})` : null;
 }
 
-// 18/09 — nome do time com a odd pré-jogo ao lado, mandante e visitante.
 function nomesComOdd(jogo) {
   const oc  = parseFloat(jogo.odd_inicial_casa || jogo.odd_casa);
   const of_ = parseFloat(jogo.odd_inicial_fora || jogo.odd_fora);
@@ -2772,18 +2550,14 @@ function nomesComOdd(jogo) {
   return `${jogo.mandante}${ocTxt} x ${jogo.visitante}${ofTxt}`;
 }
 
-function obsBlocoIndicadores(jogo, estado) {
+function obsBlocoIndicadores(jogo, estado, hoje) {
   const tempoNum = parseInt(jogo.tempo) || 0;
   const passouHT = !!estado.passouHT;
   const jogoId = `${jogo.mandante}_${jogo.visitante}`;
   const golsCasaAgora = parseInt(jogo.gols_casa) || 0;
   const golsForaAgora = parseInt(jogo.gols_fora) || 0;
+  const stratKeysJogo = getEstrategiasKeys(jogo, hoje);
 
-  // 04/09 — monta a referência de "odd do jogo" (calculadora, JSON pré-
-  // live diário) pro próximo gol, dado o placar ATUAL: 0x0→Over 0,5,
-  // 1x0/0x1→Over 1,5, 2 gols→Over 2,5 etc. Até o min 20 mostra Over HT
-  // e Over Limite juntos; depois do min 20 (ou em qualquer indicador do
-  // 2T, tempoRef=999), só o Limite.
   function linhaOddJogo(tempoRef) {
     const bucket = getBucketDinamico(golsCasaAgora, golsForaAgora);
     const labelFT = { '05':'Over 0,5', '15':'Over 1,5', '25':'Over 2,5', '35':'Over 3,5' }[bucket];
@@ -2807,21 +2581,30 @@ function obsBlocoIndicadores(jogo, estado) {
     return partes.length ? ` · 🧮 odd do jogo: ${partes.join(' / ')}` : '';
   }
 
-  // 02/09 (v2) — lista única de eventos (indicadores + gols), cada um com
-  // seu minuto, ordenada cronologicamente na hora de exibir. Persiste no
-  // ESTADO do jogo (sobrevive entre ciclos e entre 1T/2T) — nunca reseta
-  // sozinho, só se o processo reiniciar (deploy) no meio do jogo.
   estado.observadorEventos = estado.observadorEventos || [];
   estado.observadorRegistrado = estado.observadorRegistrado || {};
 
-  function addEvento(chave, minuto, texto, indicadorKey, mercado, oddRef) {
+  function addEvento(chave, minuto, texto, indicadorKey, mercado, oddRef, extraHTML) {
     if (estado.observadorRegistrado[chave]) return;
     estado.observadorRegistrado[chave] = true;
-    estado.observadorEventos.push({ minuto, texto });
+    estado.observadorEventos.push({ minuto, texto: texto + (extraHTML || '') });
     registrarObservacao(jogoId, jogo, indicadorKey, minuto, mercado, oddRef, estado);
   }
 
-  // ── Gols (funciona em 1T e 2T, não depende de período) ─────────────
+  // 23/09 — monta o extra (indicação de valor + sugestão Over 2,5 combo)
+  // pra um indicador que acabou de bater — reaproveitado nos vários
+  // indicadores do 1T abaixo.
+  function extrasIndicador(indicadorKey, minutoTrigger) {
+    let html = '';
+    const valorHTML = indicacaoDeValorHTML(indicadorKey, minutoTrigger, jogo, estado);
+    if (valorHTML) html += `<div style="margin-top:4px;">${valorHTML}</div>`;
+    const combo = buscaOver25ComboForte(stratKeysJogo, indicadorKey);
+    if (combo) {
+      html += `<div style="font-size:11px;color:#d4a017;margin-top:4px;">⭐ Combo forte pra Over 2,5 (${STRAT_DISPLAY[combo.strat]||combo.strat} + este indicador) — odd justa <b>${combo.odd.toFixed(2)}</b></div>`;
+    }
+    return html;
+  }
+
   for (const ev of (jogo.eventos || [])) {
     if (ev.tipo_evento !== 'gol') continue;
     const chave = `gol_${ev.minuto}_${ev.lado}`;
@@ -2832,7 +2615,6 @@ function obsBlocoIndicadores(jogo, estado) {
     addEvento(chave, ev.minuto, `⚽ Gol aos ${ev.minuto}' — ${ladoTxt} (${golsCasaAteAqui}x${golsForaAteAqui})`, 'gol', '-', null);
   }
 
-  // ── Indicadores do 1T ────────────────────────────────────────────
   if (!passouHT && tempoNum > 0) {
     const pg = checaPressaoGonza(jogo, estado, 'casa', tempoNum) || checaPressaoGonza(jogo, estado, 'fora', tempoNum);
     if (pg) {
@@ -2841,42 +2623,48 @@ function obsBlocoIndicadores(jogo, estado) {
       const emoji = pg.tipo === 'gonza2' ? '🔵 Gonza 2' : '🟣 Pressão Gonza';
       addEvento(`pressao_gonza_${minuto}_HT/Limite`, minuto,
         `${emoji} — bateu (janela ${janelaTxt})${linhaOddJogo(tempoNum)}`,
-        'pressao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20);
+        'pressao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.pressao_gonza.htAte20,
+        extrasIndicador('pressao_gonza', minuto));
     }
 
     const cc = checaChuvaDeCantos(jogo, 1, tempoNum);
     if (cc != null) {
       addEvento(`chuva_de_cantos_${cc}_HT/Limite`, cc,
         `🌧️🚩 Chuva de Cantos — bateu ${cc}'${linhaOddJogo(cc)}`,
-        'chuva_de_cantos', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.chuva_de_cantos.htAte20);
+        'chuva_de_cantos', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.chuva_de_cantos.htAte20,
+        extrasIndicador('chuva_de_cantos', cc));
     }
 
     const trel = checaTaRelampegando(jogo, 1, tempoNum);
     if (trel != null) {
       addEvento(`ta_relampegando_${trel}_HT/Limite`, trel,
         `⚡⚡⚡ Tá Relampegando — bateu ${trel}'${linhaOddJogo(trel)}`,
-        'ta_relampegando', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.ta_relampegando.htAte15);
+        'ta_relampegando', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.ta_relampegando.htAte15,
+        extrasIndicador('ta_relampegando', trel));
     }
 
     const rtri = checaRelampagoTriangular(jogo, 1, tempoNum);
     if (rtri != null) {
       addEvento(`relampago_triangular_${rtri}_HT/Limite`, rtri,
         `⚡🔺 Relâmpago Triangular — bateu ${rtri}'${linhaOddJogo(rtri)}`,
-        'relampago_triangular', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.relampago_triangular.htAte15);
+        'relampago_triangular', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.relampago_triangular.htAte15,
+        extrasIndicador('relampago_triangular', rtri));
     }
 
     const tr = checaTrocacaoGonza(jogo, tempoNum);
     if (tr != null) {
       addEvento(`trocacao_gonza_${tr}_HT/Limite`, tr,
         `🥊 Trocação Gonza — bateu no min ${tr}${linhaOddJogo(tr)}`,
-        'trocacao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht);
+        'trocacao_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.trocacao_gonza.ht,
+        extrasIndicador('trocacao_gonza', tr));
     }
 
     const te = checaTempestadeCruzadaGonza(jogo, tempoNum);
     if (te != null) {
       addEvento(`tempestade_gonza_${te}_HT/Limite`, te,
         `⛈️ Tempestade Cruzada Gonza — bateu no min ${te}${linhaOddJogo(te)}`,
-        'tempestade_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht);
+        'tempestade_gonza', 'HT/Limite', ODDS_REFERENCIA_OBSERVADOR.tempestade_gonza.ht,
+        extrasIndicador('tempestade_gonza', te));
     }
 
     const rg = checaRaioGol5min(jogo, 0, Math.min(tempoNum, 25));
@@ -2890,11 +2678,11 @@ function obsBlocoIndicadores(jogo, estado) {
     if (j6 != null) {
       addEvento(`janela6min180_${j6}_Limite`, j6,
         `📊 Janela 6min média≥180 — bateu no min ${j6}${linhaOddJogo(j6)}`,
-        'janela6min180', 'Limite', ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T);
+        'janela6min180', 'Limite', ODDS_REFERENCIA_OBSERVADOR.janela6min180.limite1T,
+        extrasIndicador('janela6min180', j6));
     }
   }
 
-  // ── Indicadores do 2T (todos, até min 70) ───────────────────────
   if (passouHT && tempoNum >= 46 && tempoNum <= 70) {
     const pg2 = checaPressaoGonza(jogo, estado, 'casa', tempoNum) || checaPressaoGonza(jogo, estado, 'fora', tempoNum);
     if (pg2) {
@@ -2961,10 +2749,6 @@ function obsBlocoIndicadores(jogo, estado) {
   return ordenados.map(e => `<p class="obs-linha">${e.texto}</p>`).join('');
 }
 
-// 07/09 — badges de estratégia própria e Seleção IA pra mostrar no
-// Observador, separado visualmente (🔵 própria vs 🤖 Seleção IA usam
-// emojis diferentes dentro do próprio STRAT_DISPLAY, então só precisa
-// listar os nomes já formatados).
 function getEstrategiasKeys(jogo, hoje) {
   const pendJogo = pendentes.filter(p =>
     p.data === hoje && p.tipo === 'pre' &&
@@ -2979,16 +2763,6 @@ function getEstrategiasBadgeHTML(strats) {
   return `<p class="obs-linha" style="opacity:0.85;font-size:12px;">${nomes}</p>`;
 }
 
-// 18/09 — REGRAS DE EXIBIÇÃO (definidas com o Luis):
-//  1. Jogo com estratégia/Seleção IA → SEMPRE aparece, mesmo sem nenhum
-//     indicador batido ainda. Fica no grupo de cima.
-//  2. Jogo sem estratégia/Seleção IA → só entra na lista a partir do
-//     momento que algum indicador bater; enquanto isso, nem aparece.
-//     Sempre abaixo do grupo com estratégia.
-//  3. Com estratégia → calculadora completa (6 mercados) ao lado.
-//     Sem estratégia → só a média do próximo gol.
-//  4. Nome dos times sempre com a odd pré-jogo ao lado.
-//  5. Combo Forte mantém a borda dourada e a tag, sem mudança.
 app.get('/observador', (req, res) => {
   const jogosAtivos = Object.entries(estadoLive).filter(([, e]) => !e.encerrado && e.jogo);
   if (!jogosAtivos.length) {
@@ -3036,22 +2810,18 @@ app.get('/observador', (req, res) => {
 
   for (const [jogoId, estado] of jogosAtivos) {
     const jogo = estado.jogo;
-    const eventosHTML = obsBlocoIndicadores(jogo, estado);
+    const eventosHTML = obsBlocoIndicadores(jogo, estado, hoje);
     const strats = getEstrategiasKeys(jogo, hoje);
     const temEstrategia = strats.length > 0;
 
     if (temEstrategia) {
       comEstrategia.push({ jogo, estado, eventosHTML, comboForte: !!estado.novoIndicador?.comboTag });
     } else {
-      // sem estratégia: só entra se já tiver pelo menos 1 indicador batido
-      // (obsBlocoIndicadores devolve a mensagem "nenhum indicador ainda"
-      // quando a lista tá vazia — nesse caso, o jogo fica de fora)
       const temIndicador = !eventosHTML.includes('Nenhum indicador bateu ainda');
       if (temIndicador) semEstrategia.push({ jogo, estado, eventosHTML });
     }
   }
 
-  // combo forte primeiro dentro do grupo com estratégia
   comEstrategia.sort((a, b) => (b.comboForte ? 1 : 0) - (a.comboForte ? 1 : 0));
 
   const blocoComEstrategia = comEstrategia
@@ -3066,12 +2836,56 @@ app.get('/observador', (req, res) => {
     (comEstrategia.length ? tituloComEstrategia + blocoComEstrategia : '<p class="ms-muted ms-small">Nenhum jogo com estratégia/Seleção IA ao vivo agora.</p>') +
     (semEstrategia.length ? tituloSemEstrategia + blocoSemEstrategia : '');
 
-  res.send(msPaginaHTML(`<p class="ms-muted" style="margin-bottom:12px;">🔍 Observador — ${jogosAtivos.length} jogo(s) ao vivo · não manda nada, só pra acompanhar</p><p style="margin-bottom:16px;"><a href="/observador/historico" style="color:#4fd1c5;">📜 Ver histórico de hoje</a></p>${corpo}`));
+  res.send(msPaginaHTML(`<p class="ms-muted" style="margin-bottom:12px;">🔍 Observador — ${jogosAtivos.length} jogo(s) ao vivo · não manda nada, só pra acompanhar</p><p style="margin-bottom:16px;"><a href="/observador/historico" style="color:#4fd1c5;">📜 Ver histórico de hoje</a> &middot; <a href="/combo-possiveis" style="color:#4fd1c5;">⭐ Combos possíveis do dia</a></p>${corpo}`));
 });
 
-// Histórico do dia — tudo que a página /observador já registrou, mais
-// recente primeiro. Filtro opcional por data (?data=YYYY-MM-DD), senão
-// mostra só hoje.
+// ════════════════════════════════════════════════════════════════
+// ── 23/09 — FEATURE 1: "Combos possíveis do dia" — mostra, ANTES  ──
+// ── de qualquer indicador disparar, quais jogos de hoje já têm    ──
+// ── uma das estratégias do Combo HT e/ou Combo Gol batida pré-live.──
+// ── Pura leitura de `pendentes`, nao depende de jogo estar ao vivo.──
+// ════════════════════════════════════════════════════════════════
+app.get('/combo-possiveis', (req, res) => {
+  const hoje = dataHoje();
+  const pendHoje = pendentes.filter(p => p.data === hoje && p.tipo === 'pre');
+
+  const porJogo = {};
+  for (const p of pendHoje) {
+    const k = p.hora + '|' + p.jogo;
+    if (!porJogo[k]) porJogo[k] = { hora: p.hora, jogo: p.jogo, strats: new Set() };
+    porJogo[k].strats.add(p.strat);
+  }
+
+  const candidatos = [];
+  for (const info of Object.values(porJogo)) {
+    const stratsArr = [...info.strats];
+    const combosHT = stratsArr.filter(s => ESTRATEGIAS_COMBO_HT.includes(s));
+    const combosGol = stratsArr.filter(s => ESTRATEGIAS_COMBO_GOL.includes(s));
+    if (!combosHT.length && !combosGol.length) continue;
+    candidatos.push({ ...info, combosHT, combosGol });
+  }
+  candidatos.sort((a, b) => a.hora.localeCompare(b.hora));
+
+  if (!candidatos.length) {
+    return res.send(msPaginaHTML('<p><a href="/observador" style="color:#4fd1c5;">← Voltar pro observador</a></p><p class="ms-empty">Nenhum jogo de hoje com estratégia do Combo HT/Gol batida pré-live ainda.</p>'));
+  }
+
+  const corpo = candidatos.map(c => {
+    const badges = [];
+    if (c.combosHT.length) badges.push(`<span style="background:#f0b42920;color:#f0b429;font-size:11px;padding:3px 8px;border-radius:6px;margin-right:6px;">Combo HT: ${c.combosHT.map(s => STRAT_DISPLAY[s]||s).join(' · ')}</span>`);
+    if (c.combosGol.length) badges.push(`<span style="background:#4fd1c520;color:#4fd1c5;font-size:11px;padding:3px 8px;border-radius:6px;">Combo Gol: ${c.combosGol.map(s => STRAT_DISPLAY[s]||s).join(' · ')}</span>`);
+    return `<div class="ms-jogo">
+      <div class="ms-jogo-header">
+        <p class="ms-jogo-nome">${c.jogo}</p>
+        <p class="ms-muted ms-small">${c.hora}</p>
+      </div>
+      <div>${badges.join(' ')}</div>
+    </div>`;
+  }).join('');
+
+  res.send(msPaginaHTML(`<p><a href="/observador" style="color:#4fd1c5;">← Voltar pro observador</a></p><p class="ms-muted" style="margin:12px 0;">⭐ Combos possíveis hoje — jogos que já têm estratégia do Combo HT/Gol batida pré-live, mesmo antes de qualquer indicador ao vivo confirmar (${candidatos.length} jogo(s))</p>${corpo}`));
+});
+
 app.get('/observador/historico', (req, res) => {
   const dataFiltro = (req.query.data || dataHoje()).trim();
   const registros = observadorLog
@@ -3110,7 +2924,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_70',
+  status: 'ok', version: 'server_75',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -3128,7 +2942,6 @@ app.post('/pendentes', (req, res) => {
   res.json({ ok: true, total: pendentes.length });
 });
 
-// 25/08 — histórico de validação dos novos indicadores (Trocação/Tempestade)
 app.get('/validacao-novos-indicadores', (req, res) => {
   const greens = validacaoNovosIndicadores.filter(v => v.status === 'green').length;
   const reds = validacaoNovosIndicadores.filter(v => v.status === 'red').length;
@@ -3350,11 +3163,6 @@ app.get('/momentum-status', async (req, res) => {
   }
 });
 
-// ── Exportar histórico bruto de momentum (JSON completo) ──────────
-// Rota temporária pra baixar o arquivo direto do Volume e analisar fora.
-// Uso: /interno/exportar-momentum?token=SEU_INTERNAL_TOKEN
-// 12/09 — aceita ?desde=YYYY-MM-DD (opcional) pra devolver só os jogos
-// a partir dessa data, evitando baixar o arquivo inteiro toda vez.
 app.get('/interno/exportar-momentum', (req, res) => {
   if (!INTERNAL_TOKEN || req.query.token !== INTERNAL_TOKEN) {
     return res.status(403).send('Token inválido.');
@@ -3363,13 +3171,11 @@ app.get('/interno/exportar-momentum', (req, res) => {
     return res.status(404).send('Arquivo momentum_historico.json não encontrado.');
   }
 
-  const desde = (req.query.desde || '').trim(); // "2026-09-05"
+  const desde = (req.query.desde || '').trim();
   if (!desde) {
     return res.download(MOMENTUM_HISTORICO_FILE, 'momentum_historico.json');
   }
 
-  // Filtra em memória — momentumHistorico já está carregado no processo,
-  // não precisa reler o arquivo do disco.
   const filtrado = {};
   for (const [confronto, lista] of Object.entries(momentumHistorico)) {
     const mantidos = lista.filter(reg => {
@@ -3384,11 +3190,6 @@ app.get('/interno/exportar-momentum', (req, res) => {
   res.send(JSON.stringify(filtrado));
 });
 
-// ── Exportar histórico da API do FUTATS (baixado por baixar_historico.js) ──
-// Consolida os arquivos diarios salvos em FUTATS_HIST_DIR num unico JSON.
-// Uso:
-//   Tudo: /interno/exportar-historico-futats?token=SEU_INTERNAL_TOKEN
-//   Intervalo: .../interno/exportar-historico-futats?token=SEU_INTERNAL_TOKEN&desde=2026-01-01&ate=2026-03-31
 app.get('/interno/exportar-historico-futats', (req, res) => {
   if (!INTERNAL_TOKEN || req.query.token !== INTERNAL_TOKEN) {
     return res.status(403).send('Token inválido.');
@@ -3438,7 +3239,6 @@ app.get('/interno/exportar-historico-futats', (req, res) => {
   res.send(JSON.stringify(todosOsJogos));
 });
 
-// ── Verificar quantos dias/jogos ja foram baixados (rapido, sem baixar tudo) ──
 app.get('/interno/status-historico-futats', (req, res) => {
   if (!INTERNAL_TOKEN || req.query.token !== INTERNAL_TOKEN) {
     return res.status(403).send('Token inválido.');
@@ -3470,9 +3270,6 @@ app.get('/interno/status-historico-futats', (req, res) => {
   });
 });
 
-// ── Histórico do momentum — jogos já encerrados e arquivados ──────
-// Lista todos os jogos arquivados (com filtro opcional por data/time),
-// cada um linkando pra reabrir o gráfico completo dele.
 app.get('/momentum-status/historico', (req, res) => {
   const filtroData = (req.query.data || '').trim();
   const filtroJogo  = (req.query.jogo || '').trim().toLowerCase();
@@ -3507,8 +3304,6 @@ app.get('/momentum-status/historico', (req, res) => {
   res.send(msPaginaHTML(`<p class="ms-muted" style="margin-bottom:12px;">${linhas.length} jogo(s) arquivado(s)</p>${corpoLinhas}`));
 });
 
-// Reabre o gráfico completo de UM jogo já encerrado, reaproveitando a
-// mesma função de desenho usada nos jogos ao vivo (msHTMLJogo).
 app.get('/momentum-status/historico/:jogoId', (req, res) => {
   const jogoId = req.params.jogoId;
   const idx = parseInt(req.query.idx) || 0;
@@ -3592,7 +3387,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v45c na porta ${PORT}`);
+  console.log(`FUTATS Server v75 na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -3607,32 +3402,15 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v45c iniciado!</b>\n' +
-    '🆕 Odds justas nos alertas — estratégia (pré-live) + jogo (pré-live diário) + combinada, mercado escolhido dinamicamente pelo placar atual (HT e Limite)\n' +
-    '🆕 Trocação Gonza (🥊) e Tempestade Cruzada Gonza (⛈️) — novos indicadores em modo VALIDAÇÃO, só pro chat pessoal: até min 10 dispara na hora sugerindo Over HT; depois disso só dispara na janela 41-45 se o placar não mudou; confirma green/red automaticamente no HT\n' +
-    '✅ Horários das APIs ajustados conforme documentação\n' +
-    '✅ Resumo NÃO é mais reenviado automaticamente ao reiniciar\n' +
-    '✅ HT pego direto da API (gols_casa_ht/gols_fora_ht)\n' +
-    '✅ Fix is2T/is1T — campo periodo (inexistente na API) removido, usa histórico do jogo\n' +
-    '✅ Gol no Final / Over 0,5 2T — raio confirmado via periodo do evento (precisão total)\n' +
-    '✅ Lay 0x1/1x0/0x2/0x3/Goleada — só até min 20\n' +
-    '✅ Fix Over 0,5 Gonza (Gol Limite) — mercado agora é total+0,5 após min 60 / total+1,5 antes, nunca mais fixo em Over 1,5\n' +
-    '✅ Indicadores próprios Pressão Gonza & Jogo Aberto (substituem o raio do futats.com nas entradas)\n' +
-    '✅ Fix: indicadores próprios agora respeitam a janela de cada estratégia (gol_no_final só 2T/min80, over05_ht só 1T, lay_0x1_ia/1x0_ia/0x2_manu/0x3/gol_visit/gol_mand até min 20)\n' +
-    '✅ Fix: placar/minuto das mensagens dos indicadores próprios agora atualiza a cada ciclo (antes ficava congelado no momento da entrada)\n' +
-    '✅ Gol no Final agora checa Pressão Gonza nos dois lados (favorito e zebra), não só no favorito\n' +
-    '✅ Estratégias de gols já alertadas (raio antigo ou indicador próprio) agora recebem confirmação extra na mesma mensagem quando o outro indicador também bate (Pressão Gonza ou Jogo Aberto)\n' +
-    '✅ Reconfirmação por período: qualquer estratégia (lado ou gols) já alertada agora anota até 1x por tempo (1T/2T) quando Pressão Gonza ou Jogo Aberto bate de novo, sem duplicar alerta'
+    '🚀 <b>FUTATS Server v75 iniciado!</b>\n' +
+    '🆕 Combos possíveis do dia — nova página /combo-possiveis, mostra ANTES do jogo começar quais já têm estratégia do Combo HT/Gol batida pré-live\n' +
+    '🆕 Indicação de valor — pra jogos com mandante favorito ≤1,7 e 0x0, compara a odd justa do indicador com a odd da calculadora do jogo (Over 1,5/2,5), mostrando "✓ valor" quando o indicador bate ou supera\n' +
+    '🆕 Sugestão de Over 2,5 — quando bate uma das combinações fortes estratégia×indicador (odd≤1,60 validada), mostra a odd justa de Over 2,5 direto no observador\n' +
+    '(demais mudanças mantidas do server_70)'
   );
 
   await enviarCardMatinal();
 });
-// ===== INTEGRAÇÃO: download automático do histórico FUTATS =====
-// Adicionar isso no FINAL do server.js (depois de app.listen(...)).
-// Checa a cada 15 minutos se está na janela de horário (01h-04h BRT);
-// se estiver e ainda tiver dias pra baixar, dispara o download.
-// A própria baixar_historico.js já controla tudo (janela, delay, retomada) —
-// aqui só precisamos chamar ela periodicamente.
 
 const { main: baixarHistoricoFutats } = require('./baixar_historico.js');
 
@@ -3640,6 +3418,6 @@ setInterval(() => {
   baixarHistoricoFutats().catch(err => {
     console.error('[baixar_historico] erro:', err.message);
   });
-}, 15 * 60 * 1000); // a cada 15 minutos
+}, 15 * 60 * 1000);
 
 console.log('[baixar_historico] agendador ativo — roda automaticamente entre 01h-04h BRT');
