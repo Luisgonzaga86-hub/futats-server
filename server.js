@@ -811,14 +811,39 @@ async function processarReforcoChutesCasoB(jogo, estado, jogoId, hoje) {
   console.log(`[reforço chutes] ${jogoId} → alerta enviado (${totais}/${noGol}).`);
 }
 
-// ── ITEM 3 — 3 Indicadores ───────────────────────────────────────────────
+// ── ITEM 3 — 3 Indicadores (regra v77, 29/09) ─────────────────────────────
 // 3+ dos 7 indicadores validados batendo em 3+ minutos diferentes no 1T,
-// sem gol até o 3º disparo. Favorito <=1,6 → alerta novo no Telegram +
-// borda dourada + 🔥 no observador. Favorito >1,6 → só aparece no
-// observador, sem destaque e sem Telegram.
-// Referência (fav <=1,6, n=184): 90,8%, odd justa 1,10 no Over Limite.
-const TRES_IND_ODD_JUSTA = 1.10;
+// placar 0x0 ou 1 gol. Com 1 gol, os 3 indicadores contam só DEPOIS do gol
+// (a contagem recomeça do zero, como se fosse 0x0).
+// ALERTA (Telegram + borda dourada + 🔥) com favorito <= 1,6, em QUALQUER
+// minuto do 1T (igual ao v76):
+//   • Entrada 1 — Gol Limite (+1 gol): 0x0 → Over 0,5 · 1 gol → Over 1,5
+//   • Entrada 2 — SÓ se o 3º disparo for até o min 35: +2 gols
+//       0x0 → Over 1,5 (jogo todo) · 1 gol → Over 2,5 (jogo todo)
+// Favorito >1,6 → só aparece no observador, sem destaque e sem Telegram.
+// 2+ gols no 3º disparo → ignora.
+// Base 01/01 a 16/09/2026, fav<=1,6:
+//   +1 gol: 3º disparo até 35 → 92,5% / 1,08 · 36-45 → ~86% / 1,16
+//   +2 gols (até 35): n=1.584, 73,6% / 1,36 · simulação a 1,50: +R$12.710
 const TRES_IND_FAV_MAX = 1.6;
+const TRES_IND_MIN_MAX = 35;          // corte do +2 gols
+const TRES_IND_ODD_MINIMA = 1.50;     // entrada mínima do +2 gols
+const TRES_IND_ODDS = {
+  0: { f1_15: 1.27, f16_25: 1.43, f26_35: 1.44, mais1_ate35: 1.08, mais1_36_45: 1.16 },
+  1: { f1_15: 1.21, f16_25: 1.25, f26_35: 1.44, mais1_ate35: 1.07, mais1_36_45: 1.17 }, // 3 indicadores depois do gol (n=518)
+};
+function oddJustaTresIndMais1(golsNoDisparo, minuto) {
+  const t = TRES_IND_ODDS[golsNoDisparo];
+  if (!t) return null;
+  return minuto <= TRES_IND_MIN_MAX ? t.mais1_ate35 : t.mais1_36_45;
+}
+function oddJustaTresInd(golsNoDisparo, minuto) {
+  const t = TRES_IND_ODDS[golsNoDisparo];
+  if (!t || minuto > TRES_IND_MIN_MAX) return null;
+  if (minuto <= 15) return t.f1_15;
+  if (minuto <= 25) return t.f16_25;
+  return t.f26_35;
+}
 const TRES_IND_LABEL = {
   trocacao_gonza: '🥊 Trocação Gonza', tempestade_gonza: '⛈️ Tempestade Cruzada',
   pressao_gonza: '🟣 Pressão Gonza', janela6min180: '📊 Janela 6min/180',
@@ -835,23 +860,48 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   const ti = estado.tresInd;
   if (ti.terceiroMin != null || ti.descartado) return;
 
+  // Com 1 gol: a contagem RECOMEÇA depois do gol — os 3 indicadores têm
+  // que bater todos depois dele, em minutos diferentes, como se fosse um
+  // 0x0 novo. Gol no meio da contagem zera o que já tinha batido.
+  const golsAgora = (parseInt(jogo.gols_casa) || 0) + (parseInt(jogo.gols_fora) || 0);
+  if (ti.golsBase == null || golsAgora !== ti.golsBase) {
+    if (golsAgora >= 2) { ti.descartado = true; return; }
+    if (golsAgora === 1) {
+      const golsEv = (jogo.eventos || [])
+        .filter(e => e.tipo_evento === 'gol' && e.minuto <= tempoNum)
+        .map(e => e.minuto);
+      ti.after = golsEv.length ? Math.max(...golsEv) : tempoNum;
+      ti.mins = {};
+    } else {
+      ti.after = 0;
+    }
+    ti.golsBase = golsAgora;
+  }
+  const after = ti.after || 0;
+  const jv = after > 0 ? {
+    ...jogo,
+    eventos: (jogo.eventos || []).filter(e => e.minuto > after),
+    momentum: (jogo.momentum || []).filter(m => m.minuto > after),
+  } : jogo;
+
   const ate = Math.min(tempoNum, 45);
   const novos = {
-    trocacao_gonza:       checaTrocacaoGonza(jogo, ate),
-    tempestade_gonza:     checaTempestadeCruzadaGonza(jogo, ate),
-    janela6min180:        checaJanela6min180(jogo, ate),
-    chuva_de_cantos:      checaChuvaDeCantos(jogo, 1, ate),
-    ta_relampegando:      checaTaRelampegando(jogo, 1, ate),
-    relampago_triangular: checaRelampagoTriangular(jogo, 1, ate),
+    trocacao_gonza:       checaTrocacaoGonza(jv, ate),
+    tempestade_gonza:     checaTempestadeCruzadaGonza(jv, ate),
+    janela6min180:        checaJanela6min180(jv, ate),
+    chuva_de_cantos:      checaChuvaDeCantos(jv, after + 1, ate),
+    ta_relampegando:      checaTaRelampegando(jv, after + 1, ate),
+    relampago_triangular: checaRelampagoTriangular(jv, after + 1, ate),
   };
   // Pressão Gonza só existe "no minuto atual" — grava a 1ª vez que bate.
-  // Definição corrigida (17/09): só o lado do favorito.
-  if (ti.mins.pressao_gonza == null && tempoNum <= 45) {
-    const pg = checaPressaoGonza(jogo, estado, getFavorito(jogo), tempoNum);
+  // Definição corrigida (17/09): só o lado do favorito. Com gol, a janela
+  // de 5 min tem que estar inteira depois do gol.
+  if (ti.mins.pressao_gonza == null && tempoNum <= 45 && tempoNum - 4 > after) {
+    const pg = checaPressaoGonza(jv, estado, getFavorito(jogo), tempoNum);
     if (pg) novos.pressao_gonza = pg.minutoChute || tempoNum;
   }
   for (const [k, m] of Object.entries(novos)) {
-    if (m != null && m <= 45 && ti.mins[k] == null) ti.mins[k] = m;
+    if (m != null && m > after && m <= 45 && ti.mins[k] == null) ti.mins[k] = m;
   }
 
   // 3 indicadores diferentes em 3 minutos diferentes
@@ -869,8 +919,9 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   const terceiro = escolhidos[2][1];
   const golsCasa = parseInt(jogo.gols_casa) || 0;
   const golsFora = parseInt(jogo.gols_fora) || 0;
-  // sem gol até o 3º disparo · e não alerta atrasado (ex.: restart do server)
-  if (golsCasa + golsFora > 0 || tempoNum - terceiro > 5) {
+  const golsNoDisparo = golsCasa + golsFora;
+  // 2+ gols no 3º disparo fica fora da regra · e não alerta atrasado (ex.: restart do server)
+  if (golsNoDisparo > 1 || tempoNum - terceiro > 5) {
     ti.descartado = true;
     return;
   }
@@ -879,27 +930,46 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   ti.terceiroMin = terceiro;
   ti.escolhidos = escolhidos;
   ti.oddFav = oddFav;
+  ti.golsNoDisparo = golsNoDisparo;
   ti.favoritoOk = oddFav != null && oddFav <= TRES_IND_FAV_MAX;
+  ti.alerta = ti.favoritoOk;                       // qualquer minuto do 1T
+  ti.mais2 = ti.favoritoOk && terceiro <= TRES_IND_MIN_MAX;
+  ti.motivoSemAlerta = ti.favoritoOk ? null : 'favorito acima de 1,6';
   ti.resumo = escolhidos.map(([k, m]) => `${TRES_IND_LABEL[k] || k} ${m}'`).join(' · ');
-  console.log(`[3 indicadores] ${jogoId} → ${ti.resumo} · fav ${oddFav} · ${ti.favoritoOk ? 'ALERTA' : 'só observador'}`);
+  ti.mercadoLimite = golsNoDisparo === 0 ? 'Over 0,5 Limite (jogo todo)' : 'Over 1,5 Limite (jogo todo)';
+  ti.oddLimite = oddJustaTresIndMais1(golsNoDisparo, terceiro);
+  ti.mercadoMais2 = golsNoDisparo === 0 ? 'Over 1,5 (jogo todo)' : 'Over 2,5 (jogo todo)';
+  ti.oddMais2 = ti.mais2 ? oddJustaTresInd(golsNoDisparo, terceiro) : null;
+  console.log(`[3 indicadores] ${jogoId} → ${ti.resumo} · fav ${oddFav} · ${golsNoDisparo} gol(s) · ${ti.alerta ? 'ALERTA' + (ti.mais2 ? ' (+2 gols também)' : ' (só Limite)') : 'só observador (' + ti.motivoSemAlerta + ')'}`);
 
-  if (!ti.favoritoOk) return;
+  if (!ti.alerta) return;
 
-  const bucket = getBucketDinamico(golsCasa, golsFora);
-  const mercado = `${LABEL_BUCKET_LIMITE[bucket] || 'Over'} Limite (jogo todo)`;
   const placar = `${golsCasa}x${golsFora}`;
-
-  const registro = {
+  const baseRegistro = {
     jogoId, jogo: `${jogo.mandante} x ${jogo.visitante}`, data: hoje,
-    tipo: 'tres_indicadores', indicadores: escolhidos.map(([k, m]) => ({ indicador: k, minuto: m })),
-    minutoBatido: terceiro, placarNoMomento: placar, bucket, mercado,
-    caso: 'tres_indicadores', oddFavorito: oddFav, oddJusta: TRES_IND_ODD_JUSTA,
+    indicadores: escolhidos.map(([k, m]) => ({ indicador: k, minuto: m })),
+    minutoBatido: terceiro, placarNoMomento: placar, oddFavorito: oddFav,
     status: 'pendente',
   };
-  validacaoNovosIndicadores.push(registro);
-  salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+  // Entrada 1 — Gol Limite (+1 gol), sempre
+  validacaoNovosIndicadores.push({
+    ...baseRegistro, tipo: 'tres_indicadores', caso: 'tres_indicadores',
+    bucket: golsNoDisparo === 0 ? '05' : '15', mercado: ti.mercadoLimite,
+    oddJusta: ti.oddLimite, golsNecessarios: 1,
+  });
   ti.index = validacaoNovosIndicadores.length - 1;
+  // Entrada 2 — +2 gols, só com 3º disparo até o min 35
+  if (ti.mais2) {
+    validacaoNovosIndicadores.push({
+      ...baseRegistro, tipo: 'tres_indicadores_mais2', caso: 'tres_indicadores_mais2',
+      bucket: golsNoDisparo === 0 ? '15' : '25', mercado: ti.mercadoMais2,
+      oddJusta: ti.oddMais2, golsNecessarios: 2,
+    });
+    ti.indexMais2 = validacaoNovosIndicadores.length - 1;
+  }
+  salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
 
+  const fmt = (o) => o.toFixed(2).replace('.', ',');
   const strats = getEstrategiasKeys(jogo, hoje);
   const partes = [
     '🔥 3 INDICADORES 🔥',
@@ -909,9 +979,12 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
     '─────────────────',
     ...escolhidos.map(([k, m]) => `• ${TRES_IND_LABEL[k] || k} — ${m}'`),
     strats.length ? strats.map(k => STRAT_DISPLAY[k] || k).join(' · ') : null,
-    `➜ ENTRAR: ${mercado}`,
-    `📈 Odd justa ${TRES_IND_ODD_JUSTA.toFixed(2).replace('.', ',')} (favorito ≤1,6)`,
-    linhaValorTelegram(TRES_IND_ODD_JUSTA, bucket, estado),
+    `➜ ENTRAR 1: ${ti.mercadoLimite} — odd justa ${fmt(ti.oddLimite)}`,
+    linhaValorTelegram(ti.oddLimite, golsNoDisparo === 0 ? '05' : '15', estado),
+    ti.mais2
+      ? `➜ ENTRAR 2: ${ti.mercadoMais2} — +2 gols · odd justa ${fmt(ti.oddMais2)} · entrada mínima ${fmt(TRES_IND_ODD_MINIMA)}`
+      : `⚠️ +2 gols não recomendado (3º disparo depois do min ${TRES_IND_MIN_MAX}) — só Gol Limite`,
+    ti.mais2 ? linhaValorTelegram(ti.oddMais2, golsNoDisparo === 0 ? '15' : '25', estado) : null,
   ];
   const texto = partes.filter(Boolean).join('\n') + linksExchanges(jogo.urls_exchanges || {});
   ti.msgIds = await sendTelegramPessoal(texto);
@@ -929,24 +1002,41 @@ async function confirmarNovosAlertasNoFim(jogo, estado) {
   }
   const placarFT = `${golsCasaFT}x${golsForaFT}`;
 
-  const alvos = [
-    { index: estado.reforcoChutes?.index, titulo: '💪 Reforço Caso B + chutes' },
-    { index: estado.tresInd?.index,       titulo: '🔥 3 Indicadores' },
-  ];
-  for (const { index, titulo } of alvos) {
-    if (index == null) continue;
+  const fechar = (index) => {
+    if (index == null) return null;
     const registro = validacaoNovosIndicadores[index];
-    if (!registro || registro.status !== 'pendente') continue;
-
+    if (!registro || registro.status !== 'pendente') return null;
     const [baseCasa, baseFora] = registro.placarNoMomento.split('x').map(Number);
-    const green = (golsCasaFT + golsForaFT) > (baseCasa + baseFora);
+    const golsDepois = (golsCasaFT + golsForaFT) - (baseCasa + baseFora);
+    const green = golsDepois >= (registro.golsNecessarios || 1);
     registro.status = green ? 'green' : 'red';
     registro.ftFinal = placarFT;
-    salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+    registro.golsDepois = golsDepois;
+    return registro;
+  };
 
-    const emoji = green ? '✅ GREEN' : '❌ RED';
-    const texto = `${emoji} — Validação ${titulo}\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → FT: ${placarFT}\n➜ Mercado: ${registro.mercado}`;
+  // Reforço Caso B + chutes
+  const rReforco = fechar(estado.reforcoChutes?.index);
+  // 3 Indicadores — Limite e (se houver) +2 gols, numa mensagem só
+  const rLimite = fechar(estado.tresInd?.index);
+  const rMais2 = fechar(estado.tresInd?.indexMais2);
+  if (rReforco || rLimite || rMais2) salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+
+  const emo = (r) => r.status === 'green' ? '✅ GREEN' : '❌ RED';
+  if (rReforco) {
+    const texto = `${emo(rReforco)} — Validação 💪 Reforço Caso B + chutes\n⚽ ${rReforco.jogo}\n⏱ ${rReforco.minutoBatido}' · 📊 ${rReforco.placarNoMomento} → FT: ${placarFT}\n➜ Mercado: ${rReforco.mercado}`;
     await sendTelegramPessoal(texto).catch(() => {});
+  }
+  if (rLimite || rMais2) {
+    const ref = rLimite || rMais2;
+    const linhas = [
+      `🔥 Validação 3 Indicadores`,
+      `⚽ ${ref.jogo}`,
+      `⏱ ${ref.minutoBatido}' · 📊 ${ref.placarNoMomento} → FT: ${placarFT}`,
+    ];
+    if (rLimite) linhas.push(`${emo(rLimite)} — Entrada 1: ${rLimite.mercado}`);
+    if (rMais2) linhas.push(`${emo(rMais2)} — Entrada 2: ${rMais2.mercado} (+2 gols)`);
+    await sendTelegramPessoal(linhas.join('\n')).catch(() => {});
   }
 }
 
@@ -3069,11 +3159,13 @@ app.get('/observador', (req, res) => {
     }
     const ti = estado.tresInd;
     if (ti?.terceiroMin != null) {
-      if (ti.favoritoOk) {
+      const f2 = (o) => o != null ? o.toFixed(2).replace('.', ',') : '-';
+      if (ti.alerta) {
         estiloExtra = 'border:1.5px solid #f0b429;';
-        tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores — ${ti.resumo} · Over Limite odd justa 1,10</p>`;
+        const mais2Txt = ti.mais2 ? ` · +2 gols ${ti.mercadoMais2} ${f2(ti.oddMais2)}` : ' · +2 gols não (depois do min 35)';
+        tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores — ${ti.resumo} · ${ti.mercadoLimite} ${f2(ti.oddLimite)}${mais2Txt}</p>`;
       } else {
-        tagHTML += `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">3 Indicadores — ${ti.resumo} (favorito acima de 1,6)</p>`;
+        tagHTML += `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">3 Indicadores — ${ti.resumo} (${ti.motivoSemAlerta || 'fora da regra'})</p>`;
       }
     }
 
@@ -3109,7 +3201,7 @@ app.get('/observador', (req, res) => {
     const temEstrategia = strats.length > 0;
 
     if (temEstrategia) {
-      comEstrategia.push({ jogo, estado, eventosHTML, comboForte: !!estado.novoIndicador?.comboTag || !!estado.reforcoChutes || !!estado.tresInd?.favoritoOk });
+      comEstrategia.push({ jogo, estado, eventosHTML, comboForte: !!estado.novoIndicador?.comboTag || !!estado.reforcoChutes || !!estado.tresInd?.alerta });
     } else {
       const temIndicador = !eventosHTML.includes('Nenhum indicador bateu ainda') || !!estado.tendenciaCantos || estado.tresInd?.terceiroMin != null; // 29/09
       if (temIndicador) semEstrategia.push({ jogo, estado, eventosHTML });
@@ -3218,7 +3310,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_76',
+  status: 'ok', version: 'server_77',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -3681,7 +3773,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v76 na porta ${PORT}`);
+  console.log(`FUTATS Server v77 na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -3696,12 +3788,12 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v76 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v77 iniciado!</b>\n' +
+    '🔄 🔥 3 Indicadores: continua valendo o 1T todo (Gol Limite, favorito ≤1,6), agora também com 1 gol no placar (3 indicadores contados só depois do gol). Se o 3º disparo for até o min 35, o alerta traz também a entrada de +2 gols (0x0 = Over 1,5 · 1 gol = Over 2,5), entrada mínima 1,50\n' +
     '🔧 Indicação de valor corrigida — agora "✓ valor" quando a odd do indicador é IGUAL ou MAIOR que a da calculadora\n' +
     '🆕 💪 Reforço Caso B + filtro de chutes — no HT, se o 1T teve 14+ chutes / 3+ no gol, manda um 2º alerta (Combo HT/Forte não mudam)\n' +
-    '🆕 🔥 3 Indicadores — 3 indicadores em 3 minutos diferentes no 1T, sem gol, favorito ≤1,6 → alerta novo (odd justa 1,10)\n' +
     '🆕 🚩 Tendência de escanteios — raio + 2 cantos do favorito até o min10, só no observador\n' +
-    '(demais mudanças mantidas do server_75)'
+    '(demais mudanças mantidas do server_76)'
   );
 
   await enviarCardMatinal();
