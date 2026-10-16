@@ -179,6 +179,15 @@ async function sendTelegramPessoal(msg, extra = {}) {
   return ids;
 }
 
+// ── 16/10 — Alertas OFICIAIS (fim da validação) ─────────────────────
+// Só Combo Forte, Combo HT, 3 Indicadores, Reforço de chutes e Cantos
+// vão pro Telegram. Destino padrão = grupos principais (sendTelegram).
+// ALERTAS_OFICIAIS_DESTINO=validacao volta a mandar pro grupo de validação.
+const ALERTAS_OFICIAIS_DESTINO = process.env.ALERTAS_OFICIAIS_DESTINO || 'principal';
+async function sendTelegramOficial(msg, extra = {}) {
+  return ALERTAS_OFICIAIS_DESTINO === 'validacao' ? sendTelegramPessoal(msg, extra) : sendTelegram(msg, extra);
+}
+
 async function editTelegram(msgIds, novoTexto) {
   for (const { chatId, messageId } of (msgIds || [])) {
     try {
@@ -477,7 +486,7 @@ function montarTextoValidacao(ni, jogo, estado, tempoDisplay, placarAtualDisplay
   const partes = [];
 
   if (ni.comboTag) partes.push(ni.comboTag);
-  partes.push(`${ni.label} (VALIDAÇÃO)`);
+  partes.push(`${ni.label}`);
   partes.push(`⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>`);
   partes.push(`⏱ ${ni.minutoBatido}' · 📊 ${ni.placarNoMomento}`);
   partes.push('─────────────────');
@@ -604,15 +613,18 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
       tipo: ni.tipo, minutoBatido: ni.minutoBatido, placarNoMomento: ni.placarNoMomento,
       bucket: ni.bucketNoMomento, mercado: mercadoLabel, caso: 'A_ate_min10',
       comboEstrategias: comboHT.length ? comboHT : null,
+      oficial: comboHT.length > 0,
       status: 'pendente',
     };
     validacaoNovosIndicadores.push(registro);
     salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
     estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
 
-    const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
-    const ids = await sendTelegramPessoal(texto);
-    estado.validacaoMsgIds = ids;
+    if (registro.oficial) {
+      const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
+      const ids = await sendTelegramOficial(texto);
+      estado.validacaoMsgIds = ids;
+    }
     return;
   }
 
@@ -672,15 +684,18 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
       bucket: ni.bucketNoMomento, mercado: ni.mercadoTexto, caso: 'B_janela_41_45',
       comboEstrategias: comboGol.length ? comboGol : null,
       filtroChutes: filtroChutesInfo,
+      oficial: comboGol.length > 0 || !!(filtroChutesInfo && filtroChutesInfo.passou),
       status: 'pendente',
     };
     validacaoNovosIndicadores.push(registro);
     salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
     estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
 
-    const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
-    const ids = await sendTelegramPessoal(texto);
-    estado.validacaoMsgIds = ids;
+    if (registro.oficial) {
+      const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
+      const ids = await sendTelegramOficial(texto);
+      estado.validacaoMsgIds = ids;
+    }
     return;
   }
 }
@@ -703,10 +718,11 @@ async function confirmarValidacaoNoHT(jogo, estado) {
   registro.status = green ? 'green' : 'red';
   registro.htFinal = `${golsCasaHT}x${golsForaHT}`;
   salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+  if (!registro.oficial) return;
 
   const emoji = green ? '✅ GREEN' : '❌ RED';
-  const texto = `${emoji} — Validação ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'}\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → HT: ${registro.htFinal}\n➜ Mercado: ${registro.mercado}`;
-  await sendTelegramPessoal(texto);
+  const texto = `${emoji} — ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'}\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → HT: ${registro.htFinal}\n➜ Mercado: ${registro.mercado}`;
+  await sendTelegramOficial(texto);
 }
 
 async function confirmarValidacaoNoFim(estado, golsCasaFT, golsForaFT, placarFT) {
@@ -723,10 +739,11 @@ async function confirmarValidacaoNoFim(estado, golsCasaFT, golsForaFT, placarFT)
   registro.status = green ? 'green' : 'red';
   registro.ftFinal = placarFT;
   salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+  if (!registro.oficial) return;
 
   const emoji = green ? '✅ GREEN' : '❌ RED';
-  const texto = `${emoji} — Validação ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'}\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → FT: ${registro.ftFinal}\n➜ Mercado: ${registro.mercado}`;
-  await sendTelegramPessoal(texto).catch(() => {});
+  const texto = `${emoji} — ${registro.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza'}\n⚽ ${registro.jogo}\n⏱ ${registro.minutoBatido}' · 📊 ${registro.placarNoMomento} → FT: ${registro.ftFinal}\n➜ Mercado: ${registro.mercado}`;
+  await sendTelegramOficial(texto).catch(() => {});
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -787,7 +804,7 @@ async function processarReforcoChutesCasoB(jogo, estado, jogoId, hoje) {
     minutoBatido: regOrigem.minutoBatido, placarNoMomento: regOrigem.placarNoMomento,
     bucket: regOrigem.bucket, mercado: regOrigem.mercado, caso: 'B_reforco_chutes',
     chutes1T: { totais, noGol }, oddJusta: REFORCO_CHUTES_ODD_JUSTA,
-    status: 'pendente',
+    oficial: true, status: 'pendente',
   };
   validacaoNovosIndicadores.push(registro);
   salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
@@ -796,7 +813,7 @@ async function processarReforcoChutesCasoB(jogo, estado, jogoId, hoje) {
   const labelOrigem = regOrigem.tipo === 'trocacao_gonza' ? '🥊 Trocação Gonza' : '⛈️ Tempestade Cruzada Gonza';
   const partes = [
     '💪 REFORÇO — CASO B + FILTRO DE CHUTES',
-    `${labelOrigem} (VALIDAÇÃO)`,
+    `${labelOrigem}`,
     `⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>`,
     `⏱ HT · 📊 ${estado.htPlacar}`,
     '─────────────────',
@@ -807,7 +824,7 @@ async function processarReforcoChutesCasoB(jogo, estado, jogoId, hoje) {
     linhaValorTelegram(REFORCO_CHUTES_ODD_JUSTA, regOrigem.bucket, estado),
   ];
   const texto = partes.filter(Boolean).join('\n') + linksExchanges(jogo.urls_exchanges || {});
-  estado.reforcoChutes.msgIds = await sendTelegramPessoal(texto);
+  estado.reforcoChutes.msgIds = await sendTelegramOficial(texto);
   console.log(`[reforço chutes] ${jogoId} → alerta enviado (${totais}/${noGol}).`);
 }
 
@@ -973,7 +990,6 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   const strats = getEstrategiasKeys(jogo, hoje);
   const partes = [
     '🔥 3 INDICADORES 🔥',
-    '(VALIDAÇÃO)',
     `⚽ <b>${nomesComOdd(jogo)}</b>`,
     `⏱ ${terceiro}' · 📊 ${placar}`,
     '─────────────────',
@@ -987,7 +1003,7 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
     ti.mais2 ? linhaValorTelegram(ti.oddMais2, golsNoDisparo === 0 ? '15' : '25', estado) : null,
   ];
   const texto = partes.filter(Boolean).join('\n') + linksExchanges(jogo.urls_exchanges || {});
-  ti.msgIds = await sendTelegramPessoal(texto);
+  ti.msgIds = await sendTelegramOficial(texto);
 }
 
 // ── ITEM 5 — green/red dos 2 alertas novos (no fim do jogo) ─────────────
@@ -1024,26 +1040,26 @@ async function confirmarNovosAlertasNoFim(jogo, estado) {
 
   const emo = (r) => r.status === 'green' ? '✅ GREEN' : '❌ RED';
   if (rReforco) {
-    const texto = `${emo(rReforco)} — Validação 💪 Reforço Caso B + chutes\n⚽ ${rReforco.jogo}\n⏱ ${rReforco.minutoBatido}' · 📊 ${rReforco.placarNoMomento} → FT: ${placarFT}\n➜ Mercado: ${rReforco.mercado}`;
-    await sendTelegramPessoal(texto).catch(() => {});
+    const texto = `${emo(rReforco)} — 💪 Reforço Caso B + chutes\n⚽ ${rReforco.jogo}\n⏱ ${rReforco.minutoBatido}' · 📊 ${rReforco.placarNoMomento} → FT: ${placarFT}\n➜ Mercado: ${rReforco.mercado}`;
+    await sendTelegramOficial(texto).catch(() => {});
   }
   if (rLimite || rMais2) {
     const ref = rLimite || rMais2;
     const linhas = [
-      `🔥 Validação 3 Indicadores`,
+      `🔥 3 Indicadores`,
       `⚽ ${ref.jogo}`,
       `⏱ ${ref.minutoBatido}' · 📊 ${ref.placarNoMomento} → FT: ${placarFT}`,
     ];
     if (rLimite) linhas.push(`${emo(rLimite)} — Entrada 1: ${rLimite.mercado}`);
     if (rMais2) linhas.push(`${emo(rMais2)} — Entrada 2: ${rMais2.mercado} (+2 gols)`);
-    await sendTelegramPessoal(linhas.join('\n')).catch(() => {});
+    await sendTelegramOficial(linhas.join('\n')).catch(() => {});
   }
 }
 
-// ── ITEM 4 — Tendência de escanteios (só observador, sem Telegram) ──────
+// ── ITEM 4 — Tendência de escanteios (observador + alerta Telegram desde 16/10) ──────
 // Raio + 2 escanteios do favorito, ambos até o min10, jogo 0x0 no
 // momento, favorito <=1,7. Estudo 23/09, n=1.116.
-function processarTendenciaCantos(jogo, estado) {
+async function processarTendenciaCantos(jogo, estado) {
   if (estado.tendenciaCantos || estado.tendenciaCantosDescartada) return;
   if (estado.passouHT) return;
   const tempoNum = parseInt(jogo.tempo) || 0;
@@ -1064,6 +1080,20 @@ function processarTendenciaCantos(jogo, estado) {
   if (golsCasa + golsFora > 0) { estado.tendenciaCantosDescartada = true; return; }
 
   estado.tendenciaCantos = { minuto: Math.max(raios[0].minuto, cantos[1].minuto) };
+
+  // 16/10 — vira alerta oficial (uma vez por jogo)
+  const nomeFav = fav === 'casa' ? jogo.mandante : jogo.visitante;
+  const texto = [
+    '🚩 TENDÊNCIA DE ESCANTEIOS 🚩',
+    `⚽ <b>${nomesComOdd(jogo)}</b>`,
+    `⏱ ${estado.tendenciaCantos.minuto}' · 📊 0x0`,
+    '─────────────────',
+    `Raio + 2 escanteios do favorito (${nomeFav}) até o ${estado.tendenciaCantos.minuto}'`,
+    '➜ +3 cantos até o fim do HT — odd justa 1,33 (75%)',
+    '➜ 6+ cantos no jogo todo — odd justa 1,02 (98%)',
+    '➜ 8+ cantos no jogo todo — odd justa 1,11 (90%)',
+  ].join('\n') + linksExchanges(jogo.urls_exchanges || {});
+  estado.tendenciaCantos.msgIds = await sendTelegramOficial(texto);
 }
 
 function tendenciaCantosHTML(estado) {
@@ -1074,6 +1104,120 @@ function tendenciaCantosHTML(estado) {
     +3 cantos até o fim do HT: <b>1,33</b> (75%)<br>
     6+ cantos no jogo todo: <b>1,02</b> (98%)<br>
     8+ cantos no jogo todo: <b>1,11</b> (90%)
+  </div>`;
+}
+
+// ── 15/10 — Padrão Min10 (só observador, sem Telegram) ───────────────
+// Estudo 15/10 (base 29 mil jogos, 22.508 jogos 0x0 aos 10 min, regras
+// escolhidas até 31/05 e validadas de 01/06 em diante). Avalia UMA vez,
+// quando o relógio passa do min 10 (minuto 10 completo), com o jogo 0x0
+// ao fim do min 10. Só usa informação até o min 10.
+//  Bloco ≥1 gol : 1.800 jogos · gol no jogo 95,2% (odd justa 1,05) ·
+//                 Over 0,5 HT 70,6% (1,42)
+//  Bloco ≥2 gols: 2.397 jogos · +2 gols no jogo 79,3% (odd justa 1,26) ·
+//                 Over 0,5 HT 69,7% (1,43)
+//  Se seguir 0x0 até o min 20 (união, 1.932 jogos): Over 0,5 HT 57,9% (1,73),
+//                 gol no jogo 92,9% (1,08), +2 gols 73,1% (1,37)
+// "Favorito" = menor odd inicial; "azarão" = o outro. Momentum em valor
+// absoluto, minutos 1 a 10. Chutes = no gol + para fora + bloqueado + trave.
+function calcularPadraoMin10(jogo) {
+  const oc = parseFloat(jogo.odd_inicial_casa || jogo.odd_casa);
+  const of_ = parseFloat(jogo.odd_inicial_fora || jogo.odd_fora);
+  if (!isFinite(oc) || !isFinite(of_)) return null;
+  const fav = oc <= of_ ? 'casa' : 'fora';
+  const azr = fav === 'casa' ? 'fora' : 'casa';
+  const favodd = Math.min(oc, of_);
+
+  const abs = (x) => Math.abs(parseFloat(x) || 0);
+  const mom = (jogo.momentum || []).filter(m => m.minuto >= 1 && m.minuto <= 10);
+  let msum = 0, fMax = 0, uMax = 0;
+  for (const m of mom) {
+    const c = abs(m.valor_casa), f = abs(m.valor_fora);
+    msum += c + f;
+    const vf = fav === 'casa' ? c : f, vu = fav === 'casa' ? f : c;
+    if (vf > fMax) fMax = vf;
+    if (vu > uMax) uMax = vu;
+  }
+  const ev = (jogo.eventos || []).filter(e => e.minuto >= 1 && e.minuto <= 10);
+  const SHOTS = ['chute_no_gol', 'chute_para_fora', 'chute_bloqueado', 'chute_na_trave'];
+  const cnt = (lado, tipos) => ev.filter(e => e.lado === lado && tipos.includes(e.tipo_evento)).length;
+  const fCor = cnt(fav, ['escanteio']), uCor = cnt(azr, ['escanteio']);
+  const fSh = cnt(fav, SHOTS), uSh = cnt(azr, SHOTS);
+  const cor = fCor + uCor, sh = fSh + uSh;
+
+  const regrasUm = [];
+  if (of_ >= 6.5 && fMax >= 237) regrasUm.push('visitante ≥6,5 + pico do fav ≥237');
+  if (of_ >= 6.5 && fCor >= 2) regrasUm.push('visitante ≥6,5 + fav ≥2 cantos');
+  if (of_ >= 6.5 && msum >= 819) regrasUm.push('visitante ≥6,5 + momentum total ≥819');
+  if (favodd <= 1.6 && uMax >= 204) regrasUm.push('fav ≤1,6 + pico do azarão ≥204');
+  if (favodd <= 1.6 && uSh >= 2) regrasUm.push('fav ≤1,6 + azarão ≥2 chutes');
+
+  const regrasDois = [];
+  if (favodd <= 1.6 && uSh >= 2) regrasDois.push('fav ≤1,6 + azarão ≥2 chutes');
+  if (favodd <= 1.6 && fCor >= 2) regrasDois.push('fav ≤1,6 + fav ≥2 cantos');
+  if (favodd <= 1.6 && sh >= 3) regrasDois.push('fav ≤1,6 + ≥3 chutes');
+  if (favodd <= 1.6 && uMax >= 204) regrasDois.push('fav ≤1,6 + pico do azarão ≥204');
+  if (of_ >= 6.5 && cor >= 2) regrasDois.push('visitante ≥6,5 + ≥2 cantos');
+
+  return {
+    bloco1: regrasUm.length > 0, bloco2: regrasDois.length > 0,
+    regrasUm, regrasDois,
+    feats: { favodd, of: of_, msum: Math.round(msum), fMax, uMax, fCor, uCor, fSh, uSh, cor, sh },
+  };
+}
+
+function processarPadraoMin10(jogo, estado, jogoId) {
+  if (estado.padraoMin10Descartado) return;
+  const tempoNum = parseInt(jogo.tempo) || 0;
+  if (jogo.tempo === 'Intervalo' || estado.passouHT) { if (!estado.padraoMin10) estado.padraoMin10Descartado = true; return; }
+
+  // 1) avaliação única, quando o relógio passa do min 10
+  if (!estado.padraoMin10) {
+    if (tempoNum < 11) return;                                   // espera o min 10 fechar
+    if (tempoNum > 16) { estado.padraoMin10Descartado = true; return; } // chegou tarde demais
+    const golsAte10 = (jogo.eventos || []).filter(e => e.tipo_evento === 'gol' && e.minuto <= 10).length;
+    if (golsAte10 > 0) { estado.padraoMin10Descartado = true; return; }  // tem que estar 0x0 no min 10
+    const r = calcularPadraoMin10(jogo);
+    if (!r || (!r.bloco1 && !r.bloco2)) { estado.padraoMin10Descartado = true; return; }
+    estado.padraoMin10 = r;
+    console.log(`[padrão min10] ${jogoId} → bloco1=${r.bloco1} bloco2=${r.bloco2} · ${JSON.stringify(r.feats)}`);
+    if (r.bloco1) registrarObservacao(jogoId, jogo, 'padrao_min10_gol', 10, 'Gol no jogo (Over 0,5 Limite)', '1,05', estado);
+    if (r.bloco2) registrarObservacao(jogoId, jogo, 'padrao_min10_mais2', 10, '+2 gols no jogo (Over 1,5 Limite)', '1,26', estado);
+  }
+
+  // 2) entrada do min 20: segue 0x0 depois dos 20 min (anota pro histórico)
+  const pm = estado.padraoMin10;
+  if (pm && !pm.min20 && tempoNum >= 20 && tempoNum <= 24) {
+    const gols = (parseInt(jogo.gols_casa) || 0) + (parseInt(jogo.gols_fora) || 0);
+    if (gols === 0) {
+      pm.min20 = true;
+      registrarObservacao(jogoId, jogo, 'padrao_min10_entrada20', 20, 'Over 0,5 HT (segue 0x0 no min 20)', '1,73', estado);
+    }
+  }
+}
+
+function padraoMin10HTML(estado) {
+  const pm = estado.padraoMin10;
+  if (!pm) return '';
+  const jogo = estado.jogo || {};
+  const tempoNum = parseInt(jogo.tempo) || 0;
+  const gols = (parseInt(jogo.gols_casa) || 0) + (parseInt(jogo.gols_fora) || 0);
+  const f = pm.feats;
+  const linhas = [];
+  if (pm.bloco1) linhas.push(`<b>Bloco ≥1 gol</b> — gol no jogo (Over 0,5 Limite): <b>1,05</b> (95%) · Over 0,5 HT <b>1,42</b> (71%)<br><span style="opacity:.75;">${pm.regrasUm.join(' · ')}</span>`);
+  if (pm.bloco2) linhas.push(`<b>Bloco ≥2 gols</b> — +2 gols no jogo (Over 1,5 Limite): <b>1,26</b> (79%) · Over 0,5 HT <b>1,43</b> (70%)<br><span style="opacity:.75;">${pm.regrasDois.join(' · ')}</span>`);
+  let ent20 = '';
+  if (!jogo.tempo || jogo.tempo === 'Intervalo' || estado.passouHT) {
+    ent20 = '';
+  } else if (tempoNum >= 20 && gols === 0) {
+    ent20 = `<div style="margin-top:6px;color:#f0b429;"><b>Segue 0x0 no ${tempoNum}'</b> — entrada do min 20: Over 0,5 HT <b>1,73</b> (58%) · gol no jogo <b>1,08</b> (93%) · +2 gols <b>1,37</b> (73%)</div>`;
+  } else if (tempoNum < 20 && gols === 0) {
+    ent20 = `<div style="margin-top:6px;opacity:.75;">Se seguir 0x0 até o 20': Over 0,5 HT 1,73 (58%) · gol no jogo 1,08 (93%) · +2 gols 1,37 (73%)</div>`;
+  }
+  return `<div class="obs-linha" style="margin-top:8px;background:#101012;border-radius:8px;padding:6px 10px;font-size:12px;color:#9a9a96;">
+    📐 <b>Padrão Min10</b> (0x0 aos 10') — fav ${f.favodd.toFixed(2)} · visitante ${f.of.toFixed(2)} · momentum total ${f.msum}<br>
+    ${linhas.join('<br>')}
+    ${ent20}
   </div>`;
 }
 
@@ -1656,8 +1800,10 @@ async function monitorarLive() {
       await processarTresIndicadores(jogo, estado, jogoId, hoje).catch((e) =>
         console.error(`[3 indicadores] Erro em ${jogoId}:`, e.message)
       );
-      try { processarTendenciaCantos(jogo, estado); }
+      try { await processarTendenciaCantos(jogo, estado); }
       catch (e) { console.error(`[tendência cantos] Erro em ${jogoId}:`, e.message); }
+      try { processarPadraoMin10(jogo, estado, jogoId); }
+      catch (e) { console.error(`[padrão min10] Erro em ${jogoId}:`, e.message); }
     }
 
     arquivarJogosEncerrados();
@@ -3188,6 +3334,7 @@ app.get('/observador', (req, res) => {
       ${eventosHTML}
       ${calcBloco}
       ${tendenciaCantosHTML(estado)}
+      ${padraoMin10HTML(estado)}
     </div>`;
   }
 
@@ -3203,7 +3350,7 @@ app.get('/observador', (req, res) => {
     if (temEstrategia) {
       comEstrategia.push({ jogo, estado, eventosHTML, comboForte: !!estado.novoIndicador?.comboTag || !!estado.reforcoChutes || !!estado.tresInd?.alerta });
     } else {
-      const temIndicador = !eventosHTML.includes('Nenhum indicador bateu ainda') || !!estado.tendenciaCantos || estado.tresInd?.terceiroMin != null; // 29/09
+      const temIndicador = !eventosHTML.includes('Nenhum indicador bateu ainda') || !!estado.tendenciaCantos || !!estado.padraoMin10 || estado.tresInd?.terceiroMin != null; // 29/09 · 15/10 padrão min10
       if (temIndicador) semEstrategia.push({ jogo, estado, eventosHTML });
     }
   }
@@ -3295,6 +3442,9 @@ app.get('/observador/historico', (req, res) => {
     ta_relampegando_2t: '⚡⚡⚡ Tá Relampegando, 2T',
     relampago_triangular: '⚡🔺 Relâmpago Triangular',
     relampago_triangular_2t: '⚡🔺 Relâmpago Triangular, 2T',
+    padrao_min10_gol: '📐 Padrão Min10 — bloco ≥1 gol',
+    padrao_min10_mais2: '📐 Padrão Min10 — bloco ≥2 gols',
+    padrao_min10_entrada20: '📐 Padrão Min10 — segue 0x0 no min 20',
   };
 
   const corpo = registros.map(r => `
@@ -3310,7 +3460,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_77',
+  status: 'ok', version: 'server_79',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -3788,12 +3938,13 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v77 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v79 iniciado!</b>\n' +
     '🔄 🔥 3 Indicadores: continua valendo o 1T todo (Gol Limite, favorito ≤1,6), agora também com 1 gol no placar (3 indicadores contados só depois do gol). Se o 3º disparo for até o min 35, o alerta traz também a entrada de +2 gols (0x0 = Over 1,5 · 1 gol = Over 2,5), entrada mínima 1,50\n' +
     '🔧 Indicação de valor corrigida — agora "✓ valor" quando a odd do indicador é IGUAL ou MAIOR que a da calculadora\n' +
     '🆕 💪 Reforço Caso B + filtro de chutes — no HT, se o 1T teve 14+ chutes / 3+ no gol, manda um 2º alerta (Combo HT/Forte não mudam)\n' +
+    '🆕 📐 Padrão Min10 — jogo 0x0 aos 10 min com odds/momentum/cantos/chutes do estudo de 15/10 (gol no jogo 1,05 · +2 gols 1,26), só no observador\n' +
     '🆕 🚩 Tendência de escanteios — raio + 2 cantos do favorito até o min10, só no observador\n' +
-    '(demais mudanças mantidas do server_76)'
+    '(demais mudanças mantidas do server_77)'
   );
 
   await enviarCardMatinal();
