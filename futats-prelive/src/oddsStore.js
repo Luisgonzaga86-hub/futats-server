@@ -66,6 +66,7 @@ function ultimasOddsPorJogo() {
     try {
       const o = JSON.parse(l);
       mapa.set(`${o.mandante}_${o.visitante}`, o); // linhas mais novas sobrescrevem
+      if (o.id) mapa.set(`id:${o.id}`, o); // o id das odds é o mesmo id do pré-jogo (confirmado 30/10)
     } catch (_) {}
   }
   return mapa;

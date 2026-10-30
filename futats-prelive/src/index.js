@@ -7,6 +7,7 @@ const express = require('express');
 const store = require('./store');
 const scheduler = require('./scheduler');
 const futatsClient = require('./futatsClient');
+const oddsStore = require('./oddsStore');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,6 +51,67 @@ function ladoFavorito(jogo) {
   return oc <= of_ ? 'casa' : 'fora';
 }
 
+
+// ── 30/10 — Odds reais (api-games-odds) na página ─────────────────
+// Odd mínima pra um jogo entrar na múltipla (a perna é o Over 1,5). Pode
+// mudar aqui. Over 0,5 HT e Over 2,5 só aparecem como informação.
+const ODD_MIN_MULTIPLA = 1.30;
+const ODD_MIN_HT = 1.30;
+const ODD_MIN_O25 = 1.70;
+
+function carregarOdds() {
+  try {
+    return oddsStore.ultimasOddsPorJogo();
+  } catch (err) {
+    console.error('[index] Falha ao ler odds:', err.message);
+    return new Map();
+  }
+}
+
+// O id das odds é o mesmo do pré-jogo; cai pro nome dos times se não achar.
+function oddsDoJogo(mapa, j) {
+  return mapa.get(`id:${j.id}`) || mapa.get(`${j.mandante}_${j.visitante}`) || null;
+}
+
+// Odd justa ESTIMADA pelos Overs médios dos dois times (calculadora.js):
+// 100 / % — é uma referência bruta, não substitui o estudo calibrado.
+function oddJusta(pct) {
+  return pct && pct > 0 ? 100 / pct : null;
+}
+
+function horaCaptura(o) {
+  if (!o || !o.capturado_em) return '';
+  const d = new Date(new Date(o.capturado_em).getTime() - 3 * 3600000);
+  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
+}
+
+function fmtOdd(v) {
+  return v == null ? '-' : Number(v).toFixed(2);
+}
+
+// Uma linha "O1.5 1.24 (justa 1.31)" — verde quando a odd real >= justa estimada
+function htmlLinhaOdd(rotulo, real, pct) {
+  if (real == null) return `<div style="color:#666;">${rotulo} -</div>`;
+  const justa = oddJusta(pct);
+  const valor = justa != null && real >= justa;
+  const cor = valor ? '#3fb950' : '#c9d1d9';
+  const txtJusta = justa != null ? ` <small style="color:#9a9a96;">(justa ${justa.toFixed(2)})</small>` : '';
+  return `<div style="color:${cor};">${rotulo} <b>${fmtOdd(real)}</b>${txtJusta}</div>`;
+}
+
+function htmlOddsMercado(j, o) {
+  if (!o) return '<small style="color:#666;">sem odd</small>';
+  const g = (j.calculo && j.calculo.gols) || {};
+  return (
+    htmlLinhaOdd('O1.5', o.over_15_back, g.over15) +
+    htmlLinhaOdd('O2.5', o.over_25_back, g.over25) +
+    htmlLinhaOdd('O3.5', o.over_35_back, g.over35) +
+    htmlLinhaOdd('BTTS', o.btts_yes_back, g.btts) +
+    htmlLinhaOdd('HT0.5', o.over_05_ht_back, g.overHT) +
+    `<small style="color:#666;">captura ${horaCaptura(o)}</small>`
+  );
+}
+
 // 21/09 — jogos de HOJE onde o cálculo local bateu Favorito=Média E
 // Gols=Alta ao mesmo tempo — a combinação que o Luis usa pra montar a
 // múltipla do dia.
@@ -76,15 +138,49 @@ function h2hTexto(j) {
 function htmlSugestaoMultipla(hoje, senha) {
   const jogos = getMultiplasDoDia(hoje);
   if (!jogos.length) return '';
+  const mapaOdds = carregarOdds();
+  let oddTotal = 1;
+  let entram = 0;
+  let semOdd = 0;
+  let baixas = 0;
+
   const linhas = jogos
-    .map(
-      (j) =>
-        `<div>• <b>${j.hora}</b> — ${j.mandante} x ${j.visitante} <small style="color:#9a9a96;">(Favorito ${j.calculo.favorito.nivel} · Gols Alta${h2hTexto(j)})</small></div>`
-    )
+    .map((j) => {
+      const o = oddsDoJogo(mapaOdds, j);
+      const o15 = o ? o.over_15_back : null;
+      const info = `<small style="color:#9a9a96;">(Favorito ${j.calculo.favorito.nivel} · Gols Alta${h2hTexto(j)})</small>`;
+      let marca, estilo = '';
+      if (o15 == null) {
+        semOdd++;
+        marca = '<span style="color:#d29922;">❔ sem odd</span>';
+      } else if (o15 >= ODD_MIN_MULTIPLA) {
+        entram++;
+        oddTotal *= o15;
+        marca = `<span style="color:#3fb950;">✅ O1.5 @${fmtOdd(o15)}</span>`;
+      } else {
+        baixas++;
+        marca = `<span style="color:#f85149;">⛔ O1.5 @${fmtOdd(o15)} (mín ${ODD_MIN_MULTIPLA.toFixed(2)})</span>`;
+        estilo = 'opacity:.55;';
+      }
+      const extras = o
+        ? ` <small style="color:#9a9a96;">· O2.5 ${fmtOdd(o.over_25_back)} · HT0.5 ${fmtOdd(o.over_05_ht_back)}</small>`
+        : '';
+      return `<div style="${estilo}">• <b>${j.hora}</b> — ${j.mandante} x ${j.visitante} ${marca}${extras} ${info}</div>`;
+    })
     .join('');
+
+  const resumo = entram
+    ? `Odd da múltipla (só ✅, Over 1,5): <b>${oddTotal.toFixed(2)}</b> com ${entram} jogo(s)`
+    : 'Nenhum jogo com odd válida ainda';
+  const notas = [
+    semOdd ? `${semOdd} sem odd (ainda não saiu na API)` : '',
+    baixas ? `${baixas} abaixo da odd mínima` : '',
+  ].filter(Boolean).join(' · ');
+
   return `
     <div style="background:#132a1a;border:1px solid #2ea043;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
-      <div style="font-size:15px;font-weight:700;color:#3fb950;margin-bottom:10px;">⭐ Sugestão de Múltipla do Dia — ${jogos.length} jogo(s)</div>
+      <div style="font-size:15px;font-weight:700;color:#3fb950;margin-bottom:6px;">⭐ Sugestão de Múltipla do Dia — ${jogos.length} jogo(s)</div>
+      <div style="font-size:13px;color:#9a9a96;margin-bottom:10px;">${resumo}${notas ? ` · ${notas}` : ''}</div>
       <div style="font-size:13px;color:#c9d1d9;line-height:1.9;">${linhas}</div>
     </div>`;
 }
@@ -97,6 +193,7 @@ app.get('/', checarSenha, (req, res) => {
     .filter((j) => j.data && j.data.slice(0, 10) === hoje)
     .sort((a, b) => a.hora.localeCompare(b.hora));
 
+  const mapaOddsPagina = carregarOdds();
   const linhas = jogos
     .map((j) => {
       let status;
@@ -124,6 +221,7 @@ app.get('/', checarSenha, (req, res) => {
           <td>${j.pais} — ${j.campeonato}</td>
           <td>${j.mandante} x ${j.visitante}</td>
           <td>${j.odd_casa} / ${j.odd_empate} / ${j.odd_fora}</td>
+          <td style="font-size:12px;line-height:1.5;">${htmlOddsMercado(j, oddsDoJogo(mapaOddsPagina, j))}</td>
           <td>${j.selecao_ia || '-'}</td>
           <td>${status}${confianca}</td>
           <td>${acao}</td>
@@ -152,7 +250,7 @@ app.get('/', checarSenha, (req, res) => {
       <p><a class="atualizar" href="/historico-confiabilidade?senha=${req.query.senha}">📊 Ver histórico de confiabilidade (cálculo local)</a></p>
       ${htmlSugestaoMultipla(hoje, req.query.senha)}
       <table>
-        <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds</th><th>Seleção IA</th><th>Status</th><th></th></tr>
+        <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds 1X2</th><th>Odds mercado</th><th>Seleção IA</th><th>Status</th><th></th></tr>
         ${linhas}
       </table>
     </body>
