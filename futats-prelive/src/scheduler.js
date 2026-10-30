@@ -8,6 +8,7 @@ const cron = require('node-cron');
 const store = require('./store');
 const filters = require('./filters');
 const futatsClient = require('./futatsClient');
+const oddsStore = require('./oddsStore');
 const { analisarJogo } = require('./claudeAnalyzer');
 const { enviarMensagem } = require('./telegram');
 const { calcularBaldes } = require('./calculadora');
@@ -52,6 +53,22 @@ async function checarEExecutarPull(janela, horaInicio, horaFim) {
       store.marcarPullFeito(janela);
     } catch (err) {
       console.error(`[scheduler] Falha no pull ${janela}:`, err.message);
+    }
+  }
+}
+
+// -------- Parte 1b: coleta de odds pré-jogo (28/10) --------
+// Mesmas janelas dos pulls. Independente do pull de jogos: se um falhar,
+// o outro segue. Cada janela coleta 1 vez por dia (controle em odds_estado.json).
+async function checarEColetarOdds(janela, horaInicio, horaFim) {
+  const horaAtual = horaBrasiliaAtual();
+  if (horaAtual >= horaInicio && horaAtual <= horaFim && !oddsStore.jaColetouHoje(janela)) {
+    console.log(`[scheduler] Coletando odds da janela ${janela}...`);
+    try {
+      await futatsClient.buscarOdds(janela);
+      oddsStore.marcarColetado(janela);
+    } catch (err) {
+      console.error(`[scheduler] Falha na coleta de odds ${janela}:`, err.message);
     }
   }
 }
@@ -167,6 +184,11 @@ function iniciar() {
       await checarEExecutarPull('meio_dia', 12, 13);
       await checarEExecutarPull('noite', 18.5, 19.5);
       await checarEExecutarPull('madrugada', 0, 1);
+
+      await checarEColetarOdds('manha', 7.5, 8.5);
+      await checarEColetarOdds('meio_dia', 12, 13);
+      await checarEColetarOdds('noite', 18.5, 19.5);
+      await checarEColetarOdds('madrugada', 0, 1);
 
       calcularJogosPendentes();
       await checarJogosProntosParaAnalise();

@@ -3,6 +3,7 @@
 // Timeout de 300s conforme recomendação do manual da API (processamento pesado).
 const fetch = require('node-fetch');
 const store = require('./store');
+const oddsStore = require('./oddsStore');
 
 // ⚠️ 20/07 — Descoberto que FUTATS_PRE_URL (api-games-pre) só traz Seleção IA
 // (selecao_ia) + stats_pre. Filtros e Estratégias (bolinhas) nunca vinham
@@ -136,4 +137,40 @@ async function buscarResultadosFinais() {
   return atualizados;
 }
 
-module.exports = { buscarJogosDoDia, buscarResultadosFinais };
+// 28/10 — API de odds pré-jogo (api-games-odds): jogos das próximas 10-12h que
+// têm odds. Mesmo host e mesmo x-token das outras. Timeout 60s + 2 retries
+// (recomendação do dono da API). Grava cada captura em odds_historico.jsonl
+// (fora do games.json) com a hora da captura. Falha aqui nunca derruba nada.
+function urlOdds() {
+  return process.env.FUTATS_ODDS_URL || `${baseUrlFutats()}/api-games-odds`;
+}
+
+async function buscarOdds(janela) {
+  const tentativas = 3; // 1 chamada + 2 retries
+  let ultimoErro;
+  for (let i = 1; i <= tentativas; i++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+    try {
+      const resp = await fetch(urlOdds(), {
+        headers: { 'x-token': process.env.FUTATS_TOKEN },
+        signal: controller.signal,
+      });
+      if (!resp.ok) throw new Error(`api-games-odds respondeu ${resp.status}`);
+      const data = await resp.json();
+      const eventos = data[0]?.eventos || [];
+      const n = oddsStore.salvarCaptura(eventos, janela);
+      console.log(`[futatsClient] odds (${janela}): ${n} jogos gravados.`);
+      return n;
+    } catch (err) {
+      ultimoErro = err;
+      console.error(`[futatsClient] odds tentativa ${i}/${tentativas} falhou: ${err.message}`);
+      if (i < tentativas) await new Promise((r) => setTimeout(r, 5000));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  throw ultimoErro;
+}
+
+module.exports = { buscarJogosDoDia, buscarResultadosFinais, buscarOdds };
