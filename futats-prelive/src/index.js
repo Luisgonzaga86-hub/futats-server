@@ -60,10 +60,17 @@ function getMultiplasDoDia(hoje) {
     .filter(
       (j) =>
         j.calculado &&
-        j.calculo?.favorito?.nivel === 'Média' &&
+        (j.calculo?.favorito?.nivel === 'Média' || j.calculo?.favorito?.nivel === 'Alta') &&
         j.calculo?.gols?.nivel === 'Alta'
     )
     .sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
+}
+
+// 29/10 — resumo curto do H2H (visto do mandante atual), pra mostrar na página
+function h2hTexto(j) {
+  const h = j.calculo && j.calculo.h2h;
+  if (!h || !h.disponivel || !h.n) return '';
+  return ` · H2H ${h.mandanteV}V-${h.empates}E-${h.mandanteD}D, ${h.mediaGols.toFixed(1)} gols`;
 }
 
 function htmlSugestaoMultipla(hoje, senha) {
@@ -72,7 +79,7 @@ function htmlSugestaoMultipla(hoje, senha) {
   const linhas = jogos
     .map(
       (j) =>
-        `<div>• <b>${j.hora}</b> — ${j.mandante} x ${j.visitante} <small style="color:#9a9a96;">(Favorito Média · Gols Alta)</small></div>`
+        `<div>• <b>${j.hora}</b> — ${j.mandante} x ${j.visitante} <small style="color:#9a9a96;">(Favorito ${j.calculo.favorito.nivel} · Gols Alta${h2hTexto(j)})</small></div>`
     )
     .join('');
   return `
@@ -102,7 +109,7 @@ app.get('/', checarSenha, (req, res) => {
       const confianca = j.analisado && conf
         ? `<br><small>🎯 ${conf.favorito} · ⚽ ${conf.gols} · 🔒 ${conf.lay}</small>`
         : (j.calculado && j.calculo
-            ? `<br><small style="color:#999;">🎯 ${emojiNivel(j.calculo.favorito.nivel)} ${j.calculo.favorito.nivel} · ⚽ ${emojiNivel(j.calculo.gols.nivel)} ${j.calculo.gols.nivel} · 🔒 ${emojiNivel(j.calculo.placar.nivel)} ${j.calculo.placar.nivel} (cálculo local)</small>`
+            ? `<br><small style="color:#999;">🎯 ${emojiNivel(j.calculo.favorito.nivel)} ${j.calculo.favorito.nivel} · ⚽ ${emojiNivel(j.calculo.gols.nivel)} ${j.calculo.gols.nivel} · 🔒 ${emojiNivel(j.calculo.placar.nivel)} ${j.calculo.placar.nivel} (cálculo local)${h2hTexto(j)}</small>`
             : '');
 
       const acao = j.analisado
@@ -289,6 +296,7 @@ app.get('/interno/confiabilidade', checarTokenInterno, (req, res) => {
     gols,
     lay,
     overs, // { over05, over15, over25, over35, overHT, over15HT } em % (0-100), ou null
+    h2h: confLocal?.h2h || null, // 29/10 — resumo do confronto direto (campo novo, não quebra quem já consome)
     layImprovavelMantidos: jogo.analisado ? extrairLayImprovavelMantidos(jogo.analise || '') : [],
     top3Placares: jogo.analisado ? extrairTop3Placares(jogo.analise || '') : [],
   });

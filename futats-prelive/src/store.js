@@ -76,6 +76,19 @@ function markCalculado(id, calculoResultado) {
   writeAll(data);
 }
 
+// 29/10 — grava vários cálculos de uma vez (1 leitura + 1 escrita do arquivo
+// inteiro em vez de 1 por jogo — o games.json passa de 150 MB).
+function markCalculadoLote(itens) {
+  if (!itens.length) return;
+  const data = readAll();
+  for (const { id, calculo } of itens) {
+    if (!data.jogos[id]) continue;
+    data.jogos[id].calculado = true;
+    data.jogos[id].calculo = calculo;
+  }
+  writeAll(data);
+}
+
 // 21/09 — salva o placar final do jogo, buscado da api-games-live depois
 // que o jogo encerra. Usado só pro histórico de confiabilidade (cálculo
 // local) — não mexe em nada da análise paga (analisado/analise/resultado_real).
@@ -189,6 +202,7 @@ module.exports = {
   getPendingResultadoFinal,
   markAnalyzed,
   markCalculado,
+  markCalculadoLote,
   markResultadoFinal,
   markProcessing,
   markProcessingFailed,

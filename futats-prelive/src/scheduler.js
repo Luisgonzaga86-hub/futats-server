@@ -11,7 +11,7 @@ const futatsClient = require('./futatsClient');
 const oddsStore = require('./oddsStore');
 const { analisarJogo } = require('./claudeAnalyzer');
 const { enviarMensagem } = require('./telegram');
-const { calcularBaldes } = require('./calculadora');
+const { calcularBaldes, precisaRecalcular } = require('./calculadora');
 
 const MINUTOS_ANTES = 50;
 const JANELA_TOLERANCIA_MIN = 5; // roda o check a cada 5 min, então aceita uma folga de +-5min
@@ -81,7 +81,8 @@ async function checarEColetarOdds(janela, horaInicio, horaFim) {
 function calcularJogosPendentes() {
   let pendentes;
   try {
-    pendentes = store.getPendingCalculo();
+    // 29/10 — além dos nunca calculados, recalcula (1x) os que ganharam H2H
+    pendentes = store.getAllGames().filter((g) => !g.calculado || precisaRecalcular(g));
   } catch (err) {
     // Protege contra qualquer falha de leitura do arquivo (ex: JSON pego no
     // meio de uma escrita) — sem isso, uma exceção aqui dentro de um cron
@@ -91,13 +92,23 @@ function calcularJogosPendentes() {
     return;
   }
 
+  const lote = [];
   for (const jogo of pendentes) {
     try {
       const resultado = calcularBaldes(jogo.stats_pre_raw);
-      if (resultado) store.markCalculado(jogo.id, resultado);
+      if (resultado) lote.push({ id: jogo.id, calculo: resultado });
     } catch (err) {
       console.error(`[scheduler] Falha ao calcular ${jogo.mandante} x ${jogo.visitante}:`, err.message);
     }
+  }
+  // Grava tudo de uma vez (evita reescrever o games.json inteiro a cada jogo)
+  try {
+    if (lote.length) {
+      store.markCalculadoLote(lote);
+      console.log(`[scheduler] ${lote.length} jogo(s) calculado(s)/recalculado(s) localmente.`);
+    }
+  } catch (err) {
+    console.error('[scheduler] Falha ao gravar cálculos em lote:', err.message);
   }
 }
 
