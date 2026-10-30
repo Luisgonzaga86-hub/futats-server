@@ -80,9 +80,25 @@ function jaColetouHoje(janela) {
   return !!lerEstado()[chave];
 }
 
+// Minutos desde a última coleta bem-sucedida (Infinity se nunca coletou)
+function minutosDesdeUltimaColeta() {
+  const e = lerEstado();
+  return e.ultima ? (Date.now() - new Date(e.ultima).getTime()) / 60000 : Infinity;
+}
+
+// Falhou: empurra a próxima tentativa pra daqui a `esperaMin` minutos
+// (simula uma coleta feita há (intervaloMin - esperaMin) minutos).
+function adiarProximaTentativa(intervaloMin, esperaMin) {
+  garantirPasta();
+  const estado = lerEstado();
+  estado.ultima = new Date(Date.now() - (intervaloMin - esperaMin) * 60000).toISOString();
+  fs.writeFileSync(ESTADO, JSON.stringify(estado));
+}
+
 function marcarColetado(janela) {
   garantirPasta();
   const estado = lerEstado();
+  estado.ultima = new Date().toISOString();
   const hoje = new Date().toISOString().slice(0, 10);
   estado[`${hoje}_${janela}`] = new Date().toISOString();
   // mantém só os últimos 10 dias
@@ -91,4 +107,4 @@ function marcarColetado(janela) {
   fs.writeFileSync(ESTADO, JSON.stringify(estado));
 }
 
-module.exports = { salvarCaptura, ultimasOddsPorJogo, jaColetouHoje, marcarColetado };
+module.exports = { salvarCaptura, ultimasOddsPorJogo, jaColetouHoje, marcarColetado, minutosDesdeUltimaColeta, adiarProximaTentativa };

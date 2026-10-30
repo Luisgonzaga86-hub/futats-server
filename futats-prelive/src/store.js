@@ -40,9 +40,8 @@ function writeAll(data) {
   fs.renameSync(tmpFile, FILE);
 }
 
-// Salva ou atualiza um jogo (usa o "id" do jogo como chave única pra nunca duplicar)
-function upsertGame(game) {
-  const data = readAll();
+// Mescla 1 jogo dentro do objeto de dados já lido (sem ler/gravar arquivo)
+function mesclarJogo(data, game) {
   const existing = data.jogos[game.id];
   data.jogos[game.id] = {
     ...existing,
@@ -63,6 +62,22 @@ function upsertGame(game) {
     resultado_final: existing?.resultado_final ?? null,
     resultado_final_em: existing?.resultado_final_em ?? null,
   };
+}
+
+// Salva ou atualiza um jogo (usa o "id" do jogo como chave única pra nunca duplicar)
+function upsertGame(game) {
+  const data = readAll();
+  mesclarJogo(data, game);
+  writeAll(data);
+}
+
+// 30/10 — salva/atualiza vários jogos de uma vez: 1 leitura + 1 escrita do
+// arquivo inteiro (antes eram 1 por jogo — 423 jogos x 158 MB = pull de
+// 30+ minutos que travava o resto do ciclo).
+function upsertGames(games) {
+  if (!games.length) return;
+  const data = readAll();
+  for (const game of games) mesclarJogo(data, game);
   writeAll(data);
 }
 
@@ -195,6 +210,7 @@ function getPendingResultadoFinal() {
 
 module.exports = {
   upsertGame,
+  upsertGames,
   getGame,
   getAllGames,
   getPendingGames,

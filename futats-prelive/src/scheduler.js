@@ -57,19 +57,24 @@ async function checarEExecutarPull(janela, horaInicio, horaFim) {
   }
 }
 
-// -------- Parte 1b: coleta de odds pré-jogo (28/10) --------
-// Mesmas janelas dos pulls. Independente do pull de jogos: se um falhar,
-// o outro segue. Cada janela coleta 1 vez por dia (controle em odds_estado.json).
-async function checarEColetarOdds(janela, horaInicio, horaFim) {
-  const horaAtual = horaBrasiliaAtual();
-  if (horaAtual >= horaInicio && horaAtual <= horaFim && !oddsStore.jaColetouHoje(janela)) {
-    console.log(`[scheduler] Coletando odds da janela ${janela}...`);
-    try {
-      await futatsClient.buscarOdds(janela);
-      oddsStore.marcarColetado(janela);
-    } catch (err) {
-      console.error(`[scheduler] Falha na coleta de odds ${janela}:`, err.message);
-    }
+// -------- Parte 1b: coleta de odds pré-jogo (28/10, ajustado 30/10) --------
+// A API só devolve jogos das próximas 10-12h QUE JÁ TÊM odds abertas — de
+// madrugada vêm poucos (6 jogos às 00:19). Por isso coleta a cada 30 min o
+// dia todo: cada jogo acumula várias capturas até o início. Se falhar, tenta
+// de novo em 10 min. Independente do pull de jogos.
+const INTERVALO_ODDS_MIN = 30;
+const RETRY_ODDS_MIN = 10;
+
+async function coletarOddsSeVencido() {
+  if (oddsStore.minutosDesdeUltimaColeta() < INTERVALO_ODDS_MIN - 1) return;
+  const h = horaBrasiliaAtual();
+  const janela = `h${String(Math.floor(h)).padStart(2, '0')}${h % 1 >= 0.5 ? '30' : '00'}`;
+  try {
+    await futatsClient.buscarOdds(janela);
+    oddsStore.marcarColetado(janela);
+  } catch (err) {
+    console.error(`[scheduler] Falha na coleta de odds (${janela}), nova tentativa em ${RETRY_ODDS_MIN} min:`, err.message);
+    oddsStore.adiarProximaTentativa(INTERVALO_ODDS_MIN, RETRY_ODDS_MIN);
   }
 }
 
@@ -191,15 +196,14 @@ function iniciar() {
   // Roda a cada 5 minutos: checa pulls e checa jogos prontos pra análise
   cron.schedule('*/5 * * * *', async () => {
     try {
+      // 30/10 — odds ANTES dos pulls: é rápida e não pode ficar presa atrás do
+      // pull de jogos (que pode demorar minutos esperando a API).
+      await coletarOddsSeVencido();
+
       await checarEExecutarPull('manha', 7.5, 8.5);
       await checarEExecutarPull('meio_dia', 12, 13);
       await checarEExecutarPull('noite', 18.5, 19.5);
       await checarEExecutarPull('madrugada', 0, 1);
-
-      await checarEColetarOdds('manha', 7.5, 8.5);
-      await checarEColetarOdds('meio_dia', 12, 13);
-      await checarEColetarOdds('noite', 18.5, 19.5);
-      await checarEColetarOdds('madrugada', 0, 1);
 
       calcularJogosPendentes();
       await checarJogosProntosParaAnalise();

@@ -69,7 +69,8 @@ async function buscarJogosDoDia() {
     const mapaFiltros = new Map(filtrosEventos.map((j) => [chaveJogo(j), j.filtros_partida || '']));
     const mapaEstrategias = new Map(estrategiasEventos.map((j) => [chaveJogo(j), j.estrategias_partida || '']));
 
-    // Salva/atualiza cada jogo no armazenamento (upsert = nunca duplica)
+    // Salva/atualiza todos os jogos de uma vez (upsert = nunca duplica)
+    const paraSalvar = [];
     for (const jogo of eventos) {
       const chave = chaveJogo(jogo);
       // Mescla filtros/estratégias direto no objeto bruto também, pra que
@@ -77,7 +78,7 @@ async function buscarJogosDoDia() {
       jogo.filtros_partida = mapaFiltros.get(chave) || '';
       jogo.estrategias_partida = mapaEstrategias.get(chave) || '';
 
-      store.upsertGame({
+      paraSalvar.push({
         id: jogo.id,
         mandante: jogo.mandante,
         visitante: jogo.visitante,
@@ -94,6 +95,7 @@ async function buscarJogosDoDia() {
         stats_pre_raw: jogo, // guarda o jogo inteiro (já com filtros/estratégias mesclados)
       });
     }
+    store.upsertGames(paraSalvar);
     return eventos.length;
   } finally {
     clearTimeout(timeout);
