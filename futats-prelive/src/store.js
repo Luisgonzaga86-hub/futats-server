@@ -107,11 +107,27 @@ function markCalculadoLote(itens) {
 // 21/09 — salva o placar final do jogo, buscado da api-games-live depois
 // que o jogo encerra. Usado só pro histórico de confiabilidade (cálculo
 // local) — não mexe em nada da análise paga (analisado/analise/resultado_real).
-function markResultadoFinal(id, golsCasa, golsFora) {
+function markResultadoFinal(id, golsCasa, golsFora, htCasa = null, htFora = null) {
   const data = readAll();
   if (!data.jogos[id]) return;
-  data.jogos[id].resultado_final = { golsCasa, golsFora };
+  data.jogos[id].resultado_final = { golsCasa, golsFora, htCasa, htFora };
   data.jogos[id].resultado_final_em = new Date().toISOString();
+  writeAll(data);
+}
+
+// 31/10 — grava vários resultados finais de uma vez (1 leitura + 1 escrita).
+// itens: [{ id, golsCasa, golsFora, htCasa, htFora }]. htCasa/htFora = null
+// quando a API não trouxe o placar do 1º tempo.
+function markResultadoFinalLote(itens) {
+  if (!itens.length) return;
+  const data = readAll();
+  const agora = new Date().toISOString();
+  for (const it of itens) {
+    const j = data.jogos[it.id];
+    if (!j) continue;
+    j.resultado_final = { golsCasa: it.golsCasa, golsFora: it.golsFora, htCasa: it.htCasa, htFora: it.htFora };
+    j.resultado_final_em = j.resultado_final_em || agora;
+  }
   writeAll(data);
 }
 
@@ -204,8 +220,16 @@ function getPendingCalculo() {
 // 21/09 — jogos já calculados localmente mas que ainda não têm placar
 // final salvo — é essa lista que o buscarResultadosFinais() do
 // futatsClient.js usa pra saber quais jogos ainda precisa ir atrás.
+// 31/10 — também devolve jogos recentes (até 3 dias) que já têm placar final
+// mas ainda sem o placar do 1º tempo (htCasa === undefined), pra completar.
 function getPendingResultadoFinal() {
-  return getAllGames().filter((g) => g.calculado && !g.resultado_final);
+  const corte = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+  return getAllGames().filter(
+    (g) =>
+      g.calculado &&
+      (!g.resultado_final ||
+        (g.resultado_final.htCasa === undefined && g.data && g.data.slice(0, 10) >= corte))
+  );
 }
 
 module.exports = {
@@ -220,6 +244,7 @@ module.exports = {
   markCalculado,
   markCalculadoLote,
   markResultadoFinal,
+  markResultadoFinalLote,
   markProcessing,
   markProcessingFailed,
   markConferido,

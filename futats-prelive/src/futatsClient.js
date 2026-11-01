@@ -122,21 +122,28 @@ async function buscarResultadosFinais() {
   const pendentes = store.getPendingResultadoFinal();
   if (!pendentes.length) return 0;
 
-  let atualizados = 0;
+  const intOuNull = (v) => {
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) ? n : null;
+  };
+  const porChave = new Map(pendentes.map((g) => [chaveJogo(g), g]));
+  const lote = [];
   for (const jogoLive of encerrados) {
-    const jogoStore = pendentes.find(
-      (g) => g.mandante === jogoLive.mandante && g.visitante === jogoLive.visitante
-    );
+    const jogoStore = porChave.get(chaveJogo(jogoLive));
     if (!jogoStore) continue;
-
-    const golsCasa = parseInt(jogoLive.gols_casa, 10) || 0;
-    const golsFora = parseInt(jogoLive.gols_fora, 10) || 0;
-    store.markResultadoFinal(jogoStore.id, golsCasa, golsFora);
-    atualizados++;
+    lote.push({
+      id: jogoStore.id,
+      golsCasa: parseInt(jogoLive.gols_casa, 10) || 0,
+      golsFora: parseInt(jogoLive.gols_fora, 10) || 0,
+      // 31/10 — placar do 1º tempo (null se a API não trouxer)
+      htCasa: intOuNull(jogoLive.gols_casa_ht),
+      htFora: intOuNull(jogoLive.gols_fora_ht),
+    });
   }
-
-  if (atualizados > 0) console.log(`[futatsClient] ${atualizados} resultado(s) final(is) salvos.`);
-  return atualizados;
+  if (!lote.length) return 0;
+  store.markResultadoFinalLote(lote);
+  console.log(`[futatsClient] ${lote.length} resultado(s) final(is) salvos (com placar do 1T quando disponível).`);
+  return lote.length;
 }
 
 // 28/10 — API de odds pré-jogo (api-games-odds): jogos das próximas 10-12h que
@@ -174,5 +181,6 @@ async function buscarOdds(janela) {
   }
   throw ultimoErro;
 }
+
 
 module.exports = { buscarJogosDoDia, buscarResultadosFinais, buscarOdds };

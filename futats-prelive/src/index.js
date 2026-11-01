@@ -135,6 +135,21 @@ function h2hTexto(j) {
   return ` · H2H ${h.mandanteV}V-${h.empates}E-${h.mandanteD}D, ${h.mediaGols.toFixed(1)} gols`;
 }
 
+// 30/10 — última captura de odds do jogo no formato que o servidor ao vivo usa
+function oddsMercadoDoJogo(jogo) {
+  const o = oddsDoJogo(carregarOdds(), jogo);
+  if (!o) return null;
+  return {
+    over15: o.over_15_back,
+    over25: o.over_25_back,
+    over35: o.over_35_back,
+    btts: o.btts_yes_back,
+    overHT: o.over_05_ht_back,
+    capturado_em: o.capturado_em,
+    hora: horaCaptura(o),
+  };
+}
+
 function htmlSugestaoMultipla(hoje, senha) {
   const jogos = getMultiplasDoDia(hoje);
   if (!jogos.length) return '';
@@ -248,6 +263,7 @@ app.get('/', checarSenha, (req, res) => {
       <p><a class="atualizar" href="/atualizar?senha=${req.query.senha}">🔄 Puxar jogos novos agora</a></p>
       <p><a class="atualizar" href="/historico?senha=${req.query.senha}">📜 Ver histórico de análises</a></p>
       <p><a class="atualizar" href="/historico-confiabilidade?senha=${req.query.senha}">📊 Ver histórico de confiabilidade (cálculo local)</a></p>
+      <p><a class="atualizar" href="/valor-historico?senha=${req.query.senha}">💰 Ver histórico de valor (green/red e unidades)</a></p>
       ${htmlSugestaoMultipla(hoje, req.query.senha)}
       <table>
         <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds 1X2</th><th>Odds mercado</th><th>Seleção IA</th><th>Status</th><th></th></tr>
@@ -394,10 +410,186 @@ app.get('/interno/confiabilidade', checarTokenInterno, (req, res) => {
     gols,
     lay,
     overs, // { over05, over15, over25, over35, overHT, over15HT } em % (0-100), ou null
+    oddsMercado: oddsMercadoDoJogo(jogo), // 30/10 — odds reais pré-jogo (última captura), ou null
     h2h: confLocal?.h2h || null, // 29/10 — resumo do confronto direto (campo novo, não quebra quem já consome)
     layImprovavelMantidos: jogo.analisado ? extrairLayImprovavelMantidos(jogo.analise || '') : [],
     top3Placares: jogo.analisado ? extrairTop3Placares(jogo.analise || '') : [],
   });
+});
+
+
+// ── 31/10 — Histórico de valor ────────────────────────────────────────
+// Pra cada jogo encerrado: pega a ÚLTIMA odd capturada antes do início
+// (odd de fechamento), compara com a odd justa do jogo (calculadora: 100/%
+// de Over dos 2 times) e marca "valor" quando real >= justa. Green/red pelo
+// placar final; unidades = stake fixa de 1 (green = odd-1, red = -1, sem
+// comissão — igual ao seu P&L bruto).
+const MERCADOS_VALOR = [
+  { key: 'over15', label: 'Over 1,5', campoOdd: 'over_15_back', campoPct: 'over15', acerto: (c, f) => c + f >= 2 },
+  { key: 'over25', label: 'Over 2,5', campoOdd: 'over_25_back', campoPct: 'over25', acerto: (c, f) => c + f >= 3 },
+  { key: 'over35', label: 'Over 3,5', campoOdd: 'over_35_back', campoPct: 'over35', acerto: (c, f) => c + f >= 4 },
+  { key: 'btts', label: 'Ambas marcam', campoOdd: 'btts_yes_back', campoPct: 'btts', acerto: (c, f) => c >= 1 && f >= 1 },
+  { key: 'overHT', label: 'Over 0,5 HT', campoOdd: 'over_05_ht_back', campoPct: 'overHT', ht: true, acerto: (c, f) => c + f >= 1 },
+];
+
+function inicioDoJogoUTC(j) {
+  const [y, m, d] = (j.data || '').slice(0, 10).split('-').map(Number);
+  const [h, mi] = (j.hora || '00:00').split(':').map(Number);
+  if (!y) return null;
+  return Date.UTC(y, m - 1, d, h + 3, mi || 0, 0); // hora do FUTATS é Brasília (UTC-3)
+}
+
+function fmtU(v) {
+  const s = (v >= 0 ? '+' : '') + v.toFixed(2);
+  return `<b style="color:${v > 0.0001 ? '#3fb950' : v < -0.0001 ? '#f85149' : '#9a9a96'};">${s}u</b>`;
+}
+
+app.get('/valor-historico', checarSenha, (req, res) => {
+  const dias = Math.min(Math.max(parseInt(req.query.dias, 10) || 14, 1), 90);
+  const modo = req.query.modo === 'todos' ? 'todos' : 'valor';
+  const corteData = new Date(Date.now() - dias * 86400000 - 3 * 3600000).toISOString().slice(0, 10);
+
+  let capturas;
+  try {
+    capturas = oddsStore.capturasPorJogo(new Date(Date.now() - (dias + 2) * 86400000).toISOString());
+  } catch (err) {
+    console.error('[valor-historico] Falha ao ler odds:', err.message);
+    capturas = new Map();
+  }
+
+  const jogos = store
+    .getAllGames()
+    .filter((j) => j.resultado_final && j.calculo && j.calculo.gols && j.data && j.data.slice(0, 10) >= corteData);
+
+  const entradas = []; // todas as entradas possíveis (valor e sem valor)
+  let semOdd = 0;
+  let semHT = 0;
+  for (const j of jogos) {
+    const ini = inicioDoJogoUTC(j);
+    const lista = capturas.get(`id:${j.id}`) || [];
+    // última captura até 5 min depois do início marcado (tolerância)
+    const antes = ini == null ? [] : lista.filter((o) => new Date(o.capturado_em).getTime() <= ini + 5 * 60000);
+    const o = antes.length ? antes[antes.length - 1] : null;
+    if (!o) { semOdd++; continue; }
+    const c = j.resultado_final.golsCasa;
+    const f = j.resultado_final.golsFora;
+    for (const m of MERCADOS_VALOR) {
+      const real = o[m.campoOdd];
+      const pct = j.calculo.gols[m.campoPct];
+      if (real == null || !pct || pct <= 0) continue;
+      let gc = c, gf = f;
+      if (m.ht) {
+        if (j.resultado_final.htCasa == null || j.resultado_final.htFora == null) { semHT++; continue; }
+        gc = j.resultado_final.htCasa; gf = j.resultado_final.htFora;
+      }
+      const justa = 100 / pct;
+      const green = m.acerto(gc, gf);
+      entradas.push({
+        j, m, real, justa, valor: real >= justa - 0.001, green,
+        units: green ? real - 1 : -1,
+        dia: j.data.slice(0, 10), capt: o.capturado_em,
+      });
+    }
+  }
+
+  // Resumo por mercado: com valor x sem valor
+  const resumo = MERCADOS_VALOR.map((m) => {
+    const calc = (arr) => {
+      const n = arr.length;
+      const g = arr.filter((e) => e.green).length;
+      const u = arr.reduce((a, e) => a + e.units, 0);
+      return { n, g, u, hit: n ? (g / n) * 100 : 0, roi: n ? (u / n) * 100 : 0 };
+    };
+    const todas = entradas.filter((e) => e.m.key === m.key);
+    return { m, valor: calc(todas.filter((e) => e.valor)), sem: calc(todas.filter((e) => !e.valor)) };
+  });
+  const linhaResumo = (r) =>
+    r.n
+      ? `${r.n} jogos · ${r.g} green (${r.hit.toFixed(0)}%) · ${fmtU(r.u)} · ROI ${r.roi.toFixed(0)}%`
+      : '<span style="color:#666;">—</span>';
+  const tabelaResumo = resumo
+    .map(
+      (r) => `<tr><td>${r.m.label}</td><td>${linhaResumo(r.valor)}</td><td>${linhaResumo(r.sem)}</td></tr>`
+    )
+    .join('');
+
+  // Detalhe por dia
+  const exibidas = entradas.filter((e) => modo === 'todos' || e.valor);
+  const porDia = new Map();
+  for (const e of exibidas) {
+    if (!porDia.has(e.dia)) porDia.set(e.dia, []);
+    porDia.get(e.dia).push(e);
+  }
+  const diasOrd = [...porDia.keys()].sort().reverse();
+  let totalUnits = 0, totalG = 0, totalN = 0;
+  const blocosDias = diasOrd
+    .map((dia) => {
+      const arr = porDia.get(dia).sort((a, b) => (a.j.hora || '').localeCompare(b.j.hora || ''));
+      const u = arr.reduce((a, e) => a + e.units, 0);
+      const g = arr.filter((e) => e.green).length;
+      totalUnits += u; totalG += g; totalN += arr.length;
+      const linhas = arr
+        .map((e) => {
+          const bg = e.green ? '#13301a' : '#3a1515';
+          const placar = `${e.j.resultado_final.golsCasa}x${e.j.resultado_final.golsFora}` +
+            (e.j.resultado_final.htCasa != null ? ` <small style="color:#9a9a96;">(HT ${e.j.resultado_final.htCasa}x${e.j.resultado_final.htFora})</small>` : '');
+          const marcaValor = e.valor ? '<span style="color:#3fb950;">✓ valor</span>' : '<span style="color:#666;">sem valor</span>';
+          return `<tr style="background:${bg};">
+            <td>${(e.j.hora || '').slice(0, 5)}</td>
+            <td>${e.j.mandante} x ${e.j.visitante}</td>
+            <td>${e.m.label}</td>
+            <td>${e.real.toFixed(2)} <small style="color:#9a9a96;">(justa ${e.justa.toFixed(2)})</small></td>
+            <td>${marcaValor}</td>
+            <td>${placar}</td>
+            <td>${e.green ? '🟢 GREEN' : '🔴 RED'}</td>
+            <td style="text-align:right;">${fmtU(e.units)}</td>
+          </tr>`;
+        })
+        .join('');
+      return `
+        <h3 style="margin:22px 0 6px;">📅 ${dia.split('-').reverse().join('/')} — ${arr.length} entrada(s) · ${g} green / ${arr.length - g} red · soma do dia ${fmtU(u)}</h3>
+        <table>
+          <tr><th>Hora</th><th>Jogo</th><th>Mercado</th><th>Odd real</th><th>Valor?</th><th>Placar</th><th>Resultado</th><th style="text-align:right;">Unidades</th></tr>
+          ${linhas}
+        </table>`;
+    })
+    .join('');
+
+  const link = (txt, q) => `<a class="atualizar" href="/valor-historico?senha=${req.query.senha}&${q}">${txt}</a>`;
+  res.send(`
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <title>FUTATS — Histórico de valor</title>
+      <style>
+        body { font-family: sans-serif; background: #111; color: #eee; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; }
+        td, th { padding: 7px 8px; border-bottom: 1px solid #333; text-align: left; font-size: 13px; }
+        a.atualizar { color: #4fd1c5; }
+      </style>
+    </head>
+    <body>
+      <h2>💰 Histórico de valor — últimos ${dias} dias</h2>
+      <p><a class="atualizar" href="/?senha=${req.query.senha}">← Voltar pra hoje</a></p>
+      <p style="color:#9a9a96;font-size:13px;">
+        Odd real = última odd capturada antes do início · odd justa = 100 ÷ média de Over dos 2 times (calculadora) · "valor" = odd real ≥ justa ·
+        unidades: stake 1, green = odd − 1, red = −1 (sem comissão).<br>
+        Mostrando: <b>${modo === 'todos' ? 'todas as entradas (com e sem valor)' : 'só entradas com valor'}</b> ·
+        ${link(modo === 'todos' ? 'ver só com valor' : 'ver todas', `dias=${dias}&modo=${modo === 'todos' ? 'valor' : 'todos'}`)} ·
+        ${link('7 dias', `dias=7&modo=${modo}`)} · ${link('14 dias', `dias=14&modo=${modo}`)} · ${link('30 dias', `dias=30&modo=${modo}`)}
+      </p>
+      <div style="background:#1a1a1d;border:1px solid #333;border-radius:10px;padding:14px 18px;margin:14px 0;">
+        <div style="font-size:15px;font-weight:700;margin-bottom:8px;">Total do período (${modo === 'todos' ? 'todas' : 'com valor'}): ${totalN} entrada(s) · ${totalG} green / ${totalN - totalG} red · ${fmtU(totalUnits)}</div>
+        <table>
+          <tr><th>Mercado</th><th>Com valor (real ≥ justa)</th><th>Sem valor</th></tr>
+          ${tabelaResumo}
+        </table>
+        <p style="color:#666;font-size:12px;margin:8px 0 0;">${jogos.length} jogo(s) encerrados no período · ${semOdd} sem nenhuma odd capturada antes do jogo · ${semHT} entradas de Over HT sem placar do 1º tempo (jogos anteriores a 31/10 não têm).</p>
+      </div>
+      ${blocosDias || '<p style="color:#9a9a96;">Ainda sem entradas no período — os dados começaram a ser coletados em 30/10.</p>'}
+    </body>
+    </html>
+  `);
 });
 
 // Histórico de análises — todos os jogos já analisados (qualquer data), com

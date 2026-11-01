@@ -72,6 +72,26 @@ function ultimasOddsPorJogo() {
   return mapa;
 }
 
+// 31/10 — todas as capturas desde `desdeIso`, agrupadas por jogo (chave id:xxx),
+// em ordem de captura. Usado pelo histórico de valor (odd de fechamento).
+function capturasPorJogo(desdeIso) {
+  garantirPasta();
+  const mapa = new Map();
+  if (!fs.existsSync(ARQUIVO)) return mapa;
+  const linhas = fs.readFileSync(ARQUIVO, 'utf-8').split('\n');
+  for (const l of linhas) {
+    if (!l) continue;
+    try {
+      const o = JSON.parse(l);
+      if (desdeIso && o.capturado_em < desdeIso) continue;
+      const k = `id:${o.id}`;
+      if (!mapa.has(k)) mapa.set(k, []);
+      mapa.get(k).push(o);
+    } catch (_) {}
+  }
+  return mapa;
+}
+
 function lerEstado() {
   try { return JSON.parse(fs.readFileSync(ESTADO, 'utf-8')); } catch (_) { return {}; }
 }
@@ -108,4 +128,4 @@ function marcarColetado(janela) {
   fs.writeFileSync(ESTADO, JSON.stringify(estado));
 }
 
-module.exports = { salvarCaptura, ultimasOddsPorJogo, jaColetouHoje, marcarColetado, minutosDesdeUltimaColeta, adiarProximaTentativa };
+module.exports = { capturasPorJogo, salvarCaptura, ultimasOddsPorJogo, jaColetouHoje, marcarColetado, minutosDesdeUltimaColeta, adiarProximaTentativa };
