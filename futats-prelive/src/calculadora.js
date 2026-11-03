@@ -29,10 +29,14 @@ function bandaEG(valor) {
 // confronto_direto.previousGames[]: data dd/mm/yyyy, mandante/visitante do jogo
 // passado, golsMandante/golsVisitante (+HT), mandante_em_casa = se o mandante
 // de HOJE era o mandante naquele jogo. Tudo é lido pela ótica do mandante atual.
-const VERSAO_CALCULO = 2;
+const VERSAO_CALCULO = 3; // 3 = + média de gols da calculadora × H2H (tendência de gols, 03/11)
 const H2H_MAX = 5;           // últimos confrontos considerados
 const H2H_MIN = 3;           // abaixo disso o H2H não conta nem a favor nem contra
 const H2H_UNDER_MEDIA = 2.0; // média de gols <= isso = padrão de under
+// 03/11 — tendência de gols: média de gols da CALCULADORA (últimos jogos dos dois
+// times) e média do H2H, as duas acima do corte (e H2H com 3+ confrontos).
+const TENDENCIA_MEDIA = 2.5;
+const CALC_MIN_JOGOS = 3;    // mínimo de jogos por time pra média da calculadora valer
 
 function parseDataBR(s) {
   const m = /(\d{2})\/(\d{2})\/(\d{4})/.exec(s || '');
@@ -86,12 +90,36 @@ function resumirH2H(sp, jogoRaw, favorito) {
 // (não reescreve o histórico de confiabilidade).
 function precisaRecalcular(g) {
   if (!g || !g.calculado || g.resultado_final) return false;
-  if (((g.calculo && g.calculo.versao) || 1) >= VERSAO_CALCULO) return false;
+  const ontem = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  if (!g.data || g.data.slice(0, 10) < ontem) return false;
+  const versao = (g.calculo && g.calculo.versao) || 1;
+  if (versao < VERSAO_CALCULO) return !!(g.stats_pre_raw && (g.stats_pre_raw.stats_pre || [])[0]); // 03/11: v3 recalcula uma vez
+  // já na versão atual, mas o H2H só chegou depois do primeiro cálculo
   const raw = g.stats_pre_raw || {};
   const sp = (raw.stats_pre || [])[0];
-  if (!pegarConfrontoDireto(sp, raw)) return false;
-  const ontem = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-  return !!g.data && g.data.slice(0, 10) >= ontem;
+  const h2hOk = g.calculo && g.calculo.h2h && g.calculo.h2h.disponivel;
+  return !h2hOk && !!pegarConfrontoDireto(sp, raw);
+}
+
+// 03/11 — média de gols totais (marcados + sofridos) nos últimos jogos dos dois
+// times (até 5 de cada), a "calculadora do jogo". null se faltar amostra.
+function mediaGolsCalculadora(home, away) {
+  const totais = (t) => ((t && t.previousGames) || []).slice(0, 5)
+    .filter((g) => g && g.golsMandante != null && g.golsVisitante != null)
+    .map((g) => g.golsMandante + g.golsVisitante);
+  const a = totais(home), b = totais(away);
+  if (a.length < CALC_MIN_JOGOS || b.length < CALC_MIN_JOGOS) return { media: null, n: a.length + b.length };
+  const todos = a.concat(b);
+  return { media: todos.reduce((x, y) => x + y, 0) / todos.length, n: todos.length };
+}
+
+// 'sim' = calculadora E H2H acima do corte · 'contra' = as duas abaixo · 'neutra' = o resto
+function classificarTendenciaGols(mediaCalc, h2h) {
+  const h2hOk = h2h && h2h.disponivel && h2h.n >= H2H_MIN && h2h.mediaGols != null;
+  if (mediaCalc == null || !h2hOk) return 'neutra';
+  if (mediaCalc > TENDENCIA_MEDIA && h2h.mediaGols > TENDENCIA_MEDIA) return 'sim';
+  if (mediaCalc < TENDENCIA_MEDIA && h2h.mediaGols < TENDENCIA_MEDIA) return 'contra';
+  return 'neutra';
 }
 
 // ── 1. Sistema de pontos (§2.1) ──────────────────────────────────
@@ -266,6 +294,14 @@ function calcularBaldes(jogoRaw) {
     golsMotivo = `H2H com padrão de under (média ${h2h.mediaGols.toFixed(1)} gols nos últimos ${h2h.n})`;
   }
 
+  // -- TENDÊNCIA DE GOLS (03/11): calculadora × H2H --
+  const calcMedia = mediaGolsCalculadora(home, away);
+  const tendencia = {
+    mediaCalc: calcMedia.media, nCalc: calcMedia.n,
+    mediaH2H: h2h.disponivel ? h2h.mediaGols : null, nH2H: h2h.n || 0,
+    status: classificarTendenciaGols(calcMedia.media, h2h),
+  };
+
   // -- PLACAR/LAY --
   const { unders, alertaZebra } = checarZebraTop5(projecoes);
   const placar = avaliarPlacarLay(home, away, unders, h2h);
@@ -273,6 +309,7 @@ function calcularBaldes(jogoRaw) {
   return {
     favorito: { nivel: favoritoNivel, motivo: favoritoMotivo, pontos: pontosFavorito, diffXG, pctVitorias, pctDerrotas },
     gols: { nivel: golsNivel, ...overNums, cortesBatidos, xgTotal, motivo: golsMotivo },
+    tendencia,
     placar: { nivel: placar.nivel, motivo: placar.motivo, unders: unders.map((u) => u.placar) },
     // true só quando os 3 baldes batem pelo menos Média — critério pra
     // disparar a análise completa (paga) automaticamente
@@ -282,4 +319,4 @@ function calcularBaldes(jogoRaw) {
   };
 }
 
-module.exports = { calcularBaldes, precisaRecalcular, resumirH2H, VERSAO_CALCULO, bandaEG, cruzarXG, calcularPontos, calcularOvers, checarZebraTop5 };
+module.exports = { calcularBaldes, precisaRecalcular, mediaGolsCalculadora, classificarTendenciaGols, TENDENCIA_MEDIA, resumirH2H, VERSAO_CALCULO, bandaEG, cruzarXG, calcularPontos, calcularOvers, checarZebraTop5 };

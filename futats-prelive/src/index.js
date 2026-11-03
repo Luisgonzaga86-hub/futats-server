@@ -55,6 +55,7 @@ function ladoFavorito(jogo) {
 // ── 30/10 — Odds reais (api-games-odds) na página ─────────────────
 // Odd mínima pra um jogo entrar na múltipla (a perna é o Over 1,5). Pode
 // mudar aqui. Over 0,5 HT e Over 2,5 só aparecem como informação.
+const TENDENCIA_MEDIA = 2.5; // 03/11 — corte da tendência de gols (calculadora e H2H)
 const ODD_MIN_MULTIPLA = 1.30;
 const ODD_MIN_HT = 1.30;
 const ODD_MIN_O25 = 1.70;
@@ -150,6 +151,73 @@ function oddsMercadoDoJogo(jogo) {
   };
 }
 
+// 03/11 — Tendência de gols: média da calculadora × média do H2H (as duas > 2,5)
+function fmtMedia(v) {
+  return v == null ? '-' : Number(v).toFixed(1).replace('.', ',');
+}
+
+function tendenciaDoJogo(j) {
+  return (j.calculo && j.calculo.tendencia) || null;
+}
+
+function htmlCalcH2H(j) {
+  const t = tendenciaDoJogo(j);
+  if (!t) return '<small style="color:#666;">—</small>';
+  const chip =
+    t.status === 'sim'
+      ? '<span class="chip fogo">🔥 Tendência de gols</span>'
+      : t.status === 'contra'
+        ? '<span class="chip contra">⚠️ Calculadora e H2H contra</span>'
+        : '<span class="chip neutro">sem tendência</span>';
+  const calc = t.mediaCalc != null
+    ? `Calculadora: <b>${fmtMedia(t.mediaCalc)}</b> gols`
+    : '<small style="color:#666;">Calculadora: sem amostra</small>';
+  const h2h = t.nH2H > 0
+    ? `H2H: <b>${fmtMedia(t.mediaH2H)}</b> gols <small style="color:#9a9a96;">(${t.nH2H} confronto${t.nH2H > 1 ? 's' : ''}${t.nH2H < 3 ? ' — não conta' : ''})</small>`
+    : '<small style="color:#666;">H2H: sem dados</small>';
+  return `${chip}<br>${calc}<br>${h2h}`;
+}
+
+// Uma linha curta "O2.5 1.78 ✓ (justa 1.62)" — verde quando real >= justa
+function textoOddCurta(rotulo, real, pct) {
+  if (real == null) return '';
+  const justa = oddJusta(pct);
+  const valor = justa != null && real >= justa;
+  const cor = valor ? '#3fb950' : '#c9d1d9';
+  return `<span style="color:${cor};">${rotulo} ${fmtOdd(real)}${valor ? ' ✓' : ''}${justa != null ? ` <small style="color:#9a9a96;">(justa ${justa.toFixed(2)})</small>` : ''}</span>`;
+}
+
+function htmlTendenciaGols(hoje) {
+  const jogos = store
+    .getAllGames()
+    .filter((j) => j.data && j.data.slice(0, 10) === hoje && tendenciaDoJogo(j) && tendenciaDoJogo(j).status === 'sim')
+    .sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
+  if (!jogos.length) return '';
+  const mapaOdds = carregarOdds();
+  const linhas = jogos
+    .map((j) => {
+      const t = tendenciaDoJogo(j);
+      const o = oddsDoJogo(mapaOdds, j);
+      const g = (j.calculo && j.calculo.gols) || {};
+      const mercados = o
+        ? [
+            textoOddCurta('O1.5', o.over_15_back, g.over15),
+            textoOddCurta('O2.5', o.over_25_back, g.over25),
+            textoOddCurta('O3.5', o.over_35_back, g.over35),
+            textoOddCurta('BTTS', o.btts_yes_back, g.btts),
+          ].filter(Boolean).join(' · ')
+        : '<span style="color:#d29922;">❔ sem odd</span>';
+      return `• <b>${j.hora}</b> ${j.mandante} x ${j.visitante} — calc <b>${fmtMedia(t.mediaCalc)}</b> · H2H <b>${fmtMedia(t.mediaH2H)}</b> <small style="color:#9a9a96;">(${t.nH2H})</small> → ${mercados}`;
+    })
+    .join('<br>');
+  return `
+    <div style="background:#1c1a0f;border:1px solid #f0b429;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
+      <div style="font-size:15px;font-weight:700;color:#f0b429;margin-bottom:6px;">🔥 Tendência de gols hoje — ${jogos.length} jogo(s)</div>
+      <div style="font-size:13px;color:#9a9a96;margin-bottom:10px;">Média da calculadora &gt; ${TENDENCIA_MEDIA.toString().replace('.', ',')} <b>e</b> média do confronto direto &gt; ${TENDENCIA_MEDIA.toString().replace('.', ',')} (mín. 3 confrontos). Verde ✓ = odd real ≥ odd justa.</div>
+      <div style="font-size:13px;color:#c9d1d9;line-height:1.9;">${linhas}</div>
+    </div>`;
+}
+
 function htmlSugestaoMultipla(hoje, senha) {
   const jogos = getMultiplasDoDia(hoje);
   if (!jogos.length) return '';
@@ -230,12 +298,14 @@ app.get('/', checarSenha, (req, res) => {
              <button type="submit" ${j.processando ? 'disabled' : ''}>Analisar e mandar pro Telegram</button>
            </form>`;
 
+      const tend = tendenciaDoJogo(j);
       return `
-        <tr>
+        <tr${tend && tend.status === 'sim' ? ' class="tend"' : ''}>
           <td>${j.hora}</td>
           <td>${j.pais} — ${j.campeonato}</td>
           <td>${j.mandante} x ${j.visitante}</td>
           <td>${j.odd_casa} / ${j.odd_empate} / ${j.odd_fora}</td>
+          <td style="font-size:12px;line-height:1.6;">${htmlCalcH2H(j)}</td>
           <td style="font-size:12px;line-height:1.5;">${htmlOddsMercado(j, oddsDoJogo(mapaOddsPagina, j))}</td>
           <td>${j.selecao_ia || '-'}</td>
           <td>${status}${confianca}</td>
@@ -256,6 +326,11 @@ app.get('/', checarSenha, (req, res) => {
         button { background: #2b6cb0; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; }
         button:disabled { background: #444; cursor: not-allowed; }
         a.atualizar { color: #4fd1c5; }
+        tr.tend { background: #1a1a2e; }
+        .chip { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px; margin-bottom: 4px; }
+        .chip.fogo { background: #f0b42920; color: #f0b429; }
+        .chip.neutro { background: #2c2c30; color: #9a9a96; }
+        .chip.contra { background: #3a1b1b; color: #f85149; }
       </style>
     </head>
     <body>
@@ -265,8 +340,9 @@ app.get('/', checarSenha, (req, res) => {
       <p><a class="atualizar" href="/historico-confiabilidade?senha=${req.query.senha}">📊 Ver histórico de confiabilidade (cálculo local)</a></p>
       <p><a class="atualizar" href="/valor-historico?senha=${req.query.senha}">💰 Ver histórico de valor (green/red e unidades)</a></p>
       ${htmlSugestaoMultipla(hoje, req.query.senha)}
+      ${htmlTendenciaGols(hoje)}
       <table>
-        <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds 1X2</th><th>Odds mercado</th><th>Seleção IA</th><th>Status</th><th></th></tr>
+        <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds 1X2</th><th>Calculadora × H2H</th><th>Odds mercado</th><th>Seleção IA</th><th>Status</th><th></th></tr>
         ${linhas}
       </table>
     </body>
@@ -411,6 +487,7 @@ app.get('/interno/confiabilidade', checarTokenInterno, (req, res) => {
     lay,
     overs, // { over05, over15, over25, over35, overHT, over15HT } em % (0-100), ou null
     oddsMercado: oddsMercadoDoJogo(jogo), // 30/10 — odds reais pré-jogo (última captura), ou null
+    tendencia: confLocal?.tendencia || null, // 03/11 — calculadora × H2H
     h2h: confLocal?.h2h || null, // 29/10 — resumo do confronto direto (campo novo, não quebra quem já consome)
     layImprovavelMantidos: jogo.analisado ? extrairLayImprovavelMantidos(jogo.analise || '') : [],
     top3Placares: jogo.analisado ? extrairTop3Placares(jogo.analise || '') : [],
@@ -447,6 +524,7 @@ function fmtU(v) {
 app.get('/valor-historico', checarSenha, (req, res) => {
   const dias = Math.min(Math.max(parseInt(req.query.dias, 10) || 14, 1), 90);
   const modo = req.query.modo === 'todos' ? 'todos' : 'valor';
+  const soTend = req.query.tend === '1'; // 03/11 — só jogos com tendência de gols
   const corteData = new Date(Date.now() - dias * 86400000 - 3 * 3600000).toISOString().slice(0, 10);
 
   let capturas;
@@ -459,7 +537,8 @@ app.get('/valor-historico', checarSenha, (req, res) => {
 
   const jogos = store
     .getAllGames()
-    .filter((j) => j.resultado_final && j.calculo && j.calculo.gols && j.data && j.data.slice(0, 10) >= corteData);
+    .filter((j) => j.resultado_final && j.calculo && j.calculo.gols && j.data && j.data.slice(0, 10) >= corteData)
+    .filter((j) => !soTend || (j.calculo.tendencia && j.calculo.tendencia.status === 'sim'));
 
   const entradas = []; // todas as entradas possíveis (valor e sem valor)
   let semOdd = 0;
@@ -555,7 +634,8 @@ app.get('/valor-historico', checarSenha, (req, res) => {
     })
     .join('');
 
-  const link = (txt, q) => `<a class="atualizar" href="/valor-historico?senha=${req.query.senha}&${q}">${txt}</a>`;
+  const tq = soTend ? '&tend=1' : '';
+  const link = (txt, q) => `<a class="atualizar" href="/valor-historico?senha=${req.query.senha}&${q}${tq}">${txt}</a>`;
   res.send(`
     <html>
     <head>
@@ -576,6 +656,7 @@ app.get('/valor-historico', checarSenha, (req, res) => {
         unidades: stake 1, green = odd − 1, red = −1 (sem comissão).<br>
         Mostrando: <b>${modo === 'todos' ? 'todas as entradas (com e sem valor)' : 'só entradas com valor'}</b> ·
         ${link(modo === 'todos' ? 'ver só com valor' : 'ver todas', `dias=${dias}&modo=${modo === 'todos' ? 'valor' : 'todos'}`)} ·
+        <a class="atualizar" href="/valor-historico?senha=${req.query.senha}&dias=${dias}&modo=${modo}${soTend ? '' : '&tend=1'}">${soTend ? '🔥 filtro tendência de gols: LIGADO (desligar)' : '🔥 ver só tendência de gols'}</a> ·
         ${link('7 dias', `dias=7&modo=${modo}`)} · ${link('14 dias', `dias=14&modo=${modo}`)} · ${link('30 dias', `dias=30&modo=${modo}`)}
       </p>
       <div style="background:#1a1a1d;border:1px solid #333;border-radius:10px;padding:14px 18px;margin:14px 0;">
