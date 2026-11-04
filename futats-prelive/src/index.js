@@ -178,13 +178,39 @@ function htmlCalcH2H(j) {
   return `${chip}<br>${calc}<br>${h2h}`;
 }
 
-// Uma linha curta "O2.5 1.78 ✓ (justa 1.62)" — verde quando real >= justa
-function textoOddCurta(rotulo, real, pct) {
-  if (real == null) return '';
-  const justa = oddJusta(pct);
+// 03/11 — placar final (se já encerrou) e resultado de cada mercado da tendência
+const MERCADOS_TENDENCIA = [
+  { rotulo: 'O1.5', campoOdd: 'over_15_back', campoPct: 'over15', acerto: (c, f) => c + f >= 2 },
+  { rotulo: 'O2.5', campoOdd: 'over_25_back', campoPct: 'over25', acerto: (c, f) => c + f >= 3 },
+  { rotulo: 'O3.5', campoOdd: 'over_35_back', campoPct: 'over35', acerto: (c, f) => c + f >= 4 },
+  { rotulo: 'BTTS', campoOdd: 'btts_yes_back', campoPct: 'btts', acerto: (c, f) => c >= 1 && f >= 1 },
+];
+
+function placarFinalTexto(j) {
+  const r = j.resultado_final;
+  if (!r || r.golsCasa == null || r.golsFora == null) return '';
+  const ht = r.htCasa != null && r.htFora != null ? ` <small style="color:#9a9a96;">(HT ${r.htCasa}x${r.htFora})</small>` : '';
+  return `<b>FT ${r.golsCasa}x${r.golsFora}</b>${ht}`;
+}
+
+// Uma linha curta "O2.5 1.78 ✓ (justa 1.62)" — verde quando real >= justa.
+// Com o jogo encerrado, acrescenta ✅/❌ e devolve as unidades (stake 1).
+function textoOddCurta(m, o, g, r) {
+  const real = o ? o[m.campoOdd] : null;
+  if (real == null) return { html: '', units: null, valor: false };
+  const justa = oddJusta(g[m.campoPct]);
   const valor = justa != null && real >= justa;
   const cor = valor ? '#3fb950' : '#c9d1d9';
-  return `<span style="color:${cor};">${rotulo} ${fmtOdd(real)}${valor ? ' ✓' : ''}${justa != null ? ` <small style="color:#9a9a96;">(justa ${justa.toFixed(2)})</small>` : ''}</span>`;
+  let marca = '', units = null;
+  if (r && r.golsCasa != null && r.golsFora != null) {
+    const green = m.acerto(r.golsCasa, r.golsFora);
+    units = green ? real - 1 : -1;
+    marca = green ? ' ✅' : ' ❌';
+  }
+  return {
+    html: `<span style="color:${cor};">${m.rotulo} ${fmtOdd(real)}${valor ? ' ✓' : ''}${justa != null ? ` <small style="color:#9a9a96;">(justa ${justa.toFixed(2)})</small>` : ''}${marca}</span>`,
+    units, valor,
+  };
 }
 
 function htmlTendenciaGols(hoje) {
@@ -194,26 +220,44 @@ function htmlTendenciaGols(hoje) {
     .sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
   if (!jogos.length) return '';
   const mapaOdds = carregarOdds();
+  let encerrados = 0, comGols3 = 0;
+  const soma = { valor: 0, todos: 0 };
+  const cont = { valor: 0, todos: 0 };
   const linhas = jogos
     .map((j) => {
       const t = tendenciaDoJogo(j);
       const o = oddsDoJogo(mapaOdds, j);
       const g = (j.calculo && j.calculo.gols) || {};
-      const mercados = o
-        ? [
-            textoOddCurta('O1.5', o.over_15_back, g.over15),
-            textoOddCurta('O2.5', o.over_25_back, g.over25),
-            textoOddCurta('O3.5', o.over_35_back, g.over35),
-            textoOddCurta('BTTS', o.btts_yes_back, g.btts),
-          ].filter(Boolean).join(' · ')
-        : '<span style="color:#d29922;">❔ sem odd</span>';
-      return `• <b>${j.hora}</b> ${j.mandante} x ${j.visitante} — calc <b>${fmtMedia(t.mediaCalc)}</b> · H2H <b>${fmtMedia(t.mediaH2H)}</b> <small style="color:#9a9a96;">(${t.nH2H})</small> → ${mercados}`;
+      const r = j.resultado_final && j.resultado_final.golsCasa != null ? j.resultado_final : null;
+      let mercados;
+      if (!o) {
+        mercados = '<span style="color:#d29922;">❔ sem odd</span>';
+      } else {
+        const itens = MERCADOS_TENDENCIA.map((m) => textoOddCurta(m, o, g, r));
+        mercados = itens.map((i) => i.html).filter(Boolean).join(' · ');
+        for (const i of itens) {
+          if (i.units == null) continue;
+          soma.todos += i.units; cont.todos++;
+          if (i.valor) { soma.valor += i.units; cont.valor++; }
+        }
+      }
+      let placar = '<small style="color:#9a9a96;">⏳</small>';
+      if (r) {
+        encerrados++;
+        if (r.golsCasa + r.golsFora >= 3) comGols3++;
+        placar = placarFinalTexto(j);
+      }
+      return `• <b>${j.hora}</b> ${j.mandante} x ${j.visitante} — calc <b>${fmtMedia(t.mediaCalc)}</b> · H2H <b>${fmtMedia(t.mediaH2H)}</b> <small style="color:#9a9a96;">(${t.nH2H})</small> → ${mercados} &nbsp;|&nbsp; ${placar}`;
     })
     .join('<br>');
+  const resumoDia = encerrados
+    ? `<div style="font-size:13px;color:#c9d1d9;margin:0 0 10px;">📊 ${encerrados} de ${jogos.length} encerrado(s) · ${comGols3} com 3+ gols · soma do dia <b>só com valor ✓</b>: ${cont.valor ? fmtU(soma.valor) + ` <small style="color:#9a9a96;">(${cont.valor} entrada${cont.valor > 1 ? 's' : ''})</small>` : '<span style="color:#666;">sem entrada com valor</span>'} · <b>todos os mercados</b>: ${cont.todos ? fmtU(soma.todos) + ` <small style="color:#9a9a96;">(${cont.todos} entradas)</small>` : '<span style="color:#666;">—</span>'}</div>`
+    : '';
   return `
     <div style="background:#1c1a0f;border:1px solid #f0b429;border-radius:10px;padding:16px 20px;margin-bottom:20px;">
       <div style="font-size:15px;font-weight:700;color:#f0b429;margin-bottom:6px;">🔥 Tendência de gols hoje — ${jogos.length} jogo(s)</div>
-      <div style="font-size:13px;color:#9a9a96;margin-bottom:10px;">Média da calculadora &gt; ${TENDENCIA_MEDIA.toString().replace('.', ',')} <b>e</b> média do confronto direto &gt; ${TENDENCIA_MEDIA.toString().replace('.', ',')} (mín. 3 confrontos). Verde ✓ = odd real ≥ odd justa.</div>
+      <div style="font-size:13px;color:#9a9a96;margin-bottom:10px;">Média da calculadora &gt; ${TENDENCIA_MEDIA.toString().replace('.', ',')} <b>e</b> média do confronto direto &gt; ${TENDENCIA_MEDIA.toString().replace('.', ',')} (mín. 3 confrontos). Verde ✓ = odd real ≥ odd justa. Unidades: stake 1, green = odd − 1, red = −1 (sem comissão).</div>
+      ${resumoDia}
       <div style="font-size:13px;color:#c9d1d9;line-height:1.9;">${linhas}</div>
     </div>`;
 }
@@ -308,7 +352,7 @@ app.get('/', checarSenha, (req, res) => {
           <td style="font-size:12px;line-height:1.6;">${htmlCalcH2H(j)}</td>
           <td style="font-size:12px;line-height:1.5;">${htmlOddsMercado(j, oddsDoJogo(mapaOddsPagina, j))}</td>
           <td>${j.selecao_ia || '-'}</td>
-          <td>${status}${confianca}</td>
+          <td>${status}${confianca}${placarFinalTexto(j) ? `<br>${placarFinalTexto(j)}` : ''}</td>
           <td>${acao}</td>
         </tr>`;
     })
