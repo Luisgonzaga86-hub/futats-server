@@ -57,13 +57,14 @@ function formatarBlocoConfiabilidade(conf) {
 // Se a confiabilidade já veio mas as odds ainda não existiam, tenta de novo
 // de tempos em tempos (não re-renderiza alertas: só a página lê isso).
 async function atualizarOddsMercado(jogoId, estado, jogo) {
-  if ((estado.oddsMercado && estado.tendenciaGols !== undefined) || estado.encerrado) return; // 09/11: também busca a tendência de gols
+  if ((estado.oddsMercado && estado.tendenciaGols !== undefined && estado.confNiveis !== undefined) || estado.encerrado) return; // 09/11: também busca tendência de gols e níveis calculados
   const agora = Date.now();
   if (estado.oddsMercadoUltimaTentativa && (agora - estado.oddsMercadoUltimaTentativa) < CONFIABILIDADE_RETRY_MS) return;
   estado.oddsMercadoUltimaTentativa = agora;
   const conf = await buscarConfiabilidadePreLive(jogo);
   if (conf && conf.encontrado) {
     if (estado.tendenciaGols === undefined) estado.tendenciaGols = conf.tendencia || null; // 09/11 — calculadora × H2H (null se o prelive ainda não manda)
+    if (estado.confNiveis === undefined) { estado.confNiveis = { favorito: conf.favorito || '-', gols: conf.gols || '-', lay: conf.lay || '-' }; estado.h2hResumo = conf.h2h || null; } // 09/11 — linha 'calculado' ao lado do jogo
     if (conf.oddsMercado && !estado.oddsMercado) {
       estado.oddsMercado = conf.oddsMercado;
       console.log(`[confiabilidade] ${jogoId} → odds de mercado carregadas.`);
@@ -88,6 +89,8 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   estado.overs = conf.overs || null;
   estado.oddsMercado = conf.oddsMercado || null; // 30/10 — odds reais pré-jogo (pode ser null)
   estado.tendenciaGols = conf.tendencia || null; // 09/11 — tendência de gols (calculadora × H2H)
+  estado.confNiveis = { favorito: conf.favorito || '-', gols: conf.gols || '-', lay: conf.lay || '-' }; // 09/11 — níveis 🎯 ⚽ 🔒 calculados no pré-live
+  estado.h2hResumo = conf.h2h || null;
   console.log(`[confiabilidade] ${jogoId} → bloco carregado.${estado.overs ? ' (com overs)' : ''}`);
 
   if (estado.encerrado) {
@@ -927,6 +930,20 @@ function atualizarTresIndSobe(jogo, estado) {
   } else {
     ti.naoSobe = 'gol depois do disparo';
   }
+}
+
+// 09/11 — etiqueta "calculado" ao lado do jogo: 🎯 Favorito · ⚽ Gols · 🔒 Placar + H2H (V-E-D do mandante).
+// O contorno pontilhado segue a confiabilidade dos GOLS: verde = Alta · amarelo = Média · vermelho = Baixa.
+function chipCalculadoHTML(estado) {
+  const base = 'font-size:11px;padding:3px 8px;border-radius:6px;margin-left:8px;white-space:nowrap;background:#202023;color:#b4b4b0;';
+  const n = estado.confNiveis;
+  if (!n) return ` <span style="${base}">⏳ sem cálculo ainda</span>`;
+  const emoji = (nv) => (nv === 'Alta' ? '🟢' : nv === 'Baixa' ? '🔴' : nv === 'Média' ? '🟡' : '⚪');
+  const cor = n.gols === 'Alta' ? '#3fb950' : n.gols === 'Baixa' ? '#f85149' : n.gols === 'Média' ? '#e3b341' : null;
+  const h = estado.h2hResumo;
+  const h2h = h && h.disponivel && h.n ? ` · H2H ${h.mandanteV}V-${h.empates}E-${h.mandanteD}D` : '';
+  const contorno = cor ? `outline:2px dotted ${cor};outline-offset:3px;` : '';
+  return ` <span style="${base}${contorno}">🎯 ${emoji(n.favorito)} ${n.favorito} · ⚽ ${emoji(n.gols)} ${n.gols} · 🔒 ${emoji(n.lay)} ${n.lay}${h2h}</span>`;
 }
 
 // etiqueta resumida ao lado do nome do jogo — calculadora × H2H (vem do futats-prelive)
@@ -3467,7 +3484,7 @@ app.get('/observador', (req, res) => {
 
     return `<div class="ms-jogo" style="${estiloExtra}">
       <div class="ms-jogo-header">
-        <p class="ms-jogo-nome">${nomesComOdd(jogo)}${chipTendenciaHTML(estado)}</p>
+        <p class="ms-jogo-nome">${nomesComOdd(jogo)}${chipTendenciaHTML(estado)}${chipCalculadoHTML(estado)}</p>
         <p class="ms-muted ms-small">${tempoTxt} &middot; placar ${jogo.gols_casa}x${jogo.gols_fora}</p>
       </div>
       ${tagHTML}
@@ -3601,7 +3618,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_82',
+  status: 'ok', version: 'server_83',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -4079,7 +4096,7 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v82 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v83 iniciado!</b>\n' +
     '🆕 🧮 Página Momentum Status: a barra da calculadora mostra a odd real de mercado pré-jogo (→) e fica verde ✓ quando tem valor (só página, nada no Telegram)\n' +
     '🔄 🔥 3 Indicadores: continua valendo o 1T todo (Gol Limite, favorito ≤1,6), agora também com 1 gol no placar (3 indicadores contados só depois do gol). Se o 3º disparo for até o min 35, o alerta traz também a entrada de +2 gols (0x0 = Over 1,5 · 1 gol = Over 2,5), entrada mínima 1,50\n' +
     '🔧 Indicação de valor corrigida — agora "✓ valor" quando a odd do indicador é IGUAL ou MAIOR que a da calculadora\n' +
