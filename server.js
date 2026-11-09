@@ -57,14 +57,17 @@ function formatarBlocoConfiabilidade(conf) {
 // Se a confiabilidade já veio mas as odds ainda não existiam, tenta de novo
 // de tempos em tempos (não re-renderiza alertas: só a página lê isso).
 async function atualizarOddsMercado(jogoId, estado, jogo) {
-  if (estado.oddsMercado || estado.encerrado) return;
+  if ((estado.oddsMercado && estado.tendenciaGols !== undefined) || estado.encerrado) return; // 09/11: também busca a tendência de gols
   const agora = Date.now();
   if (estado.oddsMercadoUltimaTentativa && (agora - estado.oddsMercadoUltimaTentativa) < CONFIABILIDADE_RETRY_MS) return;
   estado.oddsMercadoUltimaTentativa = agora;
   const conf = await buscarConfiabilidadePreLive(jogo);
-  if (conf && conf.encontrado && conf.oddsMercado) {
-    estado.oddsMercado = conf.oddsMercado;
-    console.log(`[confiabilidade] ${jogoId} → odds de mercado carregadas.`);
+  if (conf && conf.encontrado) {
+    if (estado.tendenciaGols === undefined) estado.tendenciaGols = conf.tendencia || null; // 09/11 — calculadora × H2H (null se o prelive ainda não manda)
+    if (conf.oddsMercado && !estado.oddsMercado) {
+      estado.oddsMercado = conf.oddsMercado;
+      console.log(`[confiabilidade] ${jogoId} → odds de mercado carregadas.`);
+    }
   }
 }
 
@@ -84,6 +87,7 @@ async function garantirConfiabilidade(jogoId, estado, jogo) {
   estado.confiabilidadeBloco = formatarBlocoConfiabilidade(conf);
   estado.overs = conf.overs || null;
   estado.oddsMercado = conf.oddsMercado || null; // 30/10 — odds reais pré-jogo (pode ser null)
+  estado.tendenciaGols = conf.tendencia || null; // 09/11 — tendência de gols (calculadora × H2H)
   console.log(`[confiabilidade] ${jogoId} → bloco carregado.${estado.overs ? ' (com overs)' : ''}`);
 
   if (estado.encerrado) {
@@ -865,21 +869,6 @@ const TRES_IND_ODDS = {
   0: { f1_15: 1.27, f16_25: 1.43, f26_35: 1.44, mais1_ate35: 1.08, mais1_36_45: 1.16 },
   1: { f1_15: 1.21, f16_25: 1.25, f26_35: 1.44, mais1_ate35: 1.07, mais1_36_45: 1.17 }, // 3 indicadores depois do gol (n=518)
 };
-// 02/11 — 3 Indicadores com favorito ACIMA de 1,6 (só página, sem Telegram).
-// Base 29k jogos (25/10/2025–28/09/2026), fav>1,6, n=4.549. Odd justa = 100/%.
-// ht = Over HT (+1 gol até o intervalo) · lim = Over Limite (+1 gol até o fim) · m2 = +2 gols até o fim
-const TRES_IND_FAV_ALTO = {
-  0: { f1_15: { n: 610, ht: 1.70, lim: 1.11, m2: 1.47 }, f16_25: { n: 965, ht: 1.97, lim: 1.11, m2: 1.50 },
-       f26_35: { n: 968, ht: 2.81, lim: 1.19, m2: 1.79 }, f36_45: { n: 830, ht: 6.10, lim: 1.29, m2: 2.14 } },
-  1: { f1_15: { n: 44, ht: 1.52, lim: 1.07, m2: 1.38 }, f16_25: { n: 225, ht: 1.94, lim: 1.12, m2: 1.48 },
-       f26_35: { n: 404, ht: 2.64, lim: 1.16, m2: 1.76 }, f36_45: { n: 503, ht: 5.24, lim: 1.19, m2: 1.74 } },
-};
-function oddsTresIndFavAlto(golsNoDisparo, minuto) {
-  const t = TRES_IND_FAV_ALTO[golsNoDisparo];
-  if (!t) return null;
-  return minuto <= 15 ? t.f1_15 : minuto <= 25 ? t.f16_25 : minuto <= 35 ? t.f26_35 : t.f36_45;
-}
-function terceiroMaisDe35(ti) { return ti.terceiroMin > TRES_IND_MIN_MAX; }
 function oddJustaTresIndMais1(golsNoDisparo, minuto) {
   const t = TRES_IND_ODDS[golsNoDisparo];
   if (!t) return null;
@@ -892,6 +881,68 @@ function oddJustaTresInd(golsNoDisparo, minuto) {
   if (minuto <= 25) return t.f16_25;
   return t.f26_35;
 }
+// 09/11 — 3 Indicadores com favorito ACIMA de 1,6 (só página/observador, sem Telegram).
+// "Sobe" = borda dourada + destaque. Regras:
+//   • 3º disparo até o min 15 → sobe na hora.
+//   • 3º disparo depois do min 15 (1T) → NÃO sobe; se chegar ao intervalo sem gol depois
+//     do disparo (placar do HT = placar do disparo), sobe no intervalo e fica até o fim.
+//   • saiu gol depois do disparo, antes do HT → não sobe.
+// Odd justa DO DISPARO (base 29k jogos, fav>1,6, n=4.549): ht = Over HT · lim = +1 gol até o fim · m2 = +2 gols
+const TRES_IND_FAV_ALTO = {
+  0: { f1_15: { ht: 1.70, lim: 1.11, m2: 1.47 } },
+  1: { f1_15: { ht: 1.52, lim: 1.07, m2: 1.38 } },
+};
+// Odd justa A PARTIR DO INTERVALO (jogo que chegou ao HT sem gol depois do disparo).
+// 0x0 no HT → Over limite 2T = 1,30 (77,2%, fav>1,6, disparo até 35, n=1.351). O resto
+// (+2 gols, e o caso 1x0) fica null até recalcular na base — o card só mostra o que existe.
+const TRES_IND_INTERVALO = {
+  0: { lim: 1.30, m2: null },
+  1: { lim: null, m2: null },
+};
+const TRES_IND_CORTE_SOBE = 15; // fav >1,6: até esse minuto sobe na hora
+
+// chamado a cada ciclo do jogo (inclusive no intervalo)
+function atualizarTresIndSobe(jogo, estado) {
+  const ti = estado.tresInd;
+  if (!ti || ti.terceiroMin == null || ti.favoritoOk || ti.oddFav == null || ti.sobe || ti.naoSobe) return;
+  if (ti.terceiroMin <= TRES_IND_CORTE_SOBE) return; // já subiu no disparo
+  const total = (parseInt(jogo.gols_casa) || 0) + (parseInt(jogo.gols_fora) || 0);
+  if (!estado.passouHT) {
+    if (total !== ti.golsNoDisparo && jogo.tempo !== 'Intervalo') ti.naoSobe = 'gol depois do disparo';
+    if (jogo.tempo !== 'Intervalo') return;
+  }
+  // chegou ao intervalo (ou já passou): confere o placar do HT
+  let totalHT = total;
+  if (estado.htPlacar) {
+    const [a, b] = String(estado.htPlacar).split('x').map(Number);
+    if (!isNaN(a) && !isNaN(b)) totalHT = a + b;
+  } else if (estado.passouHT && jogo.tempo !== 'Intervalo') {
+    return; // passou do HT sem placar do intervalo — não decide
+  }
+  if (totalHT === ti.golsNoDisparo) {
+    ti.sobe = true;
+    ti.sobeMotivo = 'intervalo';
+    ti.oddsAlto = { ...(TRES_IND_INTERVALO[ti.golsNoDisparo] || {}) };
+    console.log(`[3 indicadores] ${jogo.mandante} x ${jogo.visitante} → sobe no intervalo (fav acima de 1,6 · 3º disparo ${ti.terceiroMin}')`);
+  } else {
+    ti.naoSobe = 'gol depois do disparo';
+  }
+}
+
+// etiqueta resumida ao lado do nome do jogo — calculadora × H2H (vem do futats-prelive)
+function chipTendenciaHTML(estado) {
+  const t = estado.tendenciaGols;
+  const fm = (v) => (v == null ? '–' : Number(v).toFixed(1).replace('.', ','));
+  const base = 'font-size:11px;font-weight:700;padding:3px 8px;border-radius:6px;margin-left:8px;white-space:nowrap;';
+  if (!t) return ` <span style="${base}background:#2c2c30;color:#7d7d79;">calc – · H2H – <span style="font-weight:400;">(sem dados)</span></span>`;
+  const n = t.nH2H || 0;
+  const nTxt = n > 0 ? `(${n}${n < 3 ? ' — não conta' : ''})` : '(sem dados)';
+  const nums = `calc ${fm(t.mediaCalc)} · H2H ${fm(t.mediaH2H)} <span style="font-weight:400;">${nTxt}</span>`;
+  if (t.status === 'sim') return ` <span style="${base}background:#f0b42920;color:#f0b429;">🔥 Tendência de gols · ${nums}</span>`;
+  if (t.status === 'contra') return ` <span style="${base}background:#3a1b1b;color:#f85149;">⚠️ contra · ${nums}</span>`;
+  return ` <span style="${base}background:#2c2c30;color:#9a9a96;">${nums}</span>`;
+}
+
 const TRES_IND_LABEL = {
   trocacao_gonza: '🥊 Trocação Gonza', tempestade_gonza: '⛈️ Tempestade Cruzada',
   pressao_gonza: '🟣 Pressão Gonza', janela6min180: '📊 Janela 6min/180',
@@ -991,17 +1042,16 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   console.log(`[3 indicadores] ${jogoId} → ${ti.resumo} · fav ${oddFav} · ${golsNoDisparo} gol(s) · ${ti.alerta ? 'ALERTA' + (ti.mais2 ? ' (+2 gols também)' : ' (só Limite)') : 'só observador (' + ti.motivoSemAlerta + ')'}`);
 
   if (!ti.alerta) {
-    // 02/11 — fav acima de 1,6: sobe no observador (destaque), sem Telegram e sem registro
-    if (oddFav != null && oddFav > TRES_IND_FAV_MAX) {
-      const o = oddsTresIndFavAlto(golsNoDisparo, terceiro);
-      if (o) {
-        ti.altoFav = {
-          ...o,
-          mercadoHT: golsNoDisparo === 0 ? 'Over 0,5 HT' : 'Over 1,5 HT',
-          mercadoLimite: golsNoDisparo === 0 ? 'Over 0,5 Limite' : 'Over 1,5 Limite',
-          mercadoMais2: golsNoDisparo === 0 ? 'Over 1,5' : 'Over 2,5',
-        };
-      }
+    // 09/11 — favorito acima de 1,6: até o min 15 sobe na hora; depois, só se chegar ao intervalo sem gol
+    const mercLim = golsNoDisparo === 0 ? 'Over 0,5 Limite' : 'Over 1,5 Limite';
+    const mercM2 = golsNoDisparo === 0 ? 'Over 1,5' : 'Over 2,5';
+    const mercHT = golsNoDisparo === 0 ? 'Over 0,5 HT' : 'Over 1,5 HT';
+    ti.mercadosAlto = { ht: mercHT, lim: mercLim, m2: mercM2 };
+    if (oddFav != null && terceiro <= TRES_IND_CORTE_SOBE) {
+      const o = (TRES_IND_FAV_ALTO[golsNoDisparo] || {}).f1_15;
+      ti.sobe = true;
+      ti.sobeMotivo = 'ate15';
+      ti.oddsAlto = o ? { ...o } : {};
     }
     return;
   }
@@ -1845,6 +1895,8 @@ async function monitorarLive() {
       await processarTresIndicadores(jogo, estado, jogoId, hoje).catch((e) =>
         console.error(`[3 indicadores] Erro em ${jogoId}:`, e.message)
       );
+      try { atualizarTresIndSobe(jogo, estado); }
+      catch (e) { console.error(`[3 indicadores sobe] Erro em ${jogoId}:`, e.message); }
       try { await processarTendenciaCantos(jogo, estado); }
       catch (e) { console.error(`[tendência cantos] Erro em ${jogoId}:`, e.message); }
       try { processarPadraoMin10(jogo, estado, jogoId); }
@@ -3376,11 +3428,29 @@ app.get('/observador', (req, res) => {
         estiloExtra = 'border:1.5px solid #f0b429;';
         const mais2Txt = ti.mais2 ? ` · +2 gols ${ti.mercadoMais2} ${f2(ti.oddMais2)}` : ' · +2 gols não (depois do min 35)';
         tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores — ${ti.resumo} · ${ti.mercadoLimite} ${f2(ti.oddLimite)}${mais2Txt}</p>`;
-      } else if (ti.altoFav) {
-        const a = ti.altoFav;
+      } else if (ti.sobe) {
+        // 09/11 — favorito acima de 1,6 que subiu (até o min 15, ou no intervalo)
         estiloExtra = 'border:1.5px solid #f0b429;';
-        const mais2 = terceiroMaisDe35(ti) ? '' : ` · +2 gols ${a.mercadoMais2} ${f2(a.m2)}`;
-        tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores (favorito acima de 1,6 · só página) — ${ti.resumo} · ${a.mercadoHT} ${f2(a.ht)} · ${a.mercadoLimite} ${f2(a.lim)}${mais2}</p>`;
+        const a = ti.oddsAlto || {};
+        const m = ti.mercadosAlto || {};
+        let odds;
+        if (ti.sobeMotivo === 'intervalo') {
+          const partes = [];
+          if (a.lim != null) partes.push(`Over limite (+1 gol) justa <b>${f2(a.lim)}</b>`);
+          if (a.m2 != null) partes.push(`+2 gols justa <b>${f2(a.m2)}</b>`);
+          odds = ' · sobe no intervalo' + (partes.length ? ' · ' + partes.join(' · ') : '');
+        } else {
+          const partes = [];
+          if (a.ht != null) partes.push(`${m.ht} ${f2(a.ht)}`);
+          if (a.lim != null) partes.push(`${m.lim} ${f2(a.lim)}`);
+          if (a.m2 != null) partes.push(`+2 gols ${m.m2} ${f2(a.m2)}`);
+          odds = ' · até o min 15' + (partes.length ? ' · ' + partes.join(' · ') : '');
+        }
+        tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores (favorito acima de 1,6) — ${ti.resumo}${odds}</p>`;
+      } else if (ti.naoSobe) {
+        tagHTML += `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">3 Indicadores — ${ti.resumo} (favorito acima de 1,6 · depois do min 15) — ${ti.naoSobe}: não sobe</p>`;
+      } else if (ti.terceiroMin > TRES_IND_CORTE_SOBE) {
+        tagHTML += `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">3 Indicadores — ${ti.resumo} (favorito acima de 1,6 · depois do min 15) — ⏳ sobe no intervalo se não sair gol</p>`;
       } else {
         tagHTML += `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">3 Indicadores — ${ti.resumo} (${ti.motivoSemAlerta || 'fora da regra'})</p>`;
       }
@@ -3397,7 +3467,7 @@ app.get('/observador', (req, res) => {
 
     return `<div class="ms-jogo" style="${estiloExtra}">
       <div class="ms-jogo-header">
-        <p class="ms-jogo-nome">${nomesComOdd(jogo)}</p>
+        <p class="ms-jogo-nome">${nomesComOdd(jogo)}${chipTendenciaHTML(estado)}</p>
         <p class="ms-muted ms-small">${tempoTxt} &middot; placar ${jogo.gols_casa}x${jogo.gols_fora}</p>
       </div>
       ${tagHTML}
@@ -3418,8 +3488,8 @@ app.get('/observador', (req, res) => {
     const strats = getEstrategiasKeys(jogo, hoje);
     const temEstrategia = strats.length > 0;
 
-    if (temEstrategia || estado.tresInd?.altoFav) {
-      comEstrategia.push({ jogo, estado, eventosHTML, comboForte: !!estado.novoIndicador?.comboTag || !!estado.reforcoChutes || !!estado.tresInd?.alerta || !!estado.tresInd?.altoFav });
+    if (temEstrategia || estado.tresInd?.sobe) {
+      comEstrategia.push({ jogo, estado, eventosHTML, comboForte: !!estado.novoIndicador?.comboTag || !!estado.reforcoChutes || !!estado.tresInd?.alerta || !!estado.tresInd?.sobe });
     } else {
       const temIndicador = !eventosHTML.includes('Nenhum indicador bateu ainda') || !!estado.tendenciaCantos || !!estado.padraoMin10 || estado.tresInd?.terceiroMin != null; // 29/09 · 15/10 padrão min10
       if (temIndicador) semEstrategia.push({ jogo, estado, eventosHTML });
@@ -3531,7 +3601,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_81',
+  status: 'ok', version: 'server_82',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -4009,7 +4079,7 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v81 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v82 iniciado!</b>\n' +
     '🆕 🧮 Página Momentum Status: a barra da calculadora mostra a odd real de mercado pré-jogo (→) e fica verde ✓ quando tem valor (só página, nada no Telegram)\n' +
     '🔄 🔥 3 Indicadores: continua valendo o 1T todo (Gol Limite, favorito ≤1,6), agora também com 1 gol no placar (3 indicadores contados só depois do gol). Se o 3º disparo for até o min 35, o alerta traz também a entrada de +2 gols (0x0 = Over 1,5 · 1 gol = Over 2,5), entrada mínima 1,50\n' +
     '🔧 Indicação de valor corrigida — agora "✓ valor" quando a odd do indicador é IGUAL ou MAIOR que a da calculadora\n' +
