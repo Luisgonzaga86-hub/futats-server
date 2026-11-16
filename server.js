@@ -37,12 +37,15 @@ async function buscarConfiabilidadePreLive(jogo) {
   }
 }
 
+// 16/11 — níveis com 🟢🟡🔴 (Alta em maiúsculas) e SEM a linha de Lay.
+function emojiNivelConf(nv) { return nv === 'Alta' ? '🟢' : nv === 'Baixa' ? '🔴' : nv === 'Média' ? '🟡' : '⚪'; }
+function rotuloNivelConf(nv) { return nv === 'Alta' ? 'ALTA' : (nv || '-'); }
+
 function formatarBlocoConfiabilidade(conf) {
   const linhas = [
     '🎯 Confiabilidade pré-live',
-    `🎯 Favorito: ${conf.favorito || '-'}`,
-    `⚽ Gols: ${conf.gols || '-'}`,
-    `🔒 Placar/Lay: ${conf.lay || '-'}`,
+    `${emojiNivelConf(conf.favorito)} Favorito: ${rotuloNivelConf(conf.favorito)}`,
+    `${emojiNivelConf(conf.gols)} Gols: ${rotuloNivelConf(conf.gols)}`,
   ];
   if (conf.layImprovavelMantidos && conf.layImprovavelMantidos.length) {
     linhas.push(`🎯 Lay Improvável (mantidos): ${conf.layImprovavelMantidos.join(' · ')}`);
@@ -53,17 +56,54 @@ function formatarBlocoConfiabilidade(conf) {
   return linhas.join('\n');
 }
 
+// 16/11 — bloco completo pro Telegram: níveis (Favorito/Gols) + tendência de gols.
+// Tendência vem do prelive (calculadora × H2H, mín. 3 confrontos), a mesma do observador:
+//   status 'sim'    → 🔥 TENDÊNCIA DE GOLS entre duas linhas de 🟨
+//   status 'contra' → ⚠️ TENDÊNCIA CONTRA
+// Sem confiabilidade carregada → string vazia (o bloco é omitido).
+function blocoConfiabilidadeMsg(estado) {
+  if (!estado || !estado.confiabilidadeBloco) return '';
+  // blocos antigos (guardados antes do restart) ainda podem ter a linha de Lay — tira
+  const base = String(estado.confiabilidadeBloco).replace(/\n?🔒 Placar\/Lay:[^\n]*/g, '');
+  const linhas = [base];
+  const t = estado.tendenciaGols;
+  if (t && (t.status === 'sim' || t.status === 'contra')) {
+    const fm = (v) => (v == null || !isFinite(Number(v)) ? '–' : Number(v).toFixed(1).replace('.', ','));
+    const n = t.nH2H || 0;
+    const nums = `calc ${fm(t.mediaCalc)} · H2H ${fm(t.mediaH2H)} (${n} ${n === 1 ? 'jogo' : 'jogos'})`;
+    if (t.status === 'sim') {
+      const moldura = '🟨🟨🟨🟨🟨🟨🟨🟨🟨🟨';
+      linhas.push(moldura, '🔥 TENDÊNCIA DE GOLS', nums, moldura);
+    } else {
+      linhas.push(`⚠️ TENDÊNCIA CONTRA: ${nums}`);
+    }
+  }
+  return linhas.join('\n');
+}
+
+// 16/11 — espera a busca da confiabilidade terminar (se estiver rodando) antes de montar
+// os alertas de entrada que não passam pelo montarCorpoAlerta. Timeout da busca: 8s.
+const confEmAndamento = new Map();
+async function aguardarConfiabilidade(jogoId, estado, jogo) {
+  try {
+    if (estado.confiabilidadeBloco) return;
+    const p = confEmAndamento.get(jogoId);
+    if (p) { await p; return; }
+    await garantirConfiabilidade(jogoId, estado, jogo);
+  } catch (e) { console.error(`[confiabilidade] aguardar ${jogoId}:`, e.message); }
+}
+
 // 30/10 — odds reais pré-jogo (api-games-odds, guardadas pelo futats-prelive).
 // Se a confiabilidade já veio mas as odds ainda não existiam, tenta de novo
 // de tempos em tempos (não re-renderiza alertas: só a página lê isso).
 async function atualizarOddsMercado(jogoId, estado, jogo) {
-  if ((estado.oddsMercado && estado.tendenciaGols !== undefined && estado.confNiveis !== undefined) || estado.encerrado) return; // 09/11: também busca tendência de gols e níveis calculados
+  if ((estado.oddsMercado && estado.tendenciaGols && estado.confNiveis !== undefined) || estado.encerrado) return; // 16/11: tendência null também tenta de novo // 09/11: também busca tendência de gols e níveis calculados
   const agora = Date.now();
   if (estado.oddsMercadoUltimaTentativa && (agora - estado.oddsMercadoUltimaTentativa) < CONFIABILIDADE_RETRY_MS) return;
   estado.oddsMercadoUltimaTentativa = agora;
   const conf = await buscarConfiabilidadePreLive(jogo);
   if (conf && conf.encontrado) {
-    if (estado.tendenciaGols === undefined) estado.tendenciaGols = conf.tendencia || null; // 09/11 — calculadora × H2H (null se o prelive ainda não manda)
+    if (!estado.tendenciaGols) estado.tendenciaGols = conf.tendencia || null; // 09/11 — calculadora × H2H (null se o prelive ainda não manda)
     if (estado.confNiveis === undefined) { estado.confNiveis = { favorito: conf.favorito || '-', gols: conf.gols || '-', lay: conf.lay || '-' }; estado.h2hResumo = conf.h2h || null; } // 09/11 — linha 'calculado' ao lado do jogo
     if (conf.oddsMercado && !estado.oddsMercado) {
       estado.oddsMercado = conf.oddsMercado;
@@ -521,6 +561,8 @@ function montarTextoValidacao(ni, jogo, estado, tempoDisplay, placarAtualDisplay
   if (ni.linhaOddJogo) partes.push(ni.linhaOddJogo);
   if (ni.linhaOddJogoHT) partes.push(ni.linhaOddJogoHT);
   partes.push(`📊 Placar atual: ${placarAtualDisplay} · ${tempoDisplay}'`);
+  const cbConf = blocoConfiabilidadeMsg(estado); // 16/11
+  if (cbConf) partes.push(cbConf);
 
   return partes.filter(Boolean).join('\n') + links;
 }
@@ -644,6 +686,7 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
     estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
 
     if (registro.oficial) {
+      await aguardarConfiabilidade(jogoId, estado, jogo); // 16/11
       const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
       const ids = await sendTelegramOficial(texto);
       estado.validacaoMsgIds = ids;
@@ -715,6 +758,7 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
     estado.validacaoIndex = validacaoNovosIndicadores.length - 1;
 
     if (registro.oficial) {
+      await aguardarConfiabilidade(jogoId, estado, jogo); // 16/11
       const texto = montarTextoValidacao(ni, jogo, estado, tempoNum, placarAtual);
       const ids = await sendTelegramOficial(texto);
       estado.validacaoMsgIds = ids;
@@ -846,6 +890,9 @@ async function processarReforcoChutesCasoB(jogo, estado, jogoId, hoje) {
     `📈 Odd justa ${REFORCO_CHUTES_ODD_JUSTA.toFixed(2).replace('.', ',')} · entrada mínima 1,25`,
     linhaValorTelegram(REFORCO_CHUTES_ODD_JUSTA, regOrigem.bucket, estado),
   ];
+  await aguardarConfiabilidade(jogoId, estado, jogo); // 16/11
+  const cbConf = blocoConfiabilidadeMsg(estado);
+  if (cbConf) partes.push('─────────────────', cbConf);
   const texto = partes.filter(Boolean).join('\n') + linksExchanges(jogo.urls_exchanges || {});
   estado.reforcoChutes.msgIds = await sendTelegramOficial(texto);
   console.log(`[reforço chutes] ${jogoId} → alerta enviado (${totais}/${noGol}).`);
@@ -1098,6 +1145,7 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   }
   salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
 
+  await aguardarConfiabilidade(jogoId, estado, jogo); // 16/11
   const fmt = (o) => o.toFixed(2).replace('.', ',');
   const strats = getEstrategiasKeys(jogo, hoje);
   const partes = [
@@ -1114,6 +1162,8 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
       : `⚠️ +2 gols não recomendado (3º disparo depois do min ${TRES_IND_MIN_MAX}) — só Gol Limite`,
     ti.mais2 ? linhaValorTelegram(ti.oddMais2, golsNoDisparo === 0 ? '15' : '25', estado) : null,
   ];
+  const cbConf = blocoConfiabilidadeMsg(estado); // 16/11
+  if (cbConf) partes.push('─────────────────', cbConf);
   const texto = partes.filter(Boolean).join('\n') + linksExchanges(jogo.urls_exchanges || {});
   ti.msgIds = await sendTelegramOficial(texto);
 }
@@ -1825,9 +1875,11 @@ async function monitorarLive() {
       estado.ultimaVez = agora;
       estado.jogo = jogo;
 
-      garantirConfiabilidade(jogoId, estado, jogo).catch((e) =>
+      const pConf = garantirConfiabilidade(jogoId, estado, jogo).catch((e) =>
         console.error(`[confiabilidade] Erro inesperado em ${jogoId}:`, e.message)
       );
+      confEmAndamento.set(jogoId, pConf);
+      pConf.finally(() => { if (confEmAndamento.get(jogoId) === pConf) confEmAndamento.delete(jogoId); });
 
       for (const m of (jogo.momentum || [])) {
         const idxMom = estado.momentum.findIndex(x => x.minuto === m.minuto);
@@ -2030,7 +2082,7 @@ function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay, stratKey, jo
   partes.push(...linhasOdds);
 
   partes.push(`📊 Placar atual: ${placarAtual} · ${tempoDisplay}'`);
-  if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
+  { const cb = blocoConfiabilidadeMsg(estado); if (cb) partes.push(cb); } // 16/11
   return partes.join('\n');
 }
 
@@ -2197,7 +2249,7 @@ function montarMsgConsolidada(jogo, estado, msgCons, placarAtual, tempoDisplay) 
   }
 
   partes.push(`📊 Placar atual: ${placarAtual} · ${tempoDisplay}'`);
-  if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
+  { const cb = blocoConfiabilidadeMsg(estado); if (cb) partes.push(cb); } // 16/11
 
   const links = linksExchanges(jogo.urls_exchanges || {});
   return fixo + sep + '\n' + partes.join('\n') + links;
@@ -2679,7 +2731,7 @@ async function processarEstadoGrupo1(jogo, estado, jogoId, hoje) {
     const extras = montarLinhasIndicadores(info).join('\n');
     const extrasTxt = extras ? `\n${extras}` : '';
     const avisoTxt = info.avisoSaida ? `\n${info.avisoSaida}` : '';
-    const confExtra = estado.confiabilidadeBloco ? `\n${estado.confiabilidadeBloco}` : '';
+    const confExtra = blocoConfiabilidadeMsg(estado) ? `\n${blocoConfiabilidadeMsg(estado)}` : '';
     const corpoExtra = `${extrasTxt}${avisoTxt}${confExtra}`;
     const display = STRAT_DISPLAY[stratKey] || stratKey;
     const fixo = `${display}\n⚽ <b>${jogo.mandante} x ${jogo.visitante}</b>\n⏱ ${info.tempoAlerta}' · 📊 ${info.placarAlerta}\n─────────────────`;
@@ -2822,7 +2874,7 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
 
     const partes = [...montarLinhasIndicadores(info)];
     if (info.avisoSaida) partes.push(info.avisoSaida);
-    if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
+    { const cb = blocoConfiabilidadeMsg(estado); if (cb) partes.push(cb); } // 16/11
     const htTexto = estado.htPlacar || '-';
     partes.push(`${emoji} · HT: ${htTexto} · FT: ${placarFT}`);
     const corpo = partes.join('\n');
@@ -2867,7 +2919,7 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
       }
       partes.push(linhaEntrada);
     }
-    if (estado.confiabilidadeBloco) partes.push(estado.confiabilidadeBloco);
+    { const cb = blocoConfiabilidadeMsg(estado); if (cb) partes.push(cb); } // 16/11
     const htTexto = estado.htPlacar || '-';
     partes.push(`📊 HT: ${htTexto} · FT: ${placarFT}`);
     const corpo = partes.join('\n');
@@ -3618,7 +3670,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_83',
+  status: 'ok', version: 'server_84',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -4081,7 +4133,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v77 na porta ${PORT}`);
+  console.log(`FUTATS Server v84 na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -4096,7 +4148,10 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v83 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v84 iniciado!</b>\n' +
+    '🆕 🎯 Confiabilidade pré-live (Favorito + Gols, Alta em destaque) agora em Combo Forte/HT, 3 Indicadores e Reforço Caso B · sem a linha de Lay em nenhum alerta\n' +
+    '🆕 🔥 Tendência de gols (calculadora × H2H) nos alertas de entrada — com moldura 🟨 quando a tendência é a favor e ⚠️ quando é contra\n' +
+    '🔧 Tendência que vinha vazia do prelive agora é buscada de novo\n' +
     '🆕 🧮 Página Momentum Status: a barra da calculadora mostra a odd real de mercado pré-jogo (→) e fica verde ✓ quando tem valor (só página, nada no Telegram)\n' +
     '🔄 🔥 3 Indicadores: continua valendo o 1T todo (Gol Limite, favorito ≤1,6), agora também com 1 gol no placar (3 indicadores contados só depois do gol). Se o 3º disparo for até o min 35, o alerta traz também a entrada de +2 gols (0x0 = Over 1,5 · 1 gol = Over 2,5), entrada mínima 1,50\n' +
     '🔧 Indicação de valor corrigida — agora "✓ valor" quando a odd do indicador é IGUAL ou MAIOR que a da calculadora\n' +
