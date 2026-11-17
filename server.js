@@ -1092,6 +1092,72 @@ function linhasEstudo3Ind(golsNoDisparo, terceiro, placar) {
     '  • Over HT não vale depois do min 15'];
 }
 
+
+// ── 17/11 — ⭐ TIME FORTE: superfavorito (odd até 1,30) de uma lista de times que, no histórico, marcam
+// com mais frequência que o esperado depois do 1º disparo de indicador (0x0, até o min 15).
+// Só orienta entrada no Over HT / Over 1,5 HT (não mexe nos outros alertas). Lista: base de 34 mil jogos
+// (out/2025–nov/2026); revisar em ~fev/2027 com base maior. [n, % gol até o HT, % esperado, % Over 1,5 HT]
+const TIMES_FORTES = {
+  'mancity':      { nome: 'Man City',     n: 8,  ht: 100, esp: 73, o15: 62, modo: 'ht_15' },
+  'realmadrid':   { nome: 'Real Madrid',  n: 17, ht: 88,  esp: 73, o15: 59, modo: 'ht_15' },
+  'alwaysready':  { nome: 'Always Ready', n: 12, ht: 83,  esp: 73, o15: 58, modo: 'ht_15' },
+  'alnassr':      { nome: 'Al-Nassr',     n: 24, ht: 96,  esp: 73, o15: 54, modo: 'ht_15' },
+  'dinamo':       { nome: 'Dinamo',       n: 15, ht: 93,  esp: 73, o15: 53, modo: 'ht_15' },
+  'levadia':      { nome: 'Levadia',      n: 14, ht: 100, esp: 75, o15: 43, modo: 'so_ht' },
+  'shakhtar':     { nome: 'Shakhtar',     n: 8,  ht: 88,  esp: 73, o15: 38, modo: 'so_ht' },
+  'psv':          { nome: 'PSV',          n: 8,  ht: 88,  esp: 74, o15: 38, modo: 'so_ht' },
+  'bodoglimt':    { nome: 'Bodø/Glimt',   n: 12, ht: 92,  esp: 72, o15: 33, modo: 'so_ht' },
+  'alhilal':      { nome: 'Al-Hilal',     n: 22, ht: 95,  esp: 73, o15: 41, modo: 'hilal' },
+};
+const TF_FAV_MAX = 1.30;
+const TF_MAX_MIN = 15;          // só 1º disparo até o min 15
+const TF_ODD_HT = 1.42;         // Over HT: entrada mínima no alerta
+const TF_ODD_HT_ESPERA10 = 1.45;// disparo antes do min 9: espera o min 10
+const TF_ODD_HT_REFORCO20 = 1.60;// ainda 0x0 aos 20'
+const TF_ODD_HT_HILAL20 = 2.00; // Al-Hilal: só aos 20' e a 2,00
+const TF_ODD_15 = 2.00;         // Over 1,5 HT mínimo (disparo até o min 10)
+const nzTime = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+async function alertaTimeForte(jogo, estado, jogoId, hoje, ti, golsAgora, tempoNum) {
+  if (estado.timeForteEnviado || golsAgora !== 0 || tempoNum > TF_MAX_MIN + 5) return;
+  const chaves = Object.entries(ti.mins || {});
+  if (!chaves.length) return;
+  const [kInd, mInd] = chaves.sort((a, b) => a[1] - b[1])[0];
+  if (mInd > TF_MAX_MIN || tempoNum - mInd > 5) return;
+  const oddFav = oddFavoritoDoJogo(jogo);
+  if (oddFav == null || oddFav > TF_FAV_MAX) return;
+  const favNome = getFavorito(jogo) === 'casa' ? jogo.mandante : jogo.visitante;
+  const t = TIMES_FORTES[nzTime(favNome)];
+  if (!t) return;
+  estado.timeForteEnviado = true;
+  const f = (o) => Number(o).toFixed(2).replace('.', ',');
+  const linhas = [
+    `⭐ TIME FORTE — ${t.nome} (superfavorito ${f(oddFav)})`,
+    `⚽ <b>${nomesComOdd(jogo)}</b>`,
+    `⏱ ${mInd}' · 📊 0x0 · ${TRES_IND_LABEL[kInd] || kInd} (1º indicador)`,
+    '─────────────────',
+    `📊 Neste time, depois do 1º disparo: gol até o HT em ${t.ht}% (${t.n} jogos) · esperado ${t.esp}%`,
+  ];
+  if (t.modo === 'hilal') {
+    linhas.push(`➜ Over HT só aos 20' (se ainda 0x0) e a ${f(TF_ODD_HT_HILAL20)} ou mais — time diferente do ano passado`);
+    linhas.push(`   Over 1,5 HT fraco neste time (${t.o15}%) — não entrar`);
+  } else {
+    if (mInd < 9) linhas.push(`➜ Over HT: espere o min 10 (se ainda 0x0) e entre a ${f(TF_ODD_HT_ESPERA10)} ou mais`);
+    else linhas.push(`➜ Over HT: entrar agora a ${f(TF_ODD_HT)} ou mais`);
+    linhas.push(`➜ Reforço: se ainda 0x0 aos 20' → Over HT a ${f(TF_ODD_HT_REFORCO20)} ou mais`);
+    if (t.modo === 'ht_15') {
+      if (mInd <= 10) linhas.push(`➜ Over 1,5 HT: ${t.o15}% neste time → entrar a ${f(TF_ODD_15)} ou mais`);
+      else linhas.push(`➜ Over 1,5 HT: ${t.o15}% neste time, mas disparo depois do min 10 — melhor só Over HT`);
+    } else {
+      linhas.push(`➜ Over 1,5 HT fraco neste time (${t.o15}%) — só Over HT`);
+    }
+  }
+  linhas.push('⚠️ Amostra pequena — lista a rever em fev/2027');
+  console.log(`[time forte] ${jogoId} → ${t.nome} · ${kInd} ${mInd}' · fav ${oddFav}`);
+  const texto = linhas.join('\n') + linksExchanges(jogo.urls_exchanges || {});
+  estado.timeForteMsgIds = await sendTelegramOficial(texto);
+}
+
 async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   if (estado.passouHT) return;
   const tempoNum = parseInt(jogo.tempo) || 0;
@@ -1144,6 +1210,9 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   for (const [k, m] of Object.entries(novos)) {
     if (m != null && m > after && m <= 45 && ti.mins[k] == null) ti.mins[k] = m;
   }
+  // 17/11 — ⭐ time forte (superfavorito da lista): 1º indicador em 0x0 até o min 15
+  try { await alertaTimeForte(jogo, estado, jogoId, hoje, ti, golsAgora, tempoNum); }
+  catch (e) { console.error(`[time forte] ${jogoId}:`, e.message); }
 
   // 3 indicadores diferentes em 3 minutos diferentes
   const ordenados = Object.entries(ti.mins).sort((a, b) => a[1] - b[1]);
@@ -3796,7 +3865,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_86',
+  status: 'ok', version: 'server_87',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -4259,7 +4328,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v86 na porta ${PORT}`);
+  console.log(`FUTATS Server v87 na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -4274,7 +4343,8 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v86 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v87 iniciado!</b>\n' +
+    '🆕 ⭐ Alerta TIME FORTE: quando um superfavorito (odd até 1,30) da lista (Man City, Real Madrid, Always Ready, Al-Nassr, Dinamo, Levadia, Shakhtar, PSV, Bodø/Glimt, Al-Hilal) tem o 1º indicador em 0x0 até o min 15, manda o mapa do time e as odds mínimas de Over HT / Over 1,5 HT\n' +
     '🆕 📊 Nova linha "Estudo" nos alertas: odd justa e mínima pelo minuto do alerta — favorito atrás por 1 (virada, Over 2,5 e Over 3,5 até o min 35) nas estratégias de virada, mercado do minuto nos 3 Indicadores depois do min 15 e a regra de entrada do Felipe/Ambas Marcam. O mercado principal (Over limite) segue igual\n' +
     '🆕 🟠 Felipe Over 1.5 só alerta no 1T: 0x0 até o min 45 (Over 1,5, entrar com odd acima de 1,50) ou com 1 gol até o min 35 (Over limite). Fora disso não alerta\n' +
     '🆕 🎯 Ambas Marcam / Ambas Marcam xG só alertam com 1 gol no placar, no 1T entre os min 10 e 30, e com pressão do time que falta marcar (raio ou chute no gol nos últimos 10 min). Nos outros casos não alertam mais (estudo: 0x0 bate só 47%, com 1 gol ~71-74%)\n' +
