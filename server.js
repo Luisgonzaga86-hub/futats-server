@@ -64,6 +64,8 @@ const MIN_FATOR={"ate1.3":{"alta":[0.975,0.964,0.936,0.903],"baixa":[1.047,1.07,
 // mínima = odd justa +5%. Linhas da coluna "Mais" da corretora. Gols do 1T incluem acréscimos.
 // Vale só para 0x0 e 1 gol (1x0 ou 0x1) até o min 75. Calculadora (média dos times) ajusta só o 0x0.
 // Ajustes das estratégias (3 Ind ≤20' 0x0, Ambas xG/Felipe) NÃO entram aqui.
+// Over 0,5 HT (0x0, até o min 15): mínima = justa +5%, estado no minuto 5/10/15 (próximo degrau acima), gols do 1T com acréscimos
+const MIN_HT = {"ate1.3":{"5":1.39,"10":1.47,"15":1.58},"1.3a1.6":{"5":1.46,"10":1.56,"15":1.68},"acima1.6":{"5":1.60,"10":1.72,"15":1.88}};
 const MIN_LINHAS_REL = { 0: [0.5, 1, 1.5, 2], 1: [1.5, 2, 2.5, 3] };
 const fmtMin = (v) => Number(v).toFixed(2).replace('.', ',');
 const fmtLinha = (v) => String(v).replace('.', ',');
@@ -104,7 +106,13 @@ function minimasLinhas(estado) {
       else if (calc <= 2.4) { valores = valores.map((v, i) => v * fat.baixa[i]); calcTxt = `calc baixa (${fmtLinha(calc.toFixed(1))}) — mínimas ajustadas`; }
     }
     const L = MIN_LINHAS_REL[g];
+    let htTxt = '';
+    if (g === 0 && !estado.passouHT && !ehInterv && m > 0 && m <= 15) {
+      const kh = m <= 5 ? '5' : m <= 10 ? '10' : '15';
+      htTxt = `Over 0,5 HT ≥ ${fmtMin(MIN_HT[banda][kh])}`;
+    }
     return {
+      htTxt,
       cab: `fav ${fmtLinha(oddFav.toFixed(2))} · ${gc}x${gf} · ${rotulo}`,
       mais1: [0, 1].map(i => `Over ${fmtLinha(L[i])} ≥ ${fmtMin(valores[i])}`).join(' · '),
       mais2: [2, 3].map(i => `Over ${fmtLinha(L[i])} ≥ ${fmtMin(valores[i])}`).join(' · '),
@@ -120,6 +128,7 @@ function blocoMinimasMsg(estado) {
     `+1 gol: ${r.mais1}`,
     `+2 gols: ${r.mais2}`,
   ];
+  if (r.htTxt) out.push(`HT (até o min 15): ${r.htTxt}`);
   if (r.calcTxt) out.push(`<i>${r.calcTxt}</i>`);
   out.push('só entra se a odd for igual ou maior');
   return out.join('\n');
@@ -130,7 +139,7 @@ function minimasHTML(estado) {
   return `<div style="margin:6px 0 10px;background:#0f1d14;border:1px solid #2ea043;border-radius:8px;padding:8px 12px;font-size:13px;line-height:1.7;color:#c9d1d9;">` +
     `📐 <b style="color:#3fb950;">Entrar só se a odd "Mais" for ≥</b> <span style="color:#8b949e;font-size:12px;">(${r.cab})</span>` +
     (r.calcTxt ? ` <span style="color:#e3b341;font-size:12px;">· ${r.calcTxt}</span>` : '') +
-    `<br>+1 gol: ${r.mais1}<br>+2 gols: ${r.mais2}</div>`;
+    `<br>+1 gol: ${r.mais1}<br>+2 gols: ${r.mais2}` + (r.htTxt ? `<br>HT (até o min 15): ${r.htTxt}` : '') + `</div>`;
 }
 
 // 16/11 — bloco completo pro Telegram: níveis (Favorito/Gols) + tendência de gols.
@@ -4490,6 +4499,7 @@ app.listen(PORT, async () => {
     '🆕 🎯 Confiabilidade pré-live (Favorito + Gols, Alta em destaque) agora em Combo Forte/HT, 3 Indicadores e Reforço Caso B · sem a linha de Lay em nenhum alerta\n' +
     '🆕 🔥 Tendência de gols (calculadora × H2H) nos alertas de entrada — com moldura 🟨 quando a tendência é a favor e ⚠️ quando é contra\n' +
     '🔧 Tendência que vinha vazia do prelive agora é buscada de novo\n' +
+    '🆕 📐 Até o min 15 (0x0) a régua também traz a mínima do Over 0,5 HT, por faixa do favorito\n' +
     '🧹 Removidas as mínimas/justas antigas do Limite (só a X, Estudo, odd justa pré-live FT) e o ✓ verde do observador — a 📐 é a regra de entrada\n' +
     '🆕 📐 Todo alerta e card do observador com 0x0 ou 1 gol agora traz as ODDS MÍNIMAS por linha asiática (+1 e +2 gols, coluna "Mais" da corretora) pelo minuto, placar e faixa do favorito; no 0x0 ajusta pela média dos times (calc). Some com 2+ gols ou depois do min 75\n' +
     '🆕 🧮 Página Momentum Status: a barra da calculadora mostra a odd real de mercado pré-jogo (→) e fica verde ✓ quando tem valor (só página, nada no Telegram)\n' +
