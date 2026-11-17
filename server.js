@@ -56,16 +56,94 @@ function formatarBlocoConfiabilidade(conf) {
   return linhas.join('\n');
 }
 
+const MIN_TAB={"ate1.3":{"0":{"10":[1.09,1.1,1.27,1.35],"15":[1.1,1.11,1.31,1.42],"20":[1.11,1.12,1.36,1.5],"25":[1.12,1.13,1.42,1.62],"30":[1.13,1.15,1.48,1.75],"35":[1.14,1.18,1.57,1.95],"40":[1.16,1.21,1.64,2.16],"50":[1.23,1.35,2.04,3.32],"55":[1.27,1.45,2.3,4.4],"60":[1.34,1.62,2.66,5.64],"65":[1.44,1.91,3.19,7.93],"70":[1.56,2.38,4.07,13.12],"HT":[1.2,1.29,1.87,2.8]},"1":{"10":[1.1,1.1,1.26,1.33],"15":[1.1,1.11,1.29,1.4],"20":[1.11,1.12,1.33,1.46],"25":[1.11,1.13,1.37,1.55],"30":[1.13,1.15,1.43,1.68],"35":[1.15,1.17,1.48,1.81],"40":[1.18,1.23,1.59,2.07],"50":[1.27,1.4,2.01,3.28],"55":[1.32,1.51,2.24,4.11],"60":[1.4,1.73,2.69,6.23],"65":[1.54,2.12,3.33,9.31],"70":[1.68,2.64,4.25,15.86],"75":[1.91,3.84,6.2,40.38],"HT":[1.23,1.31,1.8,2.65]}},"1.3a1.6":{"0":{"10":[1.12,1.14,1.39,1.54],"15":[1.14,1.16,1.44,1.63],"20":[1.15,1.18,1.5,1.76],"25":[1.17,1.21,1.57,1.9],"30":[1.19,1.24,1.66,2.09],"35":[1.21,1.29,1.76,2.33],"40":[1.25,1.35,1.92,2.74],"50":[1.36,1.62,2.48,4.88],"55":[1.45,1.86,2.95,6.79],"60":[1.55,2.17,3.48,9.89],"65":[1.71,2.75,4.41,16.0],"70":[1.86,3.34,5.24,23.46],"75":[2.13,4.55,6.89,36.47],"HT":[1.31,1.49,2.21,3.63]},"1":{"10":[1.11,1.13,1.35,1.48],"15":[1.13,1.15,1.41,1.6],"20":[1.14,1.16,1.46,1.7],"25":[1.16,1.19,1.52,1.84],"30":[1.18,1.22,1.61,2.05],"35":[1.2,1.27,1.7,2.26],"40":[1.23,1.31,1.8,2.52],"50":[1.34,1.54,2.24,3.91],"55":[1.42,1.73,2.64,5.4],"60":[1.52,2.01,3.11,7.73],"65":[1.66,2.47,3.85,12.05],"70":[1.85,3.19,4.95,20.11],"75":[2.13,4.67,7.15,34.37],"HT":[1.29,1.44,2.08,3.35]}},"acima1.6":{"0":{"10":[1.16,1.2,1.52,1.79],"15":[1.18,1.22,1.59,1.93],"20":[1.2,1.26,1.67,2.11],"25":[1.22,1.3,1.77,2.34],"30":[1.25,1.34,1.87,2.61],"35":[1.28,1.41,2.01,2.98],"40":[1.31,1.49,2.19,3.55],"50":[1.45,1.86,2.93,6.26],"55":[1.55,2.18,3.49,9.04],"60":[1.67,2.62,4.25,13.68],"65":[1.83,3.34,5.38,21.21],"70":[2.05,4.5,7.09,33.7],"75":[2.36,6.5,9.81,57.9],"HT":[1.39,1.69,2.6,4.96]},"1":{"10":[1.14,1.16,1.44,1.65],"15":[1.15,1.19,1.49,1.76],"20":[1.17,1.21,1.56,1.91],"25":[1.19,1.24,1.64,2.1],"30":[1.21,1.28,1.73,2.33],"35":[1.24,1.33,1.85,2.62],"40":[1.27,1.39,1.97,3.02],"50":[1.39,1.67,2.57,5.05],"55":[1.48,1.92,3.02,7.2],"60":[1.59,2.29,3.66,10.76],"65":[1.73,2.86,4.61,16.39],"70":[1.93,3.83,6.1,27.41],"75":[2.24,5.64,8.65,51.81],"HT":[1.34,1.54,2.3,4.07]}}};
+const MIN_FATOR={"ate1.3":{"alta":[0.975,0.964,0.936,0.903],"baixa":[1.047,1.07,1.137,1.225]},"1.3a1.6":{"alta":[0.987,0.973,0.928,0.862],"baixa":[1.0,1.01,1.058,1.141]},"acima1.6":{"alta":[0.97,0.95,0.93,0.859],"baixa":[1.022,1.046,1.076,1.166]}};
+
+// ── 17/11 — 📐 MÍNIMAS POR LINHA ASIÁTICA (gols do jogo todo) ───────────────────────────
+// Base: 33,5 mil jogos finalizados × placar (0x0 / 1 gol) × minuto × faixa do favorito.
+// mínima = odd justa +5%. Linhas da coluna "Mais" da corretora. Gols do 1T incluem acréscimos.
+// Vale só para 0x0 e 1 gol (1x0 ou 0x1) até o min 75. Calculadora (média dos times) ajusta só o 0x0.
+// Ajustes das estratégias (3 Ind ≤20' 0x0, Ambas xG/Felipe) NÃO entram aqui.
+const MIN_LINHAS_REL = { 0: [0.5, 1, 1.5, 2], 1: [1.5, 2, 2.5, 3] };
+const fmtMin = (v) => Number(v).toFixed(2).replace('.', ',');
+const fmtLinha = (v) => String(v).replace('.', ',');
+function minimasLinhas(estado) {
+  try {
+    const jogo = estado && estado.jogo;
+    if (!jogo) return null;
+    const gc = parseInt(jogo.gols_casa) || 0, gf = parseInt(jogo.gols_fora) || 0;
+    const g = gc + gf;
+    if (g > 1) return null;
+    const oddFav = oddFavoritoDoJogo(jogo);
+    if (oddFav == null) return null;
+    const banda = oddFav <= 1.3 ? 'ate1.3' : (oddFav <= 1.6 ? '1.3a1.6' : 'acima1.6');
+    const tempoTxt = String(jogo.tempo || '');
+    const ehInterv = /interv/i.test(tempoTxt);
+    const m = parseInt(tempoTxt) || 0;
+    let key, rotulo;
+    if (ehInterv || (!estado.passouHT && m > 40)) {
+      key = 'HT'; rotulo = ehInterv ? 'intervalo' : "41' até o intervalo";
+    } else if (!estado.passouHT) {
+      key = m <= 10 ? '10' : m <= 15 ? '15' : m <= 20 ? '20' : m <= 25 ? '25' : m <= 30 ? '30' : m <= 35 ? '35' : '40';
+      rotulo = `até ${key}'`;
+    } else {
+      if (m > 75 || m <= 0) return null;
+      key = m <= 50 ? '50' : m <= 55 ? '55' : m <= 60 ? '60' : m <= 65 ? '65' : m <= 70 ? '70' : '75';
+      rotulo = `até ${key}'`;
+    }
+    const linhaTab = (((MIN_TAB[banda] || {})[g]) || {})[key];
+    if (!linhaTab || linhaTab.some(v => v == null)) return null;
+    let valores = linhaTab.slice();
+    let calcTxt = '';
+    const t = estado.tendenciaGols;
+    const calc = t && t.mediaCalc != null ? Number(t.mediaCalc) : NaN;
+    const doPrimeiroTempo = ehInterv || !estado.passouHT;
+    if (g === 0 && doPrimeiroTempo && isFinite(calc)) {
+      const fat = MIN_FATOR[banda];
+      if (calc >= 3.2) { valores = valores.map((v, i) => v * fat.alta[i]); calcTxt = `calc alta (${fmtLinha(calc.toFixed(1))}) — mínimas ajustadas`; }
+      else if (calc <= 2.4) { valores = valores.map((v, i) => v * fat.baixa[i]); calcTxt = `calc baixa (${fmtLinha(calc.toFixed(1))}) — mínimas ajustadas`; }
+    }
+    const L = MIN_LINHAS_REL[g];
+    return {
+      cab: `fav ${fmtLinha(oddFav.toFixed(2))} · ${gc}x${gf} · ${rotulo}`,
+      mais1: [0, 1].map(i => `Over ${fmtLinha(L[i])} ≥ ${fmtMin(valores[i])}`).join(' · '),
+      mais2: [2, 3].map(i => `Over ${fmtLinha(L[i])} ≥ ${fmtMin(valores[i])}`).join(' · '),
+      calcTxt,
+    };
+  } catch (e) { return null; }
+}
+function blocoMinimasMsg(estado) {
+  const r = minimasLinhas(estado);
+  if (!r) return '';
+  const out = [
+    `📐 <b>Mínimas — odd "Mais" da corretora</b> (${r.cab})`,
+    `+1 gol: ${r.mais1}`,
+    `+2 gols: ${r.mais2}`,
+  ];
+  if (r.calcTxt) out.push(`<i>${r.calcTxt}</i>`);
+  out.push('só entra se a odd for igual ou maior');
+  return out.join('\n');
+}
+function minimasHTML(estado) {
+  const r = minimasLinhas(estado);
+  if (!r) return '';
+  return `<div style="margin:6px 0 10px;background:#0f1d14;border:1px solid #2ea043;border-radius:8px;padding:8px 12px;font-size:13px;line-height:1.7;color:#c9d1d9;">` +
+    `📐 <b style="color:#3fb950;">Entrar só se a odd "Mais" for ≥</b> <span style="color:#8b949e;font-size:12px;">(${r.cab})</span>` +
+    (r.calcTxt ? ` <span style="color:#e3b341;font-size:12px;">· ${r.calcTxt}</span>` : '') +
+    `<br>+1 gol: ${r.mais1}<br>+2 gols: ${r.mais2}</div>`;
+}
+
 // 16/11 — bloco completo pro Telegram: níveis (Favorito/Gols) + tendência de gols.
 // Tendência vem do prelive (calculadora × H2H, mín. 3 confrontos), a mesma do observador:
 //   status 'sim'    → 🔥 TENDÊNCIA DE GOLS entre duas linhas de 🟨
 //   status 'contra' → ⚠️ TENDÊNCIA CONTRA
 // Sem confiabilidade carregada → string vazia (o bloco é omitido).
 function blocoConfiabilidadeMsg(estado) {
-  if (!estado || !estado.confiabilidadeBloco) return '';
+  const mnBloco = blocoMinimasMsg(estado); // 17/11 — 📐 mínimas por linha (todo alerta com 0x0 ou 1 gol)
+  if (!estado || !estado.confiabilidadeBloco) return mnBloco;
   // blocos antigos (guardados antes do restart) ainda podem ter a linha de Lay — tira
   const base = String(estado.confiabilidadeBloco).replace(/\n?🔒 Placar\/Lay:[^\n]*/g, '');
-  const linhas = [base];
+  const linhas = mnBloco ? [mnBloco, base] : [base];
   const t = estado.tendenciaGols;
   if (t && (t.status === 'sim' || t.status === 'contra')) {
     const fm = (v) => (v == null || !isFinite(Number(v)) ? '–' : Number(v).toFixed(1).replace('.', ','));
@@ -588,8 +666,7 @@ async function reeditarValidacaoComOdds(jogo, estado) {
     if (oddJogoFT != null) {
       const odd = pctParaOdd(oddJogoFT);
       if (odd != null) {
-        ni.linhaOddJogo = `📊 Odd justa do jogo (pré-live, ${ni.mercadoTexto}): ${odd.toFixed(2)} (${oddJogoFT.toFixed(0)}%)`;
-        ni.oddJogoJaPreenchida = true;
+        ni.oddJogoJaPreenchida = true; // 17/11 — justa FT pré-live removida (vale a 📐)
       }
     }
     const mercadoHT = `over${ni.bucketNoMomento}HT`;
@@ -712,8 +789,7 @@ async function processarTrocacaoTempestade(jogo, estado, jogoId, hoje) {
     if (oddJogoFT != null) {
       const odd = pctParaOdd(oddJogoFT);
       if (odd != null) {
-        ni.linhaOddJogo = `📊 Odd justa do jogo (pré-live, ${ni.mercadoTexto}): ${odd.toFixed(2)} (${oddJogoFT.toFixed(0)}%)`;
-        ni.oddJogoJaPreenchida = true;
+        ni.oddJogoJaPreenchida = true; // 17/11 — justa FT pré-live removida (vale a 📐)
       }
     }
     const oddJogoHT = estado.overs ? estado.overs[`over${ni.bucketNoMomento}HT`] : null;
@@ -1179,14 +1255,14 @@ async function alertaTresIndFavAltoEstr(jogo, estado, jogoId, hoje, ti, escolhid
     const r = FA_0X0.find(([a, b]) => terceiro >= a && terceiro <= b);
     if (!r) return;
     nTxt = r[3];
-    linhasEntrada.push(`➜ ENTRAR: Over 1,5 (jogo todo) — odd justa ${f(r[2])} · <b>só a ${minO(r[2])} ou mais</b>`);
+    linhasEntrada.push('➜ ENTRAR: Over 1,5 (jogo todo, +2 gols)');
     regs.push({ mercado: 'Over 1,5 (jogo todo)', oddJusta: r[2], golsNecessarios: 2, bucket: '15', k: 'indexFA1' });
   } else {
     const r = FA_1GOL.find(([a, b]) => terceiro >= a && terceiro <= b);
     if (!r) return;
     nTxt = r[4];
-    linhasEntrada.push(`➜ ENTRAR 1: Over 1,5 (jogo todo, +1 gol) — odd justa ${f(r[2])} · <b>só a ${minO(r[2])} ou mais</b>`);
-    linhasEntrada.push(`➜ ENTRAR 2: Over 2,5 (jogo todo, +2 gols) — odd justa ${f(r[3])} · <b>só a ${minO(r[3])} ou mais</b>`);
+    linhasEntrada.push('➜ ENTRAR 1: Over 1,5 (jogo todo, +1 gol)');
+    linhasEntrada.push('➜ ENTRAR 2: Over 2,5 (jogo todo, +2 gols)');
     regs.push({ mercado: 'Over 1,5 (jogo todo, +1 gol)', oddJusta: r[2], golsNecessarios: 1, bucket: '15', k: 'indexFA1' });
     regs.push({ mercado: 'Over 2,5 (jogo todo, +2 gols)', oddJusta: r[3], golsNecessarios: 2, bucket: '25', k: 'indexFA2' });
   }
@@ -1214,7 +1290,6 @@ async function alertaTresIndFavAltoEstr(jogo, estado, jogoId, hoje, ti, escolhid
     ...escolhidos.map(([k, m]) => `• ${TRES_IND_LABEL[k] || k} — ${m}'`),
     strats.map(k => STRAT_DISPLAY[k] || k).join(' · '),
     ...linhasEntrada,
-    `📊 Estudo: favorito >1,6 + ${strats.length > 1 ? 'estas estratégias' : 'esta estratégia'}, disparo aos ${terceiro}' com ${placar} (${nTxt} jogos). Odd mínima = justa +6%.`,
     '⚠️ Em validação — amostra pequena. Over HT não entra neste alerta.',
   ];
   const cb = blocoConfiabilidadeMsg(estado);
@@ -1371,13 +1446,8 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
     '─────────────────',
     ...escolhidos.map(([k, m]) => `• ${TRES_IND_LABEL[k] || k} — ${m}'`),
     strats.length ? strats.map(k => STRAT_DISPLAY[k] || k).join(' · ') : null,
-    `➜ ENTRAR 1: ${ti.mercadoLimite} — odd justa ${fmt(ti.oddLimite)}`,
-    linhaValorTelegram(ti.oddLimite, golsNoDisparo === 0 ? '05' : '15', estado),
-    ti.mais2
-      ? `➜ ENTRAR 2: ${ti.mercadoMais2} — +2 gols · odd justa ${fmt(ti.oddMais2)} · entrada mínima ${fmt(TRES_IND_ODD_MINIMA)}`
-      : `⚠️ +2 gols não recomendado (3º disparo depois do min ${TRES_IND_MIN_MAX}) — só Gol Limite`,
-    ti.mais2 ? linhaValorTelegram(ti.oddMais2, golsNoDisparo === 0 ? '15' : '25', estado) : null,
-    ...linhasEstudo3Ind(golsNoDisparo, terceiro, placar),
+    `➜ ENTRAR 1: ${ti.mercadoLimite}`,
+    ti.mais2 ? `➜ ENTRAR 2: ${ti.mercadoMais2} (+2 gols)` : null,
   ];
   const cbConf = blocoConfiabilidadeMsg(estado); // 16/11
   if (cbConf) partes.push('─────────────────', cbConf);
@@ -1742,22 +1812,7 @@ function montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, overs) {
     }
   }
 
-  const taxaEstFT = stratKey ? taxaEstrategia(stratKey, contexto, mercadoFT) : null;
-  const taxaJogoFT = overs ? overs[mercadoFT] : null;
-
-  if (taxaEstFT != null) {
-    linhas.push(`📈 Odd justa estratégia (${labelFT} Limite, pré-live): ${(1/taxaEstFT).toFixed(2)}`);
-  }
-  if (taxaJogoFT != null) {
-    const oddJogoFT = pctParaOdd(taxaJogoFT);
-    if (oddJogoFT != null) {
-      linhas.push(`📊 Odd justa do jogo (pré-live, ${labelFT} Limite): ${oddJogoFT.toFixed(2)} (${taxaJogoFT.toFixed(0)}%)`);
-    }
-  }
-  if (taxaEstFT != null && taxaJogoFT != null) {
-    const media = (taxaEstFT + (taxaJogoFT/100)) / 2;
-    linhas.push(`🎯 Odd justa combinada (${labelFT} Limite): ${(1/media).toFixed(2)}`);
-  }
+  // 17/11 — odd justa FT (Limite) pré-live removida dos alertas: a 📐 Mínimas dá a odd por linha, minuto e placar
 
   return linhas;
 }
@@ -2311,7 +2366,7 @@ function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay, stratKey, jo
   const linhasOdds = montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, estado.overs);
   partes.push(...linhasOdds);
 
-  { const le = [...linhasEstudoFavAtras(jogo, msgCons.estrategias), ...linhasEstudoRegras(msgCons.estrategias)]; if (le.length) partes.push(...le); } // 17/11
+  // 17/11 — linhas 'Estudo' removidas: a 📐 Mínimas cobre as linhas por minuto/placar/favorito
   partes.push(`📊 Placar atual: ${placarAtual} · ${tempoDisplay}'`);
   { const cb = blocoConfiabilidadeMsg(estado); if (cb) partes.push(cb); } // 16/11
   return partes.join('\n');
@@ -3394,8 +3449,8 @@ function indicacaoDeValorHTML(indicadorKey, minutoTrigger, jogo, estado) {
     const oddCalculadora = pctParaOdd(pctCalculadora);
     if (oddCalculadora == null) continue;
     const temValor = oddIndicador >= oddCalculadora - 0.001; // 29/09 — era <=
-    const corVal = temValor ? '#3fb950' : '#8b949e';
-    const marca = temValor ? '✓ valor' : '—';
+    const corVal = '#8b949e'; // 17/11 — sem verde: valor pré-jogo não filtra
+    const marca = '—';
     linhas.push(`<tr><td style="padding:3px 8px;">${label}</td><td style="padding:3px 8px;">${oddCalculadora.toFixed(2)}</td><td style="padding:3px 8px;">${oddIndicador.toFixed(2)}</td><td style="padding:3px 8px;color:${corVal};font-weight:600;">${marca}</td></tr>`);
   }
   if (!linhas.length) return '';
@@ -3476,7 +3531,7 @@ function htmlOddMercado(real, oddJusta) {
   if (real == null || !isFinite(real)) return '';
   const valor = oddJusta != null && real >= oddJusta - 0.001;
   return valor
-    ? ` <span style="color:#3fb950;font-weight:700;">&rarr; ${real.toFixed(2)} ✓</span>`
+    ? ` <span style="color:#8b949e;">&rarr; ${real.toFixed(2)}</span>`
     : ` <span style="color:#8b949e;">&rarr; ${real.toFixed(2)}</span>`;
 }
 
@@ -3772,8 +3827,8 @@ app.get('/observador', (req, res) => {
       const f2 = (o) => o != null ? o.toFixed(2).replace('.', ',') : '-';
       if (ti.alerta) {
         estiloExtra = 'border:1.5px solid #f0b429;';
-        const mais2Txt = ti.mais2 ? ` · +2 gols ${ti.mercadoMais2} ${f2(ti.oddMais2)}` : ' · +2 gols não (depois do min 35)';
-        tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores — ${ti.resumo} · ${ti.mercadoLimite} ${f2(ti.oddLimite)}${mais2Txt}</p>`;
+        const mais2Txt = ti.mais2 ? ` · +2 gols ${ti.mercadoMais2}` : '';
+        tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores — ${ti.resumo} · ${ti.mercadoLimite}${mais2Txt}</p>`;
       } else if (ti.sobe) {
         // 09/11 — favorito acima de 1,6 que subiu (até o min 15, ou no intervalo)
         estiloExtra = 'border:1.5px solid #f0b429;';
@@ -3782,14 +3837,14 @@ app.get('/observador', (req, res) => {
         let odds;
         if (ti.sobeMotivo === 'intervalo') {
           const partes = [];
-          if (a.lim != null) partes.push(`Over limite (+1 gol) justa <b>${f2(a.lim)}</b>`);
-          if (a.m2 != null) partes.push(`+2 gols justa <b>${f2(a.m2)}</b>`);
+          if (a.lim != null) partes.push('Over limite (+1 gol)');
+          if (a.m2 != null) partes.push('+2 gols');
           odds = ' · sobe no intervalo' + (partes.length ? ' · ' + partes.join(' · ') : '');
         } else {
           const partes = [];
-          if (a.ht != null) partes.push(`${m.ht} ${f2(a.ht)}`);
-          if (a.lim != null) partes.push(`${m.lim} ${f2(a.lim)}`);
-          if (a.m2 != null) partes.push(`+2 gols ${m.m2} ${f2(a.m2)}`);
+          if (a.ht != null) partes.push(`${m.ht}`);
+          if (a.lim != null) partes.push(`${m.lim}`);
+          if (a.m2 != null) partes.push(`+2 gols ${m.m2}`);
           odds = ' · até o min 15' + (partes.length ? ' · ' + partes.join(' · ') : '');
         }
         tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores (favorito acima de 1,6) — ${ti.resumo}${odds}</p>`;
@@ -3818,6 +3873,7 @@ app.get('/observador', (req, res) => {
       </div>
       ${tagHTML}
       ${badgeEstrategias}
+      ${(tagHTML || badgeEstrategias) ? minimasHTML(estado) : ''}
       ${eventosHTML}
       ${calcBloco}
       ${tendenciaCantosHTML(estado)}
@@ -4434,6 +4490,8 @@ app.listen(PORT, async () => {
     '🆕 🎯 Confiabilidade pré-live (Favorito + Gols, Alta em destaque) agora em Combo Forte/HT, 3 Indicadores e Reforço Caso B · sem a linha de Lay em nenhum alerta\n' +
     '🆕 🔥 Tendência de gols (calculadora × H2H) nos alertas de entrada — com moldura 🟨 quando a tendência é a favor e ⚠️ quando é contra\n' +
     '🔧 Tendência que vinha vazia do prelive agora é buscada de novo\n' +
+    '🧹 Removidas as mínimas/justas antigas do Limite (só a X, Estudo, odd justa pré-live FT) e o ✓ verde do observador — a 📐 é a regra de entrada\n' +
+    '🆕 📐 Todo alerta e card do observador com 0x0 ou 1 gol agora traz as ODDS MÍNIMAS por linha asiática (+1 e +2 gols, coluna "Mais" da corretora) pelo minuto, placar e faixa do favorito; no 0x0 ajusta pela média dos times (calc). Some com 2+ gols ou depois do min 75\n' +
     '🆕 🧮 Página Momentum Status: a barra da calculadora mostra a odd real de mercado pré-jogo (→) e fica verde ✓ quando tem valor (só página, nada no Telegram)\n' +
     '🔄 🔥 3 Indicadores: continua valendo o 1T todo (Gol Limite, favorito ≤1,6), agora também com 1 gol no placar (3 indicadores contados só depois do gol). Se o 3º disparo for até o min 35, o alerta traz também a entrada de +2 gols (0x0 = Over 1,5 · 1 gol = Over 2,5), entrada mínima 1,50\n' +
     '🔧 Indicação de valor corrigida — agora "✓ valor" quando a odd do indicador é IGUAL ou MAIOR que a da calculadora\n' +
