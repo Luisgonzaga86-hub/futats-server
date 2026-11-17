@@ -2405,6 +2405,32 @@ const GOLS_STRATS_PROPRIOS = [
   'am_xg', 'felipe_over15', 'gol_no_final', 'over05_ht',
 ];
 
+// ── 16/11 (v85) — Ambas Marcam / Ambas Marcam xG: so alerta com 1 gol no
+// ── placar, no 1T entre os min 10 e 30, quando o time que AINDA NAO marcou
+// ── teve pelo menos 1 raio / chute no gol / chute na trave nos ultimos 10
+// ── minutos. Estudo de 16/11: no 0x0 o Ambas Marcam bate so 47% (justa 2,13);
+// ── com 1 gol (min 10-30) sobe pra ~71-74% (justa ~1,35-1,41). Fora disso
+// ── a estrategia NAO alerta mais (nem alerta de indicador, nem consolidado).
+const AM_STRATS_FILTRADAS = ['ambas_marcam', 'ambas_marcam_xg', 'am_xg'];
+const AM_MIN_JANELA = 10;
+const AM_MAX_JANELA = 30;
+const AM_EVENTOS_MIN = 1;
+const AM_JANELA_EVENTOS = 10;
+const AM_TIPOS_PRESSAO = ['raio', 'chute_no_gol', 'chute_na_trave'];
+
+function ambasMarcamLiberada(jogo, golsCasa, golsFora, tempoNum, is1T) {
+  if (!is1T) return false;
+  if (golsCasa + golsFora !== 1) return false;
+  if (tempoNum < AM_MIN_JANELA || tempoNum > AM_MAX_JANELA) return false;
+  const ladoFalta = golsCasa === 1 ? 'fora' : 'casa';
+  const n = (jogo.eventos || []).filter(e =>
+    e.lado === ladoFalta &&
+    AM_TIPOS_PRESSAO.includes(e.tipo_evento) &&
+    e.minuto > tempoNum - AM_JANELA_EVENTOS && e.minuto <= tempoNum
+  ).length;
+  return n >= AM_EVENTOS_MIN;
+}
+
 function periodoValidoParaGols(stratKey, is1T, is2T, tempoNum) {
   if (stratKey === 'over05_ht')   return is1T;
   if (stratKey === 'gol_no_final') return is2T && tempoNum <= REGRAS_ENTRADA.gol_no_final.limiteMinuto;
@@ -2608,6 +2634,9 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     if (!periodoValidoParaGols(stratKey, is1T, is2T, tempoNum)) continue;
     if (!placarValidoParaGols(stratKey, golsCasa, golsFora)) continue;
+    if (AM_STRATS_FILTRADAS.includes(stratKey) &&
+        !estado.stratsDisparadas[stratKey] &&
+        !ambasMarcamLiberada(jogo, golsCasa, golsFora, tempoNum, is1T)) continue;
 
     const ladoZebraLocal = ladoOposto(favorito);
     const pgFav = checaPressaoGonza(jogo, estado, favorito, tempoNum);
@@ -3670,7 +3699,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_84',
+  status: 'ok', version: 'server_85',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -4133,7 +4162,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v84 na porta ${PORT}`);
+  console.log(`FUTATS Server v85 na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -4148,7 +4177,8 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v84 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v85 iniciado!</b>\n' +
+    '🆕 🎯 Ambas Marcam / Ambas Marcam xG só alertam com 1 gol no placar, no 1T entre os min 10 e 30, e com pressão do time que falta marcar (raio ou chute no gol nos últimos 10 min). Nos outros casos não alertam mais (estudo: 0x0 bate só 47%, com 1 gol ~71-74%)\n' +
     '🆕 🎯 Confiabilidade pré-live (Favorito + Gols, Alta em destaque) agora em Combo Forte/HT, 3 Indicadores e Reforço Caso B · sem a linha de Lay em nenhum alerta\n' +
     '🆕 🔥 Tendência de gols (calculadora × H2H) nos alertas de entrada — com moldura 🟨 quando a tendência é a favor e ⚠️ quando é contra\n' +
     '🔧 Tendência que vinha vazia do prelive agora é buscada de novo\n' +
