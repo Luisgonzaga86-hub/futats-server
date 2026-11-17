@@ -1155,6 +1155,75 @@ async function alertaTimeForte(jogo, estado, jogoId, hoje, ti, golsAgora, tempoN
   estado.timeForteMsgIds = await sendTelegramOficial(texto);
 }
 
+// ── 17/11 — 🔥 3 INDICADORES (favorito ACIMA de 1,6) + estratégia pré-jogo Ambas Marcam xG ou Felipe Over 1,5 ──
+// Estudo (base 34 mil jogos, out/2025–nov/2026, fav >1,6, jogos de 3 Indicadores que também estavam no
+// backtest do Ambas Marcam xG ou do Felipe; n=440 em 0x0 e n=158 com 1 gol). Odd justa = 100 ÷ % de acerto;
+// mínima = justa +6%. 0x0 → Over 1,5 (jogo todo). 1 gol → Over 1,5 (+1 gol) e Over 2,5 (+2 gols).
+// Seleção IA NÃO entra (não melhorou o resultado). Entrada pela odd mínima no minuto do alerta; Over HT não entra.
+const FA_ESTR_KEYS = ['ambas_marcam_xg', 'felipe_over15'];
+const FA_0X0  = [ // [de, até, justa Over 1,5 jogo todo, n]
+  [1, 15, 1.32, 83], [16, 25, 1.42, 122], [26, 35, 1.57, 127], [36, 45, 2.00, 108],
+];
+const FA_1GOL = [ // [de, até, justa Over 1,5 (+1 gol), justa Over 2,5 (+2 gols), n]
+  [1, 25, 1.21, 1.48, 40], [26, 35, 1.17, 1.59, 54], [36, 45, 1.14, 1.49, 64],
+];
+async function alertaTresIndFavAltoEstr(jogo, estado, jogoId, hoje, ti, escolhidos, terceiro, golsNoDisparo, oddFav) {
+  const strats = getEstrategiasKeys(jogo, hoje).filter(k => FA_ESTR_KEYS.includes(k));
+  if (!strats.length) return;
+  const placar = `${parseInt(jogo.gols_casa) || 0}x${parseInt(jogo.gols_fora) || 0}`;
+  const f = fmtO;
+  const linhasEntrada = [];
+  const regs = [];
+  let nTxt = 0;
+  if (golsNoDisparo === 0) {
+    const r = FA_0X0.find(([a, b]) => terceiro >= a && terceiro <= b);
+    if (!r) return;
+    nTxt = r[3];
+    linhasEntrada.push(`➜ ENTRAR: Over 1,5 (jogo todo) — odd justa ${f(r[2])} · <b>só a ${minO(r[2])} ou mais</b>`);
+    regs.push({ mercado: 'Over 1,5 (jogo todo)', oddJusta: r[2], golsNecessarios: 2, bucket: '15', k: 'indexFA1' });
+  } else {
+    const r = FA_1GOL.find(([a, b]) => terceiro >= a && terceiro <= b);
+    if (!r) return;
+    nTxt = r[4];
+    linhasEntrada.push(`➜ ENTRAR 1: Over 1,5 (jogo todo, +1 gol) — odd justa ${f(r[2])} · <b>só a ${minO(r[2])} ou mais</b>`);
+    linhasEntrada.push(`➜ ENTRAR 2: Over 2,5 (jogo todo, +2 gols) — odd justa ${f(r[3])} · <b>só a ${minO(r[3])} ou mais</b>`);
+    regs.push({ mercado: 'Over 1,5 (jogo todo, +1 gol)', oddJusta: r[2], golsNecessarios: 1, bucket: '15', k: 'indexFA1' });
+    regs.push({ mercado: 'Over 2,5 (jogo todo, +2 gols)', oddJusta: r[3], golsNecessarios: 2, bucket: '25', k: 'indexFA2' });
+  }
+  ti.faEstr = strats;
+  const baseRegistro = {
+    jogoId, jogo: `${jogo.mandante} x ${jogo.visitante}`, data: hoje,
+    indicadores: escolhidos.map(([k, m]) => ({ indicador: k, minuto: m })),
+    minutoBatido: terceiro, placarNoMomento: placar, oddFavorito: oddFav,
+    estrategias: strats, status: 'pendente',
+  };
+  for (const r of regs) {
+    validacaoNovosIndicadores.push({
+      ...baseRegistro, tipo: 'tres_ind_fav_alto_estr', caso: 'tres_ind_fav_alto_estr',
+      bucket: r.bucket, mercado: r.mercado, oddJusta: r.oddJusta, golsNecessarios: r.golsNecessarios,
+    });
+    ti[r.k] = validacaoNovosIndicadores.length - 1;
+  }
+  salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+  await aguardarConfiabilidade(jogoId, estado, jogo);
+  const partes = [
+    '🔥 3 INDICADORES + ESTRATÉGIA 🔥',
+    `⚽ <b>${nomesComOdd(jogo)}</b>`,
+    `⏱ ${terceiro}' · 📊 ${placar} · favorito ${f(oddFav)} (acima de 1,6)`,
+    '─────────────────',
+    ...escolhidos.map(([k, m]) => `• ${TRES_IND_LABEL[k] || k} — ${m}'`),
+    strats.map(k => STRAT_DISPLAY[k] || k).join(' · '),
+    ...linhasEntrada,
+    `📊 Estudo: favorito >1,6 + ${strats.length > 1 ? 'estas estratégias' : 'esta estratégia'}, disparo aos ${terceiro}' com ${placar} (${nTxt} jogos). Odd mínima = justa +6%.`,
+    '⚠️ Em validação — amostra pequena. Over HT não entra neste alerta.',
+  ];
+  const cb = blocoConfiabilidadeMsg(estado);
+  if (cb) partes.push('─────────────────', cb);
+  console.log(`[3ind fav>1,6 + estr] ${jogoId} → ${strats.join(',')} · ${terceiro}' · ${placar} · fav ${oddFav}`);
+  const texto = partes.filter(Boolean).join('\n') + linksExchanges(jogo.urls_exchanges || {});
+  ti.faMsgIds = await sendTelegramOficial(texto);
+}
+
 async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   if (estado.passouHT) return;
   const tempoNum = parseInt(jogo.tempo) || 0;
@@ -1261,6 +1330,9 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
       ti.sobeMotivo = 'ate15';
       ti.oddsAlto = o ? { ...o } : {};
     }
+    // 17/11 — fav >1,6 + Ambas Marcam xG / Felipe Over 1,5: alerta no Telegram com odd mínima do minuto
+    try { await alertaTresIndFavAltoEstr(jogo, estado, jogoId, hoje, ti, escolhidos, terceiro, golsNoDisparo, oddFav); }
+    catch (e) { console.error(`[3ind fav>1,6 + estr] ${jogoId}:`, e.message); }
     return;
   }
 
@@ -1343,12 +1415,25 @@ async function confirmarNovosAlertasNoFim(jogo, estado) {
   // 3 Indicadores — Limite e (se houver) +2 gols, numa mensagem só
   const rLimite = fechar(estado.tresInd?.index);
   const rMais2 = fechar(estado.tresInd?.indexMais2);
-  if (rReforco || rLimite || rMais2) salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
+  const rFA1 = fechar(estado.tresInd?.indexFA1);   // 17/11 — fav >1,6 + estratégia
+  const rFA2 = fechar(estado.tresInd?.indexFA2);
+  if (rReforco || rLimite || rMais2 || rFA1 || rFA2) salvarArquivo(VALIDACAO_FILE, validacaoNovosIndicadores);
 
   const emo = (r) => r.status === 'green' ? '✅ GREEN' : '❌ RED';
   if (rReforco) {
     const texto = `${emo(rReforco)} — 💪 Reforço Caso B + chutes\n⚽ ${rReforco.jogo}\n⏱ ${rReforco.minutoBatido}' · 📊 ${rReforco.placarNoMomento} → FT: ${placarFT}\n➜ Mercado: ${rReforco.mercado}`;
     await sendTelegramOficial(texto).catch(() => {});
+  }
+  if (rFA1 || rFA2) {
+    const ref = rFA1 || rFA2;
+    const linhasFA = [
+      `🔥 3 Indicadores + estratégia (favorito acima de 1,6)`,
+      `⚽ ${ref.jogo}`,
+      `⏱ ${ref.minutoBatido}' · 📊 ${ref.placarNoMomento} → FT: ${placarFT}`,
+    ];
+    if (rFA1) linhasFA.push(`${emo(rFA1)} — ${rFA1.mercado}`);
+    if (rFA2) linhasFA.push(`${emo(rFA2)} — ${rFA2.mercado}`);
+    await sendTelegramOficial(linhasFA.join('\n')).catch(() => {});
   }
   if (rLimite || rMais2) {
     const ref = rLimite || rMais2;
@@ -3862,7 +3947,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_87',
+  status: 'ok', version: 'server_88',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -4325,7 +4410,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v87 na porta ${PORT}`);
+  console.log(`FUTATS Server v88 na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -4340,7 +4425,8 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v87 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v88 iniciado!</b>\n' +
+    '🆕 🔥 3 Indicadores com favorito ACIMA de 1,6 + Ambas Marcam xG ou Felipe Over 1,5 (estratégias pré-jogo): agora alerta no Telegram com a odd justa e a MÍNIMA do minuto do alerta — 0x0 → Over 1,5 (jogo todo); com 1 gol → Over 1,5 (+1 gol) e Over 2,5 (+2 gols). Sem Over HT. Tem GREEN/RED automático (validação, amostra pequena). Seleção IA não entra\n' +
     '🆕 ⭐ Alerta TIME FORTE: quando um superfavorito (odd até 1,30) da lista (Man City, Real Madrid, Always Ready, Al-Nassr, Dinamo, Levadia, Shakhtar, PSV, Bodø/Glimt, Al-Hilal; Over 1,5 HT só nos 5 primeiros) tem o 1º indicador em 0x0 até o min 15, manda o mapa do time e as odds mínimas de Over HT / Over 1,5 HT\n' +
     '🆕 📊 Nova linha "Estudo" nos alertas: odd justa e mínima pelo minuto do alerta — favorito atrás por 1 (virada, Over 2,5 e Over 3,5 até o min 35) nas estratégias de virada, mercado do minuto nos 3 Indicadores depois do min 15 e a regra de entrada do Felipe/Ambas Marcam. O mercado principal (Over limite) segue igual\n' +
     '🆕 🟠 Felipe Over 1.5 só alerta no 1T: 0x0 até o min 45 (Over 1,5, entrar com odd acima de 1,50) ou com 1 gol até o min 35 (Over limite). Fora disso não alerta\n' +
