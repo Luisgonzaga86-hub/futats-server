@@ -1014,6 +1014,84 @@ const TRES_IND_LABEL = {
   relampago_triangular: '⚡🔺 Relâmpago Triangular',
 };
 
+
+// ── 17/11 — LINHA "📊 Estudo" nos alertas: odd justa/mínima pelo minuto do alerta ─────────
+// Base: 34 mil jogos (histórico) × jogos selecionados pelos backtests de cada estratégia.
+// mínima = justa + 6%. Só informativo — não muda o mercado principal (Over limite).
+const fmtO = (o) => Number(o).toFixed(2).replace('.', ',');
+const minO = (j) => fmtO(j * 1.06);
+function faixaEstudo(min) { return min <= 20 ? 0 : min <= 35 ? 1 : min <= 45 ? 2 : -1; }
+const FAIXA_TXT = ['1–20', '21–35', '36–45'];
+// [justa virada, justa Over 2,5, justa Over 3,5, n] por faixa de minuto (favorito 0x1 atrás, favorito até 1,6)
+const ESTUDO_FAV_ATRAS = {
+  favorito_ht_gonza: [[1.89,1.18,1.67,100],[2.19,1.30,2.22,184],[2.57,1.55,3.10,180]],
+  back_gonza_xg:     [[1.93,1.21,1.76, 58],[2.19,1.38,2.41, 94],[2.68,1.72,3.64, 91]],
+  lay_away_manu:     [[1.86,1.39,1.70, 39],[2.03,1.66,3.00, 63],[2.68,2.19,5.36, 59]],
+  lay_manu4:         [[1.82,1.54,2.00, 20],[1.91,1.91,3.50, 21],[2.88,2.88,7.67, 23]],
+  _pool:             [[1.85,1.22,1.69,115],[2.20,1.38,2.36,205],[2.53,1.64,3.46,197]],
+};
+const ESTUDO_FAV_ATRAS_KEY = { lay_0x1_ia: '_pool' };
+const ESTUDO_AMOSTRA_PEQUENA = 30;
+
+function linhasEstudoFavAtras(jogo, estrategias) {
+  const cand = (estrategias || []).filter(e => ESTUDO_FAV_ATRAS[e.stratKey] || ESTUDO_FAV_ATRAS_KEY[e.stratKey]);
+  if (!cand.length) return [];
+  const e = cand[0];
+  const m = String(e.placarAlerta || '').match(/^(\d+)x(\d+)$/);
+  if (!m || e.tempoNum > 45) return [];
+  const gc = +m[1], gf = +m[2];
+  const oc = parseFloat(jogo.odd_inicial_casa || jogo.odd_casa), of_ = parseFloat(jogo.odd_inicial_fora || jogo.odd_fora);
+  if (!isFinite(oc) || !isFinite(of_)) return [];
+  const favCasa = oc < of_; const favOdd = Math.min(oc, of_);
+  const gFav = favCasa ? gc : gf, gOpp = favCasa ? gf : gc;
+  if (gFav >= gOpp) return [];                       // favorito não está atrás
+  if (favOdd > 1.6) return ['📊 Favorito acima de 1,6 atrás — virada rara, só observar'];
+  if (gOpp - gFav >= 2) return ['📊 Favorito atrás por 2+ gols — virada só ~13%, só observar'];
+  const fx = faixaEstudo(e.tempoNum); if (fx < 0) return [];
+  const k = ESTUDO_FAV_ATRAS[e.stratKey] ? e.stratKey : (ESTUDO_FAV_ATRAS_KEY[e.stratKey] || '_pool');
+  const [v, o25, o35, n] = ESTUDO_FAV_ATRAS[k][fx];
+  const pq = n < ESTUDO_AMOSTRA_PEQUENA ? ' · amostra pequena' : '';
+  const out = [`📊 Estudo — alerta aos ${e.tempoNum}' (favorito atrás por 1, faixa ${FAIXA_TXT[fx]}${pq}):`,
+    `  • Virada (favorito vence) — justa ${fmtO(v)} · mín ${minO(v)}`,
+    `  • Over 2,5 — justa ${fmtO(o25)} · mín ${minO(o25)}`];
+  if (e.tempoNum <= 35) out.push(`  • Over 3,5 — justa ${fmtO(o35)} · mín ${minO(o35)}`);
+  return out;
+}
+
+// Felipe Over 1,5 e Ambas Marcam: só lembra a regra de entrada
+function linhasEstudoRegras(estrategias) {
+  const out = [];
+  for (const e of (estrategias || [])) {
+    const m = String(e.placarAlerta || '').match(/^(\d+)x(\d+)$/); const tot = m ? (+m[1] + +m[2]) : null;
+    if (e.stratKey === 'felipe_over15') {
+      if (tot === 0) out.push('📊 Entrada: Over 1,5 (jogo todo) só com odd ≥ 1,50 — vale até o 45\'');
+      else if (tot === 1) out.push('📊 Entrada: Over limite (+1 gol) — vale até o 35\'');
+    } else if (AM_STRATS_FILTRADAS.includes(e.stratKey)) {
+      out.push('📊 Entrada: Ambas Marcam — odd mínima ~1,45');
+    }
+  }
+  return out;
+}
+
+// 3 Indicadores (favorito até 1,6): depois do min 15 o Over HT não vale — mostra o mercado do minuto
+const ESTUDO_3IND_0X0 = [  // [de, até, mercado, justa]
+  [16, 29, 'Over 2,5 (jogo todo)', 2.00], [16, 29, 'Over 1,5 (jogo todo)', 1.37],
+  [30, 45, 'Over 1,5 (jogo todo)', 1.59],
+];
+const ESTUDO_3IND_1GOL = [ // +2 gols = Over 2,5
+  [1, 20, 'Over 2,5 (jogo todo, +2 gols)', 1.25], [21, 35, 'Over 2,5 (jogo todo, +2 gols)', 1.38],
+  [36, 45, 'Over 2,5 (jogo todo, +2 gols)', 1.62],
+];
+function linhasEstudo3Ind(golsNoDisparo, terceiro, placar) {
+  if (terceiro <= 15) return [];                    // até o 15 vale o Over HT (regra dele)
+  const tab = golsNoDisparo === 0 ? ESTUDO_3IND_0X0 : ESTUDO_3IND_1GOL;
+  const lin = tab.filter(([a, b]) => terceiro >= a && terceiro <= b);
+  if (!lin.length) return [];
+  return [`📊 Estudo — alerta aos ${terceiro}' (${placar}, favorito até 1,6):`,
+    ...lin.map(([, , mk, j]) => `  • ${mk} — justa ${fmtO(j)} · mín ${minO(j)}`),
+    '  • Over HT não vale depois do min 15'];
+}
+
 async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
   if (estado.passouHT) return;
   const tempoNum = parseInt(jogo.tempo) || 0;
@@ -1161,6 +1239,7 @@ async function processarTresIndicadores(jogo, estado, jogoId, hoje) {
       ? `➜ ENTRAR 2: ${ti.mercadoMais2} — +2 gols · odd justa ${fmt(ti.oddMais2)} · entrada mínima ${fmt(TRES_IND_ODD_MINIMA)}`
       : `⚠️ +2 gols não recomendado (3º disparo depois do min ${TRES_IND_MIN_MAX}) — só Gol Limite`,
     ti.mais2 ? linhaValorTelegram(ti.oddMais2, golsNoDisparo === 0 ? '15' : '25', estado) : null,
+    ...linhasEstudo3Ind(golsNoDisparo, terceiro, placar),
   ];
   const cbConf = blocoConfiabilidadeMsg(estado); // 16/11
   if (cbConf) partes.push('─────────────────', cbConf);
@@ -2081,6 +2160,7 @@ function montarCorpoAlerta(info, estado, placarAtual, tempoDisplay, stratKey, jo
   const linhasOdds = montarLinhasOdds(stratKey, is1T, golsCasa, golsFora, htTotal, estado.overs);
   partes.push(...linhasOdds);
 
+  { const le = [...linhasEstudoFavAtras(jogo, msgCons.estrategias), ...linhasEstudoRegras(msgCons.estrategias)]; if (le.length) partes.push(...le); } // 17/11
   partes.push(`📊 Placar atual: ${placarAtual} · ${tempoDisplay}'`);
   { const cb = blocoConfiabilidadeMsg(estado); if (cb) partes.push(cb); } // 16/11
   return partes.join('\n');
@@ -3716,7 +3796,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_85',
+  status: 'ok', version: 'server_86',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -4179,7 +4259,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v85 na porta ${PORT}`);
+  console.log(`FUTATS Server v86 na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -4194,7 +4274,8 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v85 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v86 iniciado!</b>\n' +
+    '🆕 📊 Nova linha "Estudo" nos alertas: odd justa e mínima pelo minuto do alerta — favorito atrás por 1 (virada, Over 2,5 e Over 3,5 até o min 35) nas estratégias de virada, mercado do minuto nos 3 Indicadores depois do min 15 e a regra de entrada do Felipe/Ambas Marcam. O mercado principal (Over limite) segue igual\n' +
     '🆕 🟠 Felipe Over 1.5 só alerta no 1T: 0x0 até o min 45 (Over 1,5, entrar com odd acima de 1,50) ou com 1 gol até o min 35 (Over limite). Fora disso não alerta\n' +
     '🆕 🎯 Ambas Marcam / Ambas Marcam xG só alertam com 1 gol no placar, no 1T entre os min 10 e 30, e com pressão do time que falta marcar (raio ou chute no gol nos últimos 10 min). Nos outros casos não alertam mais (estudo: 0x0 bate só 47%, com 1 gol ~71-74%)\n' +
     '🆕 🎯 Confiabilidade pré-live (Favorito + Gols, Alta em destaque) agora em Combo Forte/HT, 3 Indicadores e Reforço Caso B · sem a linha de Lay em nenhum alerta\n' +
