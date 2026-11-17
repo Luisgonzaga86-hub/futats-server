@@ -2418,6 +2418,20 @@ const AM_EVENTOS_MIN = 1;
 const AM_JANELA_EVENTOS = 10;
 const AM_TIPOS_PRESSAO = ['raio', 'chute_no_gol', 'chute_na_trave'];
 
+// ── 16/11 (v85) — Felipe Over 1.5: so alerta no 1T, com 0x0 ate o min 45
+// ── (entrada Over 1,5 com odd acima de 1,50 · justa ~1,43) ou com 1 gol ate
+// ── o min 35 (entrada Over limite +1 · justa ~1,03-1,06). Fora disso nao alerta
+// ── (1 gol apos o min 35 = 67% / 2T = 58% no historico de 332 alertas).
+const FELIPE_MAX_MIN_0X0 = 45;
+const FELIPE_MAX_MIN_1GOL = 35;
+function felipeOver15Liberado(golsCasa, golsFora, tempoNum, is1T) {
+  if (!is1T) return false;
+  const tot = golsCasa + golsFora;
+  if (tot === 0) return tempoNum <= FELIPE_MAX_MIN_0X0;
+  if (tot === 1) return tempoNum <= FELIPE_MAX_MIN_1GOL;
+  return false;
+}
+
 function ambasMarcamLiberada(jogo, golsCasa, golsFora, tempoNum, is1T) {
   if (!is1T) return false;
   if (golsCasa + golsFora !== 1) return false;
@@ -2634,6 +2648,9 @@ async function processarIndicadoresProprios(jogo, estado, jogoId, hoje) {
     if (!pendJogo.some(p => p.strat === stratKey)) continue;
     if (!periodoValidoParaGols(stratKey, is1T, is2T, tempoNum)) continue;
     if (!placarValidoParaGols(stratKey, golsCasa, golsFora)) continue;
+    if (stratKey === 'felipe_over15' &&
+        !estado.stratsDisparadas[stratKey] &&
+        !felipeOver15Liberado(golsCasa, golsFora, tempoNum, is1T)) continue;
     if (AM_STRATS_FILTRADAS.includes(stratKey) &&
         !estado.stratsDisparadas[stratKey] &&
         !ambasMarcamLiberada(jogo, golsCasa, golsFora, tempoNum, is1T)) continue;
@@ -4178,6 +4195,7 @@ app.listen(PORT, async () => {
 
   await sendTelegram(
     '🚀 <b>FUTATS Server v85 iniciado!</b>\n' +
+    '🆕 🟠 Felipe Over 1.5 só alerta no 1T: 0x0 até o min 45 (Over 1,5, entrar com odd acima de 1,50) ou com 1 gol até o min 35 (Over limite). Fora disso não alerta\n' +
     '🆕 🎯 Ambas Marcam / Ambas Marcam xG só alertam com 1 gol no placar, no 1T entre os min 10 e 30, e com pressão do time que falta marcar (raio ou chute no gol nos últimos 10 min). Nos outros casos não alertam mais (estudo: 0x0 bate só 47%, com 1 gol ~71-74%)\n' +
     '🆕 🎯 Confiabilidade pré-live (Favorito + Gols, Alta em destaque) agora em Combo Forte/HT, 3 Indicadores e Reforço Caso B · sem a linha de Lay em nenhum alerta\n' +
     '🆕 🔥 Tendência de gols (calculadora × H2H) nos alertas de entrada — com moldura 🟨 quando a tendência é a favor e ⚠️ quando é contra\n' +
