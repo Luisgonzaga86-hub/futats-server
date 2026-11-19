@@ -1567,6 +1567,96 @@ async function processarTendenciaCantos(jogo, estado) {
   estado.tendenciaCantos.msgIds = await sendTelegramOficial(texto);
 }
 
+
+// ── 19/11 — 🔵 BACK FAVORITO CLAUDINHO (validação) ───────────────────────────────────
+// Estudo 19/11 (34 mil jogos, abr–nov/2026, 552 jogos no filtro): aos 20' em 0x0, favorito com odd inicial
+// ACIMA de 1,30 e chutes do favorito (no gol + fora + bloqueado + trave, até o min 20) 5 ou mais a mais que o
+// adversário. Mercados: favorito vence · dupla chance (fav não perde) · Over 0,5 · Over 1,5 · Over 2,5 (jogo todo).
+// Odds justas por faixa do favorito; mínima = justa +5%. Pré-jogo sozinho não tem edge — alerta só para validar.
+const CLAUDINHO_FILE = path.join(DATA_DIR, 'validacao_claudinho.json');
+let validacaoClaudinho = lerArquivo(CLAUDINHO_FILE, []);
+const CLAUDINHO_MIN_CHUTES = 5;
+const CLAUDINHO_FAIXAS = [
+  { ate: 1.6,  rot: '1,31–1,60', n: 170, win: [68.8, 1.45, 1.53], dc: [88.8, 1.13, 1.18], o05: [94.1, 1.06, 1.12], o15: [74.1, 1.35, 1.42], o25: [47.1, 2.12, 2.23] },
+  { ate: 2.0,  rot: '1,61–2,00', n: 213, win: [59.6, 1.68, 1.76], dc: [85.0, 1.18, 1.24], o05: [90.1, 1.11, 1.16], o15: [68.1, 1.47, 1.54], o25: [46.5, 2.15, 2.26] },
+  { ate: 99,   rot: 'acima de 2,00', n: 169, win: [47.3, 2.11, 2.22], dc: [72.2, 1.39, 1.45], o05: [88.8, 1.13, 1.18], o15: [62.7, 1.59, 1.67], o25: [33.7, 2.96, 3.11] },
+];
+const CLAUDINHO_TIPOS_CHUTE = ['chute_no_gol', 'chute_para_fora', 'chute_bloqueado', 'chute_na_trave'];
+
+async function processarBackFavClaudinho(jogo, estado, jogoId, hoje) {
+  if (estado.claudinho || estado.claudinhoDescartado) return;
+  if (estado.passouHT) return;
+  const tempoNum = parseInt(jogo.tempo) || 0;
+  if (!tempoNum || jogo.tempo === 'Intervalo') return;
+  if (tempoNum < 20) return;
+  if (tempoNum > 23) { estado.claudinhoDescartado = true; return; }   // não viu o min 20 a tempo
+  const golsCasa = parseInt(jogo.gols_casa) || 0, golsFora = parseInt(jogo.gols_fora) || 0;
+  if (golsCasa + golsFora > 0) { estado.claudinhoDescartado = true; return; }
+  const oddFav = oddFavoritoDoJogo(jogo);
+  if (oddFav == null || oddFav <= 1.3) { estado.claudinhoDescartado = true; return; }
+  const fav = getFavorito(jogo), opo = ladoOposto(fav);
+  const ev = jogo.eventos || [];
+  const chutes = (lado) => ev.filter(e => CLAUDINHO_TIPOS_CHUTE.includes(e.tipo_evento) && e.lado === lado && e.minuto <= 20).length;
+  const cf = chutes(fav), co = chutes(opo), dif = cf - co;
+  if (dif < CLAUDINHO_MIN_CHUTES) { estado.claudinhoDescartado = true; return; }
+
+  const faixa = CLAUDINHO_FAIXAS.find(f => oddFav <= f.ate);
+  const nomeFav = fav === 'casa' ? jogo.mandante : jogo.visitante;
+  const fm = (v) => v.toFixed(2).replace('.', ',');
+  const lin = (rot, a) => `• ${rot}: justa <b>${fm(a[1])}</b> · mínima <b>${fm(a[2])}</b> (${String(a[0]).replace('.', ',')}%)`;
+  await aguardarConfiabilidade(jogoId, estado, jogo);
+  const partes = [
+    '👾 BACK FAVORITO CLAUDINHO 👾',
+    `⚽ <b>${nomesComOdd(jogo)}</b>`,
+    `⏱ 20' · 📊 0x0`,
+    '─────────────────',
+    `Favorito: <b>${nomeFav}</b> (odd ${fm(oddFav)}) · chutes até o 20': ${cf} x ${co} (+${dif})`,
+    `📐 Odds justas — faixa ${faixa.rot} (base ${faixa.n} jogos):`,
+    lin('Favorito vence', faixa.win),
+    lin('Dupla chance (fav não perde)', faixa.dc),
+    lin('Over 0,5 gol (jogo todo)', faixa.o05),
+    lin('Over 1,5 gols (jogo todo)', faixa.o15),
+    lin('Over 2,5 gols (jogo todo)', faixa.o25),
+    'só entra se a odd da corretora for igual ou maior que a mínima',
+    '⚠️ Em validação — pré-jogo sozinho não dá edge; registrar a odd real da corretora',
+  ];
+  const cbConf = blocoConfiabilidadeMsg(estado);
+  if (cbConf) partes.push('─────────────────', cbConf);
+  const texto = partes.filter(Boolean).join('\n') + linksExchanges(jogo.urls_exchanges || {});
+  const ids = await sendTelegramOficial(texto);
+  validacaoClaudinho.push({
+    jogoId, jogo: `${jogo.mandante} x ${jogo.visitante}`, data: hoje, fav, nomeFav, oddFav,
+    chutesFav: cf, chutesOpo: co, minuto: tempoNum, faixa: faixa.rot, status: 'pendente',
+  });
+  salvarArquivo(CLAUDINHO_FILE, validacaoClaudinho);
+  estado.claudinho = { index: validacaoClaudinho.length - 1, msgIds: ids };
+  console.log(`[claudinho] ${jogoId} → fav ${nomeFav} ${oddFav} · chutes ${cf}x${co} · faixa ${faixa.rot}`);
+}
+
+async function confirmarClaudinhoNoFim(jogo, estado) {
+  const idx = estado.claudinho?.index;
+  if (idx == null) return;
+  const r = validacaoClaudinho[idx];
+  if (!r || r.status !== 'pendente') return;
+  let gc = parseInt(jogo.gols_casa) || 0, gf = parseInt(jogo.gols_fora) || 0;
+  if (estado.placarTempoNormal) {
+    const [pc, pf] = estado.placarTempoNormal.split('x').map(Number);
+    if (!isNaN(pc) && !isNaN(pf)) { gc = pc; gf = pf; }
+  }
+  const gFav = r.fav === 'casa' ? gc : gf, gOpo = r.fav === 'casa' ? gf : gc, tot = gc + gf;
+  r.res = { win: gFav > gOpo, dc: gFav >= gOpo, o05: tot >= 1, o15: tot >= 2, o25: tot >= 3 };
+  r.ftFinal = `${gc}x${gf}`; r.status = 'resolvido';
+  salvarArquivo(CLAUDINHO_FILE, validacaoClaudinho);
+  const e = (b) => b ? '✅' : '❌';
+  const texto = [
+    '👾 BACK FAVORITO CLAUDINHO — resultado',
+    `⚽ ${r.jogo}`,
+    `⏱ ${r.minuto}' · 📊 0x0 → FT: ${r.ftFinal} · fav ${r.nomeFav} (${String(r.oddFav.toFixed(2)).replace('.', ',')})`,
+    `${e(r.res.win)} Favorito vence · ${e(r.res.dc)} Dupla chance · ${e(r.res.o05)} Over 0,5 · ${e(r.res.o15)} Over 1,5 · ${e(r.res.o25)} Over 2,5`,
+  ].join('\n');
+  await sendTelegramOficial(texto).catch(() => {});
+}
+
 function tendenciaCantosHTML(estado) {
   const tc = estado.tendenciaCantos;
   if (!tc) return '';
@@ -2262,6 +2352,8 @@ async function monitorarLive() {
       catch (e) { console.error(`[3 indicadores sobe] Erro em ${jogoId}:`, e.message); }
       try { await processarTendenciaCantos(jogo, estado); }
       catch (e) { console.error(`[tendência cantos] Erro em ${jogoId}:`, e.message); }
+      try { await processarBackFavClaudinho(jogo, estado, jogoId, hoje); }
+      catch (e) { console.error(`[claudinho] Erro em ${jogoId}:`, e.message); }
       try { processarPadraoMin10(jogo, estado, jogoId); }
       catch (e) { console.error(`[padrão min10] Erro em ${jogoId}:`, e.message); }
     }
@@ -3137,6 +3229,9 @@ async function processarFimDeJogo(jogoId, estado, hoje) {
   // Roda antes de qualquer early-return pra nunca ficarem pendentes.
   await confirmarNovosAlertasNoFim(jogo, estado).catch((e) =>
     console.error(`[novos alertas fim] Erro em ${jogoId}:`, e.message)
+  );
+  await confirmarClaudinhoNoFim(jogo, estado).catch((e) =>
+    console.error(`[claudinho fim] Erro em ${jogoId}:`, e.message)
   );
 
   const jaResolvidoAntes = pendentes.some(p =>
@@ -4490,7 +4585,8 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v88 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v93 iniciado!</b>\n' +
+    '🆕 👾 Alerta BACK FAVORITO CLAUDINHO (validação): aos 20\' em 0x0, favorito com odd acima de 1,30 e 5+ chutes a mais que o adversário até o min 20 → odds justas/mínimas de Favorito vence, Dupla chance, Over 0,5, Over 1,5 e Over 2,5, com resultado automático no fim do jogo\n' +
     '🆕 🔥 3 Indicadores com favorito ACIMA de 1,6 + Ambas Marcam xG ou Felipe Over 1,5 (estratégias pré-jogo): agora alerta no Telegram com a odd justa e a MÍNIMA do minuto do alerta — 0x0 → Over 1,5 (jogo todo); com 1 gol → Over 1,5 (+1 gol) e Over 2,5 (+2 gols). Sem Over HT. Tem GREEN/RED automático (validação, amostra pequena). Seleção IA não entra\n' +
     '🆕 ⭐ Alerta TIME FORTE: quando um superfavorito (odd até 1,30) da lista (Man City, Real Madrid, Always Ready, Al-Nassr, Dinamo, Levadia, Shakhtar, PSV, Bodø/Glimt, Al-Hilal; Over 1,5 HT só nos 5 primeiros) tem o 1º indicador em 0x0 até o min 15, manda o mapa do time e as odds mínimas de Over HT / Over 1,5 HT\n' +
     '🆕 📊 Nova linha "Estudo" nos alertas: odd justa e mínima pelo minuto do alerta — favorito atrás por 1 (virada, Over 2,5 e Over 3,5 até o min 35) nas estratégias de virada, mercado do minuto nos 3 Indicadores depois do min 15 e a regra de entrada do Felipe/Ambas Marcam. O mercado principal (Over limite) segue igual\n' +
