@@ -8,8 +8,10 @@ const store = require('./store');
 const scheduler = require('./scheduler');
 const futatsClient = require('./futatsClient');
 const oddsStore = require('./oddsStore');
+const oddsVista = require('./oddsVista');
 
 const app = express();
+app.use(express.json({ limit: '100kb' })); // 19/11 — corpo JSON do registro de odd ao vivo
 const PORT = process.env.PORT || 3000;
 
 // Proteção simples por senha (via ?senha=xxx na URL)
@@ -312,6 +314,32 @@ function htmlSugestaoMultipla(hoje, senha) {
     </div>`;
 }
 
+// 19/11 — odd do favorito pré-jogo (a menor entre casa e fora)
+function oddFavorito(j) {
+  const oc = parseFloat(j.odd_casa);
+  const of_ = parseFloat(j.odd_fora);
+  if (isNaN(oc) || isNaN(of_)) return null;
+  return Math.min(oc, of_);
+}
+
+// 19/11 — célula "Odd Over HT ao vivo": só jogos com favorito até 1,60.
+function celulaOddVista(j, o) {
+  const fav = oddFavorito(j);
+  if (fav === null || fav > 1.6) return '<small style="color:#555;">—</small>';
+  const salvos = oddsVista.doJogo(j.id);
+  const ult = salvos.length ? salvos[salvos.length - 1] : null;
+  const txtUlt = ult
+    ? `última: ${Number(ult.odd_vista).toFixed(2).replace('.', ',')} às ${ult.salvo_hora_brt.slice(0, 5)}${salvos.length > 1 ? ` (${salvos.length} registros)` : ''}`
+    : '';
+  const pre = o && o.over_05_ht_back ? Number(o.over_05_ht_back).toFixed(2).replace('.', ',') : null;
+  return `<div class="ov" data-id="${j.id}">
+      <div style="font-size:11px;color:#9a9a96;">fav ${fav.toFixed(2).replace('.', ',')}${pre ? ` · pré HT ${pre}` : ''}</div>
+      <input type="text" inputmode="decimal" placeholder="odd vista" style="width:70px;background:#1c1c1c;color:#eee;border:1px solid #444;border-radius:4px;padding:4px;">
+      <button type="button" class="sv" style="padding:4px 8px;">Salvar</button>
+      <div class="ult" style="font-size:11px;color:#9a9a96;">${txtUlt}</div>
+    </div>`;
+}
+
 // Página principal: lista só os jogos de HOJE
 app.get('/', checarSenha, (req, res) => {
   const hoje = hojeBrasilia();
@@ -352,6 +380,7 @@ app.get('/', checarSenha, (req, res) => {
           <td style="font-size:12px;line-height:1.6;">${htmlCalcH2H(j)}</td>
           <td style="font-size:12px;line-height:1.5;">${htmlOddsMercado(j, oddsDoJogo(mapaOddsPagina, j))}</td>
           <td>${j.selecao_ia || '-'}</td>
+          <td>${celulaOddVista(j, oddsDoJogo(mapaOddsPagina, j))}</td>
           <td>${status}${confianca}${placarFinalTexto(j) ? `<br>${placarFinalTexto(j)}` : ''}</td>
           <td>${acao}</td>
         </tr>`;
@@ -383,12 +412,35 @@ app.get('/', checarSenha, (req, res) => {
       <p><a class="atualizar" href="/historico?senha=${req.query.senha}">📜 Ver histórico de análises</a></p>
       <p><a class="atualizar" href="/historico-confiabilidade?senha=${req.query.senha}">📊 Ver histórico de confiabilidade (cálculo local)</a></p>
       <p><a class="atualizar" href="/valor-historico?senha=${req.query.senha}">💰 Ver histórico de valor (green/red e unidades)</a></p>
+      <p><a class="atualizar" href="/odds-vista?senha=${req.query.senha}">📝 Ver odds ao vivo do Over HT salvas (e baixar CSV)</a></p>
       ${htmlSugestaoMultipla(hoje, req.query.senha)}
       ${htmlTendenciaGols(hoje)}
       <table>
-        <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds 1X2</th><th>Calculadora × H2H</th><th>Odds mercado</th><th>Seleção IA</th><th>Status</th><th></th></tr>
+        <tr><th>Hora</th><th>Liga</th><th>Jogo</th><th>Odds 1X2</th><th>Calculadora × H2H</th><th>Odds mercado</th><th>Seleção IA</th><th>Odd Over HT ao vivo<br><small>(fav até 1,60)</small></th><th>Status</th><th></th></tr>
         ${linhas}
       </table>
+      <script>
+        const SENHA = ${JSON.stringify(String(req.query.senha || '')).replace(/</g, '\\u003c')};
+        document.addEventListener('click', async (e) => {
+          const b = e.target.closest('button.sv'); if (!b) return;
+          const box = b.closest('.ov'); const inp = box.querySelector('input');
+          const info = box.querySelector('.ult'); const odd = inp.value.trim();
+          if (!odd) { inp.focus(); return; }
+          b.disabled = true;
+          try {
+            const r = await fetch('/odd-vista/' + encodeURIComponent(box.dataset.id) + '?senha=' + encodeURIComponent(SENHA), {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ odd })
+            });
+            const d = await r.json();
+            if (d.ok) { info.textContent = 'salvo: ' + d.odd.toFixed(2).replace('.', ',') + ' às ' + d.hora.slice(0, 5) + (d.total > 1 ? ' (' + d.total + ' registros)' : ''); info.style.color = '#3fb950'; inp.value = ''; }
+            else { info.textContent = d.erro || 'não salvou'; info.style.color = '#f85149'; }
+          } catch (err) { info.textContent = 'erro de rede'; info.style.color = '#f85149'; }
+          b.disabled = false;
+        });
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' && e.target.matches('.ov input')) { e.preventDefault(); e.target.closest('.ov').querySelector('button.sv').click(); }
+        });
+      </script>
     </body>
     </html>
   `);
@@ -945,6 +997,48 @@ app.post('/analisar/:id', checarSenha, async (req, res) => {
       <a href="/?senha=${req.query.senha}" style="color:#4fd1c5;">Voltar</a>
     </body></html>
   `);
+});
+
+// 19/11 — salva a odd do Over 0,5 HT vista ao vivo (caixa na página principal)
+app.post('/odd-vista/:id', checarSenha, (req, res) => {
+  const j = store.getGame(req.params.id);
+  if (!j) return res.status(404).json({ ok: false, erro: 'Jogo não encontrado.' });
+  const odd = oddsVista.parseOdd(req.body && req.body.odd);
+  if (odd === null) return res.status(400).json({ ok: false, erro: 'Odd inválida (use 1,01 a 50).' });
+  const o = oddsDoJogo(carregarOdds(), j);
+  const fav = oddFavorito(j);
+  const linha = oddsVista.salvar({
+    id: j.id,
+    data: j.data ? String(j.data).slice(0, 10) : null,
+    hora: j.hora || null,
+    mandante: j.mandante,
+    visitante: j.visitante,
+    campeonato: j.campeonato,
+    odd_fav: fav,
+    over05ht_pre: o && o.over_05_ht_back != null ? o.over_05_ht_back : null,
+    odd_vista: odd,
+  });
+  res.json({ ok: true, odd, hora: linha.salvo_hora_brt, total: oddsVista.doJogo(j.id).length });
+});
+
+// 19/11 — todas as odds ao vivo salvas (tabela + CSV pra mandar pro Claude)
+app.get('/odds-vista.csv', checarSenha, (req, res) => {
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.set('Content-Disposition', 'attachment; filename="odds_vista.csv"');
+  res.send(oddsVista.csv(oddsVista.listar()));
+});
+
+app.get('/odds-vista', checarSenha, (req, res) => {
+  const regs = oddsVista.listar().slice().reverse();
+  const f = (v) => (v == null ? '–' : Number(v).toFixed(2).replace('.', ','));
+  const linhas = regs
+    .map((r) => `<tr><td>${r.salvo_data_brt} ${r.salvo_hora_brt}</td><td>${escapeHtml(r.mandante)} x ${escapeHtml(r.visitante)}</td><td>${f(r.odd_fav)}</td><td>${f(r.over05ht_pre)}</td><td><b>${f(r.odd_vista)}</b></td></tr>`)
+    .join('');
+  res.send(`<html><head><meta charset="utf-8" /><title>Odds ao vivo Over HT</title>
+    <style>body{font-family:sans-serif;background:#111;color:#eee;padding:20px;}table{border-collapse:collapse;width:100%;}td,th{padding:8px;border-bottom:1px solid #333;text-align:left;font-size:14px;}a{color:#4fd1c5;}</style></head>
+    <body><h2>📝 Odds ao vivo do Over 0,5 HT (favorito até 1,60)</h2>
+    <p>${regs.length} registro(s) · <a href="/odds-vista.csv?senha=${req.query.senha}">⬇️ Baixar CSV</a> · <a href="/?senha=${req.query.senha}">Voltar</a></p>
+    <table><tr><th>Salvo em (Brasília)</th><th>Jogo</th><th>Odd favorito</th><th>Over HT pré</th><th>Odd vista</th></tr>${linhas}</table></body></html>`);
 });
 
 app.listen(PORT, () => {
