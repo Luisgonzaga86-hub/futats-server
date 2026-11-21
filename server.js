@@ -1235,6 +1235,7 @@ async function alertaTimeForte(jogo, estado, jogoId, hoje, ti, golsAgora, tempoN
   }
   if (t.aviso) linhas.push(`📉 ${t.aviso}`);
   linhas.push('⚠️ Amostra pequena — lista a rever em fev/2027');
+  estado.timeForteInfo = { nome: t.nome, minuto: tempoNum, resumo: `1º indicador: ${TRES_IND_LABEL[kInd] || kInd} aos ${mInd}'`, entradas: linhas.filter(l => String(l).startsWith('➜')).map(l => String(l).replace(/^➜\s*/, '')) };
   console.log(`[time forte] ${jogoId} → ${t.nome} · ${kInd} ${mInd}' · fav ${oddFav}`);
   const texto = linhas.join('\n') + linksExchanges(jogo.urls_exchanges || {});
   estado.timeForteMsgIds = await sendTelegramOficial(texto);
@@ -2356,6 +2357,8 @@ async function monitorarLive() {
       catch (e) { console.error(`[claudinho] Erro em ${jogoId}:`, e.message); }
       try { processarPadraoMin10(jogo, estado, jogoId); }
       catch (e) { console.error(`[padrão min10] Erro em ${jogoId}:`, e.message); }
+      try { atualizarAlertasObs(jogo, estado); }
+      catch (e) { console.error(`[alertas observador] Erro em ${jogoId}:`, e.message); }
     }
 
     arquivarJogosEncerrados();
@@ -3721,10 +3724,10 @@ function obsBlocoIndicadores(jogo, estado, hoje) {
   estado.observadorEventos = estado.observadorEventos || [];
   estado.observadorRegistrado = estado.observadorRegistrado || {};
 
-  function addEvento(chave, minuto, texto, indicadorKey, mercado, oddRef, extraHTML) {
+  function addEvento(chave, minuto, texto, indicadorKey, mercado, oddRef, extraHTML, segundoTempo) {
     if (estado.observadorRegistrado[chave]) return;
     estado.observadorRegistrado[chave] = true;
-    estado.observadorEventos.push({ minuto, texto: texto + (extraHTML || '') });
+    estado.observadorEventos.push({ minuto, texto: texto + (extraHTML || ''), p2: !!segundoTempo || /_2t_/.test(chave) });
     registrarObservacao(jogoId, jogo, indicadorKey, minuto, mercado, oddRef, estado);
   }
 
@@ -3749,7 +3752,7 @@ function obsBlocoIndicadores(jogo, estado, hoje) {
     const golsCasaAteAqui = (jogo.eventos || []).filter(e => e.tipo_evento === 'gol' && e.lado === 'casa' && e.minuto <= ev.minuto).length;
     const golsForaAteAqui = (jogo.eventos || []).filter(e => e.tipo_evento === 'gol' && e.lado === 'fora' && e.minuto <= ev.minuto).length;
     const ladoTxt = ev.lado === 'casa' ? jogo.mandante : jogo.visitante;
-    addEvento(chave, ev.minuto, `⚽ Gol aos ${ev.minuto}' — ${ladoTxt} (${golsCasaAteAqui}x${golsForaAteAqui})`, 'gol', '-', null);
+    addEvento(chave, ev.minuto, `⚽ Gol aos ${ev.minuto}' — ${ladoTxt} (${golsCasaAteAqui}x${golsForaAteAqui})`, 'gol', '-', null, null, ev.periodo === '2_tempo');
   }
 
   if (!passouHT && tempoNum > 0) {
@@ -3883,7 +3886,10 @@ function obsBlocoIndicadores(jogo, estado, hoje) {
 
   if (!estado.observadorEventos.length) return '<p class="ms-muted ms-small">Nenhum indicador bateu ainda nesse jogo.</p>';
   const ordenados = [...estado.observadorEventos].sort((a, b) => a.minuto - b.minuto);
-  return ordenados.map(e => `<p class="obs-linha">${e.texto}</p>`).join('');
+  const eh2T = (e) => (e.p2 !== undefined ? e.p2 : (/, 2T/.test(e.texto) || e.minuto > 45));
+  const linhasP = (arr) => arr.map(e => `<p class="obs-linha">${e.texto}</p>`).join('');
+  const p1 = ordenados.filter(e => !eh2T(e)), p2 = ordenados.filter(eh2T);
+  return (p1.length ? `<p class="ms-periodo">1º tempo</p>${linhasP(p1)}` : '') + (p2.length ? `<p class="ms-periodo">2º tempo</p>${linhasP(p2)}` : '');
 }
 
 function getEstrategiasKeys(jogo, hoje) {
@@ -3900,123 +3906,471 @@ function getEstrategiasBadgeHTML(strats) {
   return `<p class="obs-linha" style="opacity:0.85;font-size:12px;">${nomes}</p>`;
 }
 
-app.get('/observador', (req, res) => {
-  const jogosAtivos = Object.entries(estadoLive).filter(([, e]) => !e.encerrado && e.jogo);
-  if (!jogosAtivos.length) {
-    return res.send(msPaginaHTML('<p class="ms-empty">Nenhum jogo ao vivo no momento.</p>'));
+// ════════════════════════════════════════════════════════════════
+// ── 20/11 — OBSERVADOR NOVO (server_94) ──────────────────────────
+// ── • Alertas ativos (os mesmos do Telegram) ficam fixos no topo, ──
+// ──   o mais recente em cima, com o minuto e a RÉGUA do minuto    ──
+// ──   em que o alerta saiu. Tendência de escanteios NÃO sobe.     ──
+// ── • Filtros "pelo menos um" embaixo; só aparecem os jogos dos   ──
+// ──   filtros marcados. Atualiza a cada 30s por fetch (sem reload) ──
+// ──   e guarda filtros / cartões abertos no navegador.             ──
+// ── • Estatísticas (chutes, escanteios, pressão) escondidas até   ──
+// ──   clicar; abas Total / 1º tempo / Últ. 10m.                    ──
+// ════════════════════════════════════════════════════════════════
+const OBS_FILTROS = ['tudo', 'estr', 'sem', 'tend', 'fav', 'tres16', 'o25', 'btts'];
+const OBS_TIPOS_CHUTE = ['chute_no_gol', 'chute_para_fora', 'chute_bloqueado', 'chute_na_trave'];
+const obsEsc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// régua (📐 mínimas) calculada para o minuto e o placar em que o alerta saiu
+function reguaNoAlerta(estado, minuto, placar) {
+  try {
+    const jogo = estado && estado.jogo;
+    if (!jogo) return null;
+    const m = String(placar || '0x0').match(/^(\d+)x(\d+)$/);
+    if (!m) return null;
+    const ht = minuto === 'HT';
+    const num = ht ? 45 : (parseInt(minuto) || 0);
+    const pseudo = {
+      jogo: { ...jogo, gols_casa: m[1], gols_fora: m[2], tempo: ht ? 'Intervalo' : String(num) },
+      passouHT: ht || num > 45,
+      tendenciaGols: estado.tendenciaGols,
+    };
+    return minimasLinhas(pseudo);
+  } catch (e) { return null; }
+}
+
+function addAlertaObs(estado, a) {
+  estado.alertasObs = estado.alertasObs || [];
+  const ex = estado.alertasObs.find(x => x.key === a.key);
+  if (ex) {
+    if (a.dinamico) { ex.entradas = a.entradas; ex.detalhe = a.detalhe; ex.status = a.status || null; }
+    return;
+  }
+  a.ts = Date.now();
+  a.regua = reguaNoAlerta(estado, a.minuto, a.placar);
+  estado.alertasObs.push(a);
+}
+
+// Roda a cada ciclo do monitorarLive. Só registra o que JÁ foi mandado pro Telegram.
+function atualizarAlertasObs(jogo, estado) {
+  const reg = (i) => (i != null ? validacaoNovosIndicadores[i] : null);
+  const tempoNum = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
+
+  // Combo Forte / Combo HT / Trocação / Tempestade
+  const ni = estado.novoIndicador;
+  if (ni && ni.jaAlertado && ni.mercadoTexto && estado.validacaoMsgIds && estado.validacaoMsgIds.length) {
+    const casoB = ni.caso === 'B_janela_41_45';
+    addAlertaObs(estado, {
+      key: 'ni_' + ni.tipo,
+      tipo: `${ni.comboTag ? ni.comboTag + ' · ' : ''}${ni.label}`,
+      minuto: casoB ? (ni.minutoConfirmacao || ni.minutoBatido) : ni.minutoBatido,
+      placar: ni.placarNoMomento,
+      detalhe: [ni.estrategiasTexto, casoB ? `Indicador bateu no ${ni.minutoBatido}' e o placar seguiu igual até o ${ni.minutoConfirmacao}'` : `Indicador bateu no ${ni.minutoBatido}'`].filter(Boolean),
+      entradas: [`ENTRAR: ${ni.mercadoTexto}`],
+    });
   }
 
-  const hoje = dataHoje();
+  // Reforço Caso B + filtro de chutes (sai no intervalo)
+  const rf = estado.reforcoChutes;
+  if (rf && rf.msgIds && rf.msgIds.length) {
+    const r0 = reg(rf.index);
+    addAlertaObs(estado, {
+      key: 'reforco', tipo: '💪 REFORÇO — Caso B + filtro de chutes',
+      minuto: 'HT', placar: estado.htPlacar || (r0 && r0.placarNoMomento) || '0x0',
+      detalhe: [`1T: ${rf.totais} chutes / ${rf.noGol} no gol`, r0 ? `Indicador bateu no ${r0.minutoBatido}' (${r0.placarNoMomento}) e o placar seguiu igual até o HT` : null].filter(Boolean),
+      entradas: [`ENTRAR: ${r0 ? r0.mercado : ''}`],
+    });
+  }
 
-  function montaCard(jogo, estado, comEstrategia, eventosHTML) {
-    const tempoTxt = jogo.tempo === 'Intervalo' ? 'Intervalo' : jogo.tempo === 'Encerrado' ? 'Encerrado' : `${jogo.tempo}'`;
-    const ni = estado.novoIndicador;
+  // 3 Indicadores (favorito até 1,60) e 3 Indicadores + estratégia (favorito acima de 1,60)
+  const ti = estado.tresInd;
+  if (ti && ti.alerta && ti.msgIds && ti.msgIds.length) {
+    const r0 = reg(ti.index);
+    addAlertaObs(estado, {
+      key: 'tres_ind', tipo: '🔥 3 INDICADORES (favorito até 1,60)',
+      minuto: ti.terceiroMin, placar: (r0 && r0.placarNoMomento) || '0x0',
+      detalhe: [ti.resumo],
+      entradas: [`ENTRAR 1: ${ti.mercadoLimite}`, ti.mais2 ? `ENTRAR 2: ${ti.mercadoMais2} (+2 gols)` : null].filter(Boolean),
+    });
+  }
+  if (ti && ti.faEstr && ti.faMsgIds && ti.faMsgIds.length) {
+    const r1 = reg(ti.indexFA1), r2 = reg(ti.indexFA2);
+    addAlertaObs(estado, {
+      key: 'tres_ind_fa', tipo: '🔥 3 INDICADORES + ESTRATÉGIA (favorito acima de 1,60 · em validação)',
+      minuto: ti.terceiroMin, placar: ((r1 || r2 || {}).placarNoMomento) || '0x0',
+      detalhe: [ti.resumo, ti.faEstr.map(k => STRAT_DISPLAY[k] || k).join(' · ')],
+      entradas: [r1 ? `ENTRAR: ${r1.mercado}` : null, r2 ? `ENTRAR: ${r2.mercado}` : null].filter(Boolean),
+    });
+  }
 
-    let estiloExtra = comEstrategia ? 'border:1px solid #2c2c30;' : 'border:1px solid #202023;opacity:0.9;';
-    let tagHTML = '';
-    if (ni?.comboTag) {
-      estiloExtra = 'border:1.5px solid #f0b429;';
-      tagHTML = `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">${ni.comboTag}</p>`;
-    } else if (ni?.semDestaqueHoraCheia) {
-      estiloExtra = 'opacity:0.6;';
+  // 👾 Back Favorito Claudinho
+  const cl = estado.claudinho;
+  if (cl && cl.msgIds && cl.msgIds.length) {
+    const r0 = validacaoClaudinho[cl.index];
+    addAlertaObs(estado, {
+      key: 'claudinho', tipo: '👾 BACK FAVORITO CLAUDINHO',
+      minuto: r0 ? r0.minuto : 20, placar: '0x0',
+      detalhe: r0 ? [`Favorito ${r0.nomeFav} (${fmtO(r0.oddFav)}) · chutes até o 20': ${r0.chutesFav} x ${r0.chutesOpo} · faixa ${r0.faixa}`] : [],
+      entradas: ['ENTRAR: Favorito vence · Dupla chance · Over 0,5 / 1,5 / 2,5 — mínimas no alerta do Telegram'],
+    });
+  }
+
+  // ⭐ Time forte
+  const tf = estado.timeForteInfo;
+  if (tf && estado.timeForteMsgIds && estado.timeForteMsgIds.length) {
+    addAlertaObs(estado, {
+      key: 'time_forte', tipo: `⭐ TIME FORTE — ${tf.nome}`,
+      minuto: tf.minuto, placar: '0x0',
+      detalhe: [tf.resumo],
+      entradas: (tf.entradas || []).map(l => `ENTRAR: ${l.replace(/^Over HT: /, 'Over HT — ')}`),
+    });
+  }
+
+  // Estratégias dos bots (as do "Alertas ativos" do Telegram)
+  const ROT_G1 = { atencao: '⚠️ time contra na frente', reacao: '🔄 reação confirmada', red: '❌ sem reação' };
+  const cons = estado.msgConsolidada;
+  const vistos = new Set();
+  if (cons && cons.ids && cons.ids.length) {
+    const linhasInd = montarLinhasIndicadores(cons);
+    cons.estrategias.forEach((e, i) => {
+      vistos.add(e.stratKey);
+      const st = [];
+      if (cons.entradaGreen) st.push('✅ GREEN confirmado' + (cons.entradaMinutoGreen ? ` — gol aos ${cons.entradaMinutoGreen}'` : ''));
+      else if (cons.entradaRed) st.push('❌ RED');
+      if (ROT_G1[e.grupo1Status]) st.push(ROT_G1[e.grupo1Status]);
+      if (!cons.entradaConfirmada) st.push('⏳ entrada ainda não confirmada pelo indicador');
+      addAlertaObs(estado, {
+        key: 'bot_' + e.stratKey, tipo: STRAT_DISPLAY[e.stratKey] || e.stratKey,
+        minuto: e.tempoNum, placar: e.placarAlerta, dinamico: true,
+        detalhe: i === 0 ? linhasInd : [],
+        entradas: cons.entradaSugerida ? [`ENTRAR: ${cons.entradaSugerida.texto}`] : [],
+        status: st.join(' · ') || null,
+      });
+    });
+  }
+  for (const [k, info] of Object.entries(estado.msgIds || {})) {
+    if (!info || !info.ids || !info.ids.length || vistos.has(k)) continue;
+    const mAl = parseInt(info.tempoAlerta);
+    const st = [];
+    if (ROT_G1[info.grupo1Status]) st.push(ROT_G1[info.grupo1Status]);
+    if (!info.entradaConfirmada) st.push('⏳ entrada ainda não confirmada pelo indicador');
+    if (info.avisoSaida) st.push(String(info.avisoSaida).replace(/\n/g, ' · '));
+    addAlertaObs(estado, {
+      key: 'bot_' + k, tipo: STRAT_DISPLAY[k] || k,
+      minuto: info.tempoAlerta === 'HT' ? 'HT' : (isNaN(mAl) ? tempoNum : mAl),
+      placar: info.placarAlerta || '0x0', dinamico: true,
+      detalhe: montarLinhasIndicadores(info),
+      entradas: info.entradaConfirmada ? ['Entrada confirmada pelo indicador (ver Telegram)'] : [],
+      status: st.join(' · ') || null,
+    });
+  }
+}
+
+// odds pré-jogo do mercado x justa da calculadora (Over 2,5 e BTTS) + regras do Luis
+function preJogoInfo(estado) {
+  const om = estado.oddsMercado || {}, ov = estado.overs || {};
+  const num = (v) => (v != null && isFinite(Number(v)) ? Number(v) : null);
+  const o25m = num(om.over25);
+  const o25c = num(ov.over25) != null ? pctParaOdd(Number(ov.over25)) : null;
+  // BTTS: o prelive ainda precisa mandar (oddsMercado.btts = odd; overs.btts = % da calculadora). Sem isso fica vazio.
+  const bm = [om.btts, om.ambas, om.bttsSim].map(num).find(v => v != null) ?? null;
+  const bcRaw = [ov.btts, ov.ambas, ov.bttsSim, estado.bttsCalc].map(num).find(v => v != null) ?? null;
+  const bc = bcRaw == null ? null : (bcRaw >= 10 ? pctParaOdd(bcRaw) : bcRaw);
+  let btts = null;
+  if (bm != null && bc != null) {
+    if (bm >= 2.00 && bc >= 2.10) btts = 'C2';
+    else if (bm >= 1.90 && bc >= 1.90) btts = 'C1';
+  }
+  return {
+    o25m, o25c, bm, bc, btts,
+    o25Filtro: o25m != null && o25m < 1.49,
+    regraA: o25m != null && o25m < 1.49 && o25c != null && o25c >= 1.49,
+  };
+}
+
+function preJogoHTML(estado) {
+  const p = preJogoInfo(estado);
+  const b = (txt, fundo) => `<span style="display:inline-block;font-size:11px;padding:2px 8px;border-radius:6px;margin:0 6px 4px 0;background:${fundo || '#202023'};color:#c9d1d9;">${txt}</span>`;
+  const out = [];
+  if (p.o25m != null || p.o25c != null) {
+    out.push(b(`Over 2,5 pré ${p.o25m != null ? fmtO(p.o25m) : '–'}${p.o25c != null ? ` (calc ${fmtO(p.o25c)})` : ''}`, p.o25Filtro ? '#10281a' : null));
+  }
+  if (p.bm != null || p.bc != null) {
+    out.push(b(`BTTS pré ${p.bm != null ? fmtO(p.bm) : '–'}${p.bc != null ? ` (calc ${fmtO(p.bc)})` : ''}${p.btts ? ' · ' + p.btts : ''}`, p.btts ? '#10202a' : null));
+  }
+  if (p.regraA) out.push(b('Regra A', '#0f3a22'));
+  return out.length ? `<div style="margin-bottom:8px;">${out.join('')}</div>` : '';
+}
+
+function reguaAlertaHTML(r, minTxt) {
+  const caixa = 'margin:6px 0 10px;background:#0f1d14;border:1px solid #2ea043;border-radius:8px;padding:8px 12px;font-size:13px;line-height:1.7;color:#c9d1d9;';
+  if (!r) return `<div style="${caixa}">📐 <b style="color:#3fb950;">Régua do alerta (${minTxt})</b> — sem tabela para esse placar/minuto (2+ gols ou depois do min 75)</div>`;
+  return `<div style="${caixa}">📐 <b style="color:#3fb950;">Régua do alerta (${minTxt}) — entrar só se a odd "Mais" for ≥</b> <span style="color:#8b949e;font-size:12px;">(${r.cab})</span>` +
+    (r.calcTxt ? ` <span style="color:#e3b341;font-size:12px;">· ${r.calcTxt}</span>` : '') +
+    `<br>+1 gol: ${r.mais1}<br>+2 gols: ${r.mais2}` + (r.htTxt ? `<br>HT (até o min 15): ${r.htTxt}` : '') + `</div>`;
+}
+
+function alertaBlocoHTML(a, curMin) {
+  const ht = a.minuto === 'HT';
+  const minTxt = ht ? 'HT' : `${a.minuto}'`;
+  const ha = (!ht && typeof a.minuto === 'number' && curMin >= a.minuto) ? `há ${curMin - a.minuto} min` : '';
+  const linha = (txt, estilo) => `<div style="${estilo}">${obsEsc(txt)}</div>`;
+  return `<div style="margin:8px 0 6px;background:#2a2410;border:1px solid #f0b429;border-radius:8px;padding:8px 12px;">` +
+    `<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:11px;color:#f0b429;"><b>🔔 Alertou aos ${minTxt} · placar ${obsEsc(a.placar)}</b><span>${ha} · mesmo alerta do Telegram</span></div>` +
+    `<div style="font-size:14px;font-weight:700;color:#f0b429;margin-top:2px;">${obsEsc(a.tipo)}</div>` +
+    (a.detalhe || []).filter(Boolean).map(l => linha(l, 'font-size:12px;color:#c9d1d9;')).join('') +
+    (a.entradas || []).filter(Boolean).map(l => linha('➜ ' + l, 'font-size:13px;font-weight:600;color:#f0b429;margin-top:2px;')).join('') +
+    (a.status ? linha(a.status, 'font-size:12px;color:#e3b341;margin-top:2px;') : '') +
+    `</div>` + reguaAlertaHTML(a.regua, minTxt);
+}
+
+// estatísticas do jogo (chutes e escanteios vêm dos eventos com minuto; pressão vem do resumo_pressao da API)
+function barraObs(label, a, b, suf) {
+  const t = (a + b) || 1;
+  return `<div style="margin-bottom:8px;"><div style="text-align:center;font-size:11px;color:#9a9a96;margin-bottom:2px;">${label}</div>` +
+    `<div style="display:flex;align-items:center;gap:10px;"><span style="width:44px;font-size:14px;font-weight:600;">${a}${suf || ''}</span>` +
+    `<div style="flex:1;height:6px;border-radius:3px;background:#2c2c30;display:flex;overflow:hidden;"><i style="display:block;height:100%;width:${a / t * 100}%;background:#378add;"></i><i style="display:block;height:100%;width:${b / t * 100}%;background:#7f77dd;"></i></div>` +
+    `<span style="width:44px;text-align:right;font-size:14px;font-weight:600;">${b}${suf || ''}</span></div></div>`;
+}
+
+function estatsHTML(jogo) {
+  const cur = jogo.tempo === 'Intervalo' ? 45 : (parseInt(jogo.tempo) || 0);
+  const ev = jogo.eventos || [];
+  const conta = (pred) => {
+    const r = {};
+    for (const l of ['casa', 'fora']) {
+      const x = ev.filter(e => e.lado === l && pred(e));
+      const ch = x.filter(e => OBS_TIPOS_CHUTE.includes(e.tipo_evento));
+      r[l] = {
+        chutes: ch.length,
+        noGol: ch.filter(e => e.tipo_evento === 'chute_no_gol').length,
+        fora: ch.filter(e => e.tipo_evento === 'chute_para_fora').length,
+        bloq: ch.filter(e => e.tipo_evento === 'chute_bloqueado').length,
+        trave: ch.filter(e => e.tipo_evento === 'chute_na_trave').length,
+        cantos: x.filter(e => e.tipo_evento === 'escanteio').length,
+      };
     }
+    return r;
+  };
+  const pr = (per) => {
+    const rp = jogo.resumo_pressao && jogo.resumo_pressao[per];
+    const p = rp && rp.porcentagem_pressao;
+    return p ? [Math.round(p.casa || 0), Math.round(p.fora || 0)] : null;
+  };
+  const abas = [
+    ['t', 'Total', () => true, pr('total')],
+    ['p', '1º tempo', (e) => e.periodo === '1_tempo', pr('1_tempo')],
+    ['u', 'Últ. 10m', (e) => e.minuto >= cur - 9 && e.minuto <= cur, pr('ult_10min')],
+  ];
+  const tabs = abas.map(([k, nome]) => `<button class="obs-tab" data-act="tab" data-t="${k}">${nome}</button>`).join('');
+  const panes = abas.map(([k, , pred, pres]) => {
+    const r = conta(pred);
+    const linhas = [];
+    if (pres) linhas.push(barraObs('Pressão', pres[0], pres[1], '%'));
+    linhas.push(barraObs('Total de chutes', r.casa.chutes, r.fora.chutes));
+    linhas.push(barraObs('Chutes no gol', r.casa.noGol, r.fora.noGol));
+    linhas.push(barraObs('Chutes para fora', r.casa.fora, r.fora.fora));
+    linhas.push(barraObs('Chutes bloqueados', r.casa.bloq, r.fora.bloq));
+    linhas.push(barraObs('Chutes na trave', r.casa.trave, r.fora.trave));
+    linhas.push(barraObs('Escanteios', r.casa.cantos, r.fora.cantos));
+    return `<div class="obs-pane" data-t="${k}" style="display:none;">${linhas.join('')}</div>`;
+  }).join('');
+  return `<div style="display:flex;justify-content:space-between;font-size:12px;color:#9a9a96;margin:8px 0 6px;"><span>${obsEsc(jogo.mandante)}</span><span>${obsEsc(jogo.visitante)}</span></div>` +
+    `<div style="margin-bottom:10px;">${tabs}</div>${panes}`;
+}
 
-    // 29/09 — novos destaques (Combo HT/Forte acima NÃO mudam).
-    if (estado.reforcoChutes) {
-      estiloExtra = 'border:1.5px solid #f0b429;';
-      tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">💪 Caso B + filtro de chutes (${estado.reforcoChutes.totais} chutes / ${estado.reforcoChutes.noGol} no gol no 1T)</p> `;
-    }
-    const ti = estado.tresInd;
-    if (ti?.terceiroMin != null) {
-      const f2 = (o) => o != null ? o.toFixed(2).replace('.', ',') : '-';
-      if (ti.alerta) {
-        estiloExtra = 'border:1.5px solid #f0b429;';
-        const mais2Txt = ti.mais2 ? ` · +2 gols ${ti.mercadoMais2}` : '';
-        tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores — ${ti.resumo} · ${ti.mercadoLimite}${mais2Txt}</p>`;
-      } else if (ti.sobe) {
-        // 09/11 — favorito acima de 1,6 que subiu (até o min 15, ou no intervalo)
-        estiloExtra = 'border:1.5px solid #f0b429;';
-        const a = ti.oddsAlto || {};
-        const m = ti.mercadosAlto || {};
-        let odds;
-        if (ti.sobeMotivo === 'intervalo') {
-          const partes = [];
-          if (a.lim != null) partes.push('Over limite (+1 gol)');
-          if (a.m2 != null) partes.push('+2 gols');
-          odds = ' · sobe no intervalo' + (partes.length ? ' · ' + partes.join(' · ') : '');
-        } else {
-          const partes = [];
-          if (a.ht != null) partes.push(`${m.ht}`);
-          if (a.lim != null) partes.push(`${m.lim}`);
-          if (a.m2 != null) partes.push(`+2 gols ${m.m2}`);
-          odds = ' · até o min 15' + (partes.length ? ' · ' + partes.join(' · ') : '');
-        }
-        tagHTML += `<p style="font-size:11px;font-weight:700;color:#f0b429;margin:0 0 8px;background:#f0b42920;display:inline-block;padding:3px 8px;border-radius:6px;">🔥 3 Indicadores (favorito acima de 1,6) — ${ti.resumo}${odds}</p>`;
-      } else if (ti.naoSobe) {
-        tagHTML += `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">3 Indicadores — ${ti.resumo} (favorito acima de 1,6 · depois do min 15) — ${ti.naoSobe}: não sobe</p>`;
-      } else if (ti.terceiroMin > TRES_IND_CORTE_SOBE) {
-        tagHTML += `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">3 Indicadores — ${ti.resumo} (favorito acima de 1,6 · depois do min 15) — ⏳ sobe no intervalo se não sair gol</p>`;
+function tagsObs(jogo, estado, hoje) {
+  const t = [];
+  t.push(getEstrategiasKeys(jogo, hoje).length ? 'estr' : 'sem');
+  if (estado.tendenciaGols && estado.tendenciaGols.status === 'sim') t.push('tend');
+  const of_ = oddFavoritoDoJogo(jogo);
+  if (of_ != null && of_ <= 1.6) t.push('fav');
+  const ti = estado.tresInd;
+  if (ti && ti.terceiroMin != null && ti.oddFav != null && !ti.favoritoOk) t.push('tres16');
+  const p = preJogoInfo(estado);
+  if (p.o25Filtro) t.push('o25');
+  if (p.btts) t.push('btts');
+  return t;
+}
+
+function montaCardObs(item, hoje) {
+  const { jogoId, jogo, estado, eventosHTML } = item;
+  const tempoTxt = jogo.tempo === 'Intervalo' ? 'Intervalo' : jogo.tempo === 'Encerrado' ? 'Encerrado' : `${jogo.tempo}'`;
+  const curMin = parseInt(jogo.tempo) || estado.ultimoMinuto || 0;
+  const alertas = (estado.alertasObs || []).slice().sort((a, b) => b.ts - a.ts);
+  const strats = getEstrategiasKeys(jogo, hoje);
+  const badge = getEstrategiasBadgeHTML(strats);
+  const ni = estado.novoIndicador, ti = estado.tresInd;
+
+  let estilo = (strats.length || alertas.length) ? 'border:1px solid #2c2c30;' : 'border:1px solid #202023;opacity:0.9;';
+  if (alertas.length) estilo = 'border:1.5px solid #f0b429;';
+  else if (ni && ni.semDestaqueHoraCheia) estilo = 'opacity:0.6;';
+
+  // 3 Indicadores com favorito acima de 1,6 que NÃO mandou alerta: só informação (não sobe)
+  let tagHTML = '';
+  if (ti && ti.terceiroMin != null && !ti.alerta && !ti.faEstr) {
+    const grey = (txt) => `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">${txt}</p>`;
+    if (ti.sobe) {
+      const a = ti.oddsAlto || {}, m = ti.mercadosAlto || {};
+      let odds;
+      if (ti.sobeMotivo === 'intervalo') {
+        const partes = [];
+        if (a.lim != null) partes.push('Over limite (+1 gol)');
+        if (a.m2 != null) partes.push('+2 gols');
+        odds = ' · intervalo sem gol' + (partes.length ? ' · ' + partes.join(' · ') : '');
       } else {
-        tagHTML += `<p class="obs-linha" style="font-size:12px;color:#9a9a96;">3 Indicadores — ${ti.resumo} (${ti.motivoSemAlerta || 'fora da regra'})</p>`;
+        const partes = [];
+        if (a.ht != null) partes.push(`${m.ht}`);
+        if (a.lim != null) partes.push(`${m.lim}`);
+        if (a.m2 != null) partes.push(`+2 gols ${m.m2}`);
+        odds = ' · até o min 15' + (partes.length ? ' · ' + partes.join(' · ') : '');
       }
+      tagHTML += grey(`🔥 3 Indicadores (favorito acima de 1,6) — ${ti.resumo}${odds}`);
+    } else if (ti.naoSobe) {
+      tagHTML += grey(`3 Indicadores — ${ti.resumo} (favorito acima de 1,6 · depois do min 15) — ${ti.naoSobe}`);
+    } else if (ti.terceiroMin > TRES_IND_CORTE_SOBE) {
+      tagHTML += grey(`3 Indicadores — ${ti.resumo} (favorito acima de 1,6 · depois do min 15) — ⏳ vale no intervalo se não sair gol`);
+    } else {
+      tagHTML += grey(`3 Indicadores — ${ti.resumo} (${ti.motivoSemAlerta || 'fora da regra'})`);
     }
+  }
 
-    const strats = getEstrategiasKeys(jogo, hoje);
-    const badgeEstrategias = getEstrategiasBadgeHTML(strats);
-    const calcHTML = comEstrategia
-      ? calculadoraCompleta(estado)
-      : mediaProximoGolHTML(jogo, estado);
-    const calcBloco = calcHTML
-      ? `<p class="obs-linha" style="margin-top:8px;background:#101012;border-radius:8px;padding:6px 10px;font-size:12px;color:#9a9a96;">${calcHTML}</p>`
-      : '';
+  const calcHTML = (strats.length || alertas.length) ? calculadoraCompleta(estado) : mediaProximoGolHTML(jogo, estado);
+  const calcBloco = calcHTML
+    ? `<p class="obs-linha" style="margin-top:8px;background:#101012;border-radius:8px;padding:6px 10px;font-size:12px;color:#9a9a96;">${calcHTML}</p>`
+    : '';
+  const reguaAtual = (!alertas.length && (tagHTML || badge)) ? minimasHTML(estado) : '';
 
-    return `<div class="ms-jogo" style="${estiloExtra}">
+  return `<div class="ms-jogo obs-card" data-id="${obsEsc(jogoId)}" style="${estilo}">
       <div class="ms-jogo-header">
         <p class="ms-jogo-nome">${nomesComOdd(jogo)}${chipTendenciaHTML(estado)}${chipCalculadoHTML(estado)}</p>
         <p class="ms-muted ms-small">${tempoTxt} &middot; placar ${jogo.gols_casa}x${jogo.gols_fora}</p>
       </div>
-      ${tagHTML}
-      ${badgeEstrategias}
-      ${(tagHTML || badgeEstrategias) ? minimasHTML(estado) : ''}
+      ${preJogoHTML(estado)}
+      ${alertas.map(a => alertaBlocoHTML(a, curMin)).join('')}
+      ${tagHTML}${badge}${reguaAtual}
       ${eventosHTML}
-      ${calcBloco}
-      ${tendenciaCantosHTML(estado)}
-      ${padraoMin10HTML(estado)}
+      ${calcBloco}${tendenciaCantosHTML(estado)}${padraoMin10HTML(estado)}
+      <button class="obs-sbtn" data-act="stats">Mostrar estatísticas</button>
+      <div class="obs-stats" style="display:none;">${estatsHTML(jogo)}</div>
     </div>`;
-  }
+}
 
-  const comEstrategia = [];
-  const semEstrategia = [];
-
-  for (const [jogoId, estado] of jogosAtivos) {
+function montarObservador(sel) {
+  const hoje = dataHoje();
+  const ativos = Object.entries(estadoLive).filter(([, e]) => !e.encerrado && e.jogo);
+  const comAlerta = [], outros = [];
+  for (const [jogoId, estado] of ativos) {
     const jogo = estado.jogo;
-    const eventosHTML = obsBlocoIndicadores(jogo, estado, hoje);
-    const strats = getEstrategiasKeys(jogo, hoje);
-    const temEstrategia = strats.length > 0;
+    const item = { jogoId, jogo, estado, eventosHTML: obsBlocoIndicadores(jogo, estado, hoje), tags: tagsObs(jogo, estado, hoje) };
+    ((estado.alertasObs || []).length ? comAlerta : outros).push(item);
+  }
+  const ultimoTs = (it) => Math.max(...it.estado.alertasObs.map(a => a.ts || 0));
+  comAlerta.sort((a, b) => ultimoTs(b) - ultimoTs(a));
 
-    if (temEstrategia || estado.tresInd?.sobe) {
-      comEstrategia.push({ jogo, estado, eventosHTML, comboForte: !!estado.novoIndicador?.comboTag || !!estado.reforcoChutes || !!estado.tresInd?.alerta || !!estado.tresInd?.sobe });
-    } else {
-      const temIndicador = !eventosHTML.includes('Nenhum indicador bateu ainda') || !!estado.tendenciaCantos || !!estado.padraoMin10 || estado.tresInd?.terceiroMin != null; // 29/09 · 15/10 padrão min10
-      if (temIndicador) semEstrategia.push({ jogo, estado, eventosHTML });
+  const counts = {};
+  for (const f of OBS_FILTROS) counts[f] = f === 'tudo' ? outros.length : outros.filter(it => it.tags.includes(f)).length;
+
+  const alertas = `<p class="obs-sec" style="margin-top:0;">Alertas ativos (sobem) — ${comAlerta.length} jogo(s) · o mais recente em cima</p>` +
+    (comAlerta.length ? comAlerta.map(it => montaCardObs(it, hoje)).join('') : '<p class="ms-muted ms-small">Nenhum alerta do Telegram ativo agora.</p>');
+
+  let jogos;
+  if (!sel.length) {
+    jogos = '<p class="ms-muted" style="margin:16px 0;">Escolha um filtro acima pra ver os jogos.</p>';
+  } else {
+    const lista = outros.filter(it => sel.includes('tudo') || sel.some(f => it.tags.includes(f)));
+    lista.sort((a, b) => (b.tags.includes('estr') ? 1 : 0) - (a.tags.includes('estr') ? 1 : 0) || (parseInt(b.jogo.tempo) || 0) - (parseInt(a.jogo.tempo) || 0));
+    jogos = lista.length
+      ? `<p class="obs-sec">Jogos dos filtros marcados — ${lista.length} jogo(s)</p>` + lista.map(it => montaCardObs(it, hoje)).join('')
+      : '<p class="ms-muted" style="margin:16px 0;">Nenhum jogo nesses filtros agora.</p>';
+  }
+  return {
+    alertas, jogos, counts, hora: horaBRT(),
+    titulo: `🔍 Observador — ${ativos.length} jogo(s) ao vivo · não manda nada, só pra acompanhar`,
+  };
+}
+
+const OBS_CSS = `
+    .obs-sec { font-size:12px; font-weight:600; color:#9a9a96; margin:18px 0 8px; text-transform:uppercase; letter-spacing:.04em; }
+    .obs-chip { font-size:13px; padding:6px 12px; border-radius:8px; border:1px solid #3a3a40; background:transparent; color:#9a9a96; cursor:pointer; margin:0 8px 8px 0; }
+    .obs-chip.on { background:#0f6e56; border-color:#0f6e56; color:#fff; font-weight:600; }
+    .obs-sbtn { font-size:12px; margin-top:10px; padding:5px 10px; border-radius:8px; border:1px solid #3a3a40; background:transparent; color:#c9d1d9; cursor:pointer; }
+    .obs-stats { margin-top:10px; border-top:1px solid #2c2c30; padding-top:10px; }
+    .obs-tab { font-size:12px; padding:4px 10px; border-radius:8px; border:1px solid #3a3a40; background:transparent; color:#9a9a96; cursor:pointer; margin-right:6px; }
+    .obs-tab.on { background:#1f3a5f; border-color:#1f3a5f; color:#fff; font-weight:600; }
+    .obs-linha { margin:4px 0; font-size:13px; }
+`;
+
+const OBS_JS = `<script>
+(function(){
+  var KF='futats_obs_filtros', KS='futats_obs_estado';
+  var CH=[['tudo','Tudo'],['estr','Jogos com estratégia'],['sem','Sem estratégia'],['tend','Tendência de gols'],['fav','Favorito até 1,60'],['tres16','3 ind. fav > 1,60'],['o25','Over 2,5 pré < 1,49'],['btts','BTTS']];
+  function ld(k){try{var v=localStorage.getItem(k);return v?JSON.parse(v):{}}catch(e){return {}}}
+  function sv(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}
+  var F=ld(KF), ST=ld(KS), counts={};
+  function chips(){
+    var h='';
+    for(var i=0;i<CH.length;i++){
+      var k=CH[i][0], on=F[k]?1:0;
+      h+='<button class="obs-chip'+(on?' on':'')+'" data-act="f" data-f="'+k+'">'+(on?'✓ ':'')+CH[i][1]+' ('+(counts[k]||0)+')</button>';
+    }
+    document.getElementById('obs-chips').innerHTML=h;
+  }
+  function aplica(){
+    var cs=document.querySelectorAll('.obs-card');
+    for(var i=0;i<cs.length;i++){
+      var c=cs[i], id=c.getAttribute('data-id'), s=ST[id]||{}, t=s.t||'t';
+      var box=c.querySelector('.obs-stats'); if(box) box.style.display=s.s?'block':'none';
+      var b=c.querySelector('.obs-sbtn'); if(b) b.textContent=s.s?'Ocultar estatísticas':'Mostrar estatísticas';
+      var tabs=c.querySelectorAll('.obs-tab');
+      for(var j=0;j<tabs.length;j++){ tabs[j].classList.toggle('on', tabs[j].getAttribute('data-t')===t); }
+      var ps=c.querySelectorAll('.obs-pane');
+      for(var j=0;j<ps.length;j++){ ps[j].style.display=(ps[j].getAttribute('data-t')===t)?'block':'none'; }
     }
   }
+  function carrega(){
+    var f=Object.keys(F).join(',');
+    fetch('/observador/fragmento?f='+encodeURIComponent(f),{cache:'no-store'}).then(function(r){return r.json()}).then(function(d){
+      document.getElementById('obs-alertas').innerHTML=d.alertas;
+      document.getElementById('obs-jogos').innerHTML=d.jogos;
+      document.getElementById('obs-cnt').textContent=d.titulo;
+      counts=d.counts||{}; chips(); aplica();
+      document.getElementById('obs-upd').textContent='Atualizado às '+d.hora+' · próxima atualização em 30s';
+    }).catch(function(){ document.getElementById('obs-upd').textContent='Falha ao atualizar — tentando de novo em 30s'; });
+  }
+  document.addEventListener('click',function(e){
+    var el=e.target.closest('[data-act]'); if(!el) return;
+    var a=el.getAttribute('data-act');
+    if(a==='f'){ var k=el.getAttribute('data-f'); if(F[k]) delete F[k]; else F[k]=1; sv(KF,F); chips(); carrega(); return; }
+    var c=el.closest('.obs-card'); if(!c) return;
+    var id=c.getAttribute('data-id'); var s=ST[id]||(ST[id]={});
+    if(a==='stats'){ s.s=!s.s; } else if(a==='tab'){ s.t=el.getAttribute('data-t'); s.s=true; }
+    sv(KS,ST); aplica();
+  });
+  chips(); carrega(); setInterval(carrega,30000);
+})();
+</script>`;
 
-  comEstrategia.sort((a, b) => (b.comboForte ? 1 : 0) - (a.comboForte ? 1 : 0));
+app.get('/observador/fragmento', (req, res) => {
+  try {
+    const sel = String(req.query.f || '').split(',').filter(f => OBS_FILTROS.includes(f));
+    res.set('Cache-Control', 'no-store');
+    res.json(montarObservador(sel));
+  } catch (e) {
+    console.error('[observador] fragmento:', e.message);
+    res.status(500).json({ erro: e.message });
+  }
+});
 
-  const blocoComEstrategia = comEstrategia
-    .map(x => montaCard(x.jogo, x.estado, true, x.eventosHTML)).join('');
-  const blocoSemEstrategia = semEstrategia
-    .map(x => montaCard(x.jogo, x.estado, false, x.eventosHTML)).join('');
-
-  const tituloComEstrategia = `<p class="ms-periodo" style="margin-top:0;">Com estratégia / Seleção IA &mdash; ${comEstrategia.length} jogo(s)</p>`;
-  const tituloSemEstrategia = `<p class="ms-periodo">Sem estratégia &mdash; só aparecem quando algum indicador bate &mdash; ${semEstrategia.length} jogo(s)</p>`;
-
-  const corpo =
-    (comEstrategia.length ? tituloComEstrategia + blocoComEstrategia : '<p class="ms-muted ms-small">Nenhum jogo com estratégia/Seleção IA ao vivo agora.</p>') +
-    (semEstrategia.length ? tituloSemEstrategia + blocoSemEstrategia : '');
-
-  res.send(msPaginaHTML(`<p class="ms-muted" style="margin-bottom:12px;">🔍 Observador — ${jogosAtivos.length} jogo(s) ao vivo · não manda nada, só pra acompanhar</p><p style="margin-bottom:16px;"><a href="/observador/historico" style="color:#4fd1c5;">📜 Ver histórico de hoje</a> &middot; <a href="/combo-possiveis" style="color:#4fd1c5;">⭐ Combos possíveis do dia</a></p>${corpo}`));
+app.get('/observador', (req, res) => {
+  const shell =
+    `<p class="ms-muted" id="obs-cnt" style="margin-bottom:12px;">🔍 Observador — carregando…</p>` +
+    `<p style="margin-bottom:16px;"><a href="/observador/historico" style="color:#4fd1c5;">📜 Ver histórico de hoje</a> &middot; <a href="/combo-possiveis" style="color:#4fd1c5;">⭐ Combos possíveis do dia</a></p>` +
+    `<div id="obs-alertas"></div>` +
+    `<p class="obs-sec" style="margin-top:22px;">Filtros — mostra pelo menos um dos marcados</p>` +
+    `<div id="obs-chips"></div><p id="obs-upd" class="ms-muted ms-small"></p>` +
+    `<div id="obs-jogos"></div>`;
+  res.send(msPaginaHTML(shell, { semRefresh: true, css: OBS_CSS, script: OBS_JS }));
 });
 
 // ════════════════════════════════════════════════════════════════
@@ -4107,7 +4461,7 @@ app.get('/observador/historico', (req, res) => {
 });
 
 app.get('/', (req, res) => res.json({
-  status: 'ok', version: 'server_88',
+  status: 'ok', version: 'server_94',
   pendentes: pendentes.filter(p => p.result === 'pendente').length,
   jogos_live: Object.keys(estadoLive).filter(k => !estadoLive[k].encerrado).length,
   uptime: Math.floor(process.uptime()) + 's'
@@ -4264,10 +4618,10 @@ function msHTMLJogo(jogo) {
   return html;
 }
 
-function msPaginaHTML(corpo) {
+function msPaginaHTML(corpo, opts = {}) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="30">
+  ${opts.semRefresh ? '' : '<meta http-equiv="refresh" content="30">'}
   <title>FUTATS — Momentum Status</title>
   <style>
     body { background:#0e0e10; color:#e8e8e6; font-family:-apple-system,Segoe UI,Roboto,sans-serif; margin:0; padding:16px; }
@@ -4289,10 +4643,11 @@ function msPaginaHTML(corpo) {
     .ms-small { font-size:11px; }
     .ms-chutes { margin-top:8px; background:#18181b; border-radius:8px; padding:8px; display:grid; grid-template-columns:repeat(4,1fr); gap:4px; text-align:center; }
     .ms-num { font-size:14px; font-weight:600; }
-    .ms-empty { color:#9a9a96; font-size:14px; }
+    .ms-empty { color:#9a9a96; font-size:14px; }${opts.css || ''}
   </style></head><body>
   <h1>FUTATS — Momentum Status <span style="color:#9a9a96;font-weight:400;">(atualiza a cada 30s)</span></h1>
   ${corpo}
+  ${opts.script || ''}
   </body></html>`;
 }
 
@@ -4570,7 +4925,7 @@ app.get('/buscar-agora', async (req, res) => {
 });
 
 app.listen(PORT, async () => {
-  console.log(`FUTATS Server v88 na porta ${PORT}`);
+  console.log(`FUTATS Server v94 na porta ${PORT}`);
 
   await buscarPreJogo();
 
@@ -4585,7 +4940,8 @@ app.listen(PORT, async () => {
   agendarHoraBRT(0,  0, enviarResumoECard);
 
   await sendTelegram(
-    '🚀 <b>FUTATS Server v93 iniciado!</b>\n' +
+    '🚀 <b>FUTATS Server v94 iniciado!</b>\n' +
+    '🆕 🔍 Observador novo (só página, nada muda nos alertas): alertas do Telegram sobem no topo com o minuto e a régua do minuto do alerta · filtros "pelo menos um" · indicadores por tempo · estatísticas por tempo escondidas até abrir · atualiza a cada 30s sem perder filtros\n' +
     '🆕 👾 Alerta BACK FAVORITO CLAUDINHO (validação): aos 20\' em 0x0, favorito com odd acima de 1,30 e 5+ chutes a mais que o adversário até o min 20 → odds justas/mínimas de Favorito vence, Dupla chance, Over 0,5, Over 1,5 e Over 2,5, com resultado automático no fim do jogo\n' +
     '🆕 🔥 3 Indicadores com favorito ACIMA de 1,6 + Ambas Marcam xG ou Felipe Over 1,5 (estratégias pré-jogo): agora alerta no Telegram com a odd justa e a MÍNIMA do minuto do alerta — 0x0 → Over 1,5 (jogo todo); com 1 gol → Over 1,5 (+1 gol) e Over 2,5 (+2 gols). Sem Over HT. Tem GREEN/RED automático (validação, amostra pequena). Seleção IA não entra\n' +
     '🆕 ⭐ Alerta TIME FORTE: quando um superfavorito (odd até 1,30) da lista (Man City, Real Madrid, Always Ready, Al-Nassr, Dinamo, Levadia, Shakhtar, PSV, Bodø/Glimt, Al-Hilal; Over 1,5 HT só nos 5 primeiros) tem o 1º indicador em 0x0 até o min 15, manda o mapa do time e as odds mínimas de Over HT / Over 1,5 HT\n' +
